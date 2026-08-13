@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, ApiError } from './api.js';
+import { api, ApiError, type BootstrapInfo } from './api.js';
 import { ChatStream } from './stream.js';
 import { currentSooyaClient, type SooyaClient } from './sooyaClient.js';
 import { fetchAllMessagePages, replaceFailedMessage } from './messageSync.js';
@@ -8,6 +8,42 @@ import type { ActivityState, ChatMessage, ConnectionState, LifeState, PersonaInf
 const PAGE_SIZE = 30;
 /** Matches the server's `?since=` cap; catch-up walks pages of this size. */
 const CATCHUP_PAGE_SIZE = 100;
+const DEFAULT_PERSONA: PersonaInfo = { name: 'SOOYA', avatar: '/avatars/sooya.svg', userAvatar: '/avatars/user.svg', tagline: '' };
+const INCOMPLETE_BOOTSTRAP_ERROR = '聊天数据不完整，请重试';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+/**
+ * Bootstrap is a runtime boundary. Validate the fields the chat immediately
+ * consumes so malformed native/cache data produces a stable retryable error,
+ * not a JavaScript TypeError from a later property access.
+ */
+function normalizeBootstrap(boot: unknown): BootstrapInfo {
+  if (!isRecord(boot) || !isRecord(boot.messages) || !Array.isArray(boot.messages.messages) || typeof boot.messages.hasMore !== 'boolean' || typeof boot.messages.lastEventSeq !== 'number' || typeof boot.messages.lastMessageSeq !== 'number' || !Array.isArray(boot.stickers) || !isRecord(boot.life) || !isRecord(boot.presence)) {
+    throw new Error(INCOMPLETE_BOOTSTRAP_ERROR);
+  }
+  return boot as unknown as BootstrapInfo;
+}
+
+function nonEmptyString(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() ? value : fallback;
+}
+
+/**
+ * An old cache or a partially written local payload can omit
+ * conversation/persona even though the TypeScript contract requires it.
+ */
+function personaFromBootstrap(boot: { conversation?: { persona?: Partial<PersonaInfo> | null } } | null | undefined): PersonaInfo {
+  const candidate = boot?.conversation?.persona;
+  return {
+    name: nonEmptyString(candidate?.name, DEFAULT_PERSONA.name),
+    avatar: nonEmptyString(candidate?.avatar, DEFAULT_PERSONA.avatar),
+    userAvatar: nonEmptyString(candidate?.userAvatar, DEFAULT_PERSONA.userAvatar),
+    tagline: typeof candidate?.tagline === 'string' ? candidate.tagline : DEFAULT_PERSONA.tagline
+  };
+}
 export type QuotedMessageState = { status: 'loading' | 'ready' | 'missing' | 'error'; message?: ChatMessage };
 export interface ReplyFailureCard { batchId: string; revision: number; code: string; retryable: boolean; message: string; partial?: boolean; }
 export interface StreamingDraft {
@@ -219,8 +255,8 @@ export function useChat(client: SooyaClient | null = currentSooyaClient()) {
     setReady(false); setConnection('connecting'); setError(null);
     try {
       maxSeqRef.current = 0; clearStreamingDraft(); quotedStatesRef.current.clear(); quotedRequestsRef.current.clear(); setQuotedStates({});
-      const boot = await dataClient.bootstrap();
-      setPersona(boot.conversation.persona); trackSeq(boot.messages.messages); setMessages(boot.messages.messages); setHasMore(boot.messages.hasMore); setLife(boot.life); setPresence(boot.presence); setStickers(boot.stickers); streamRef.current?.setLastEventId?.(boot.messages.lastEventSeq); updateActivity({ thinking: false, label: null }); setError(null); setReady(true);
+      const boot = normalizeBootstrap(await dataClient.bootstrap());
+      setPersona(personaFromBootstrap(boot)); trackSeq(boot.messages.messages); setMessages(boot.messages.messages); setHasMore(boot.messages.hasMore); setLife(boot.life); setPresence(boot.presence); setStickers(boot.stickers); streamRef.current?.setLastEventId?.(boot.messages.lastEventSeq); updateActivity({ thinking: false, label: null }); setError(null); setReady(true);
       startStream(boot.messages.lastEventSeq);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) setConnection('unauthorized'); else { setConnection('offline'); setError((err as Error).message); }
@@ -233,9 +269,9 @@ export function useChat(client: SooyaClient | null = currentSooyaClient()) {
     let cancelled = false;
     void (async () => {
       try {
-        const boot = await dataClient.bootstrap();
+        const boot = normalizeBootstrap(await dataClient.bootstrap());
         if (cancelled) return;
-        setPersona(boot.conversation.persona); applyMessages(boot.messages.messages); setHasMore(boot.messages.hasMore); setLife(boot.life); setPresence(boot.presence); setStickers(boot.stickers); setReady(true);
+        setPersona(personaFromBootstrap(boot)); applyMessages(boot.messages.messages); setHasMore(boot.messages.hasMore); setLife(boot.life); setPresence(boot.presence); setStickers(boot.stickers); setReady(true);
         startStream(boot.messages.lastEventSeq);
       } catch (err) {
         if (cancelled) return;

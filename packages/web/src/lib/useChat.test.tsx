@@ -322,6 +322,26 @@ describe('useChat 首屏挂载', () => {
     expect(chat().ready).toBe(true);
     expect(streamUrls()).toEqual([]);
   });
+
+  it('tolerates a bootstrap payload without conversation', async () => {
+    stubRoutes({ bootstrap: () => json({ ...bootstrapInfo(), conversation: undefined }) });
+    const chat = await mountChat();
+
+    expect(chat().ready).toBe(true);
+    expect(chat().error).toBeNull();
+    expect(chat().persona?.name).toBe('SOOYA');
+    expect(chat().connection).toBe('online');
+  });
+
+  it('reports an incomplete bootstrap without exposing a raw TypeError', async () => {
+    stubRoutes({ bootstrap: () => json(null) });
+    const chat = await mountChat();
+
+    expect(chat().connection).toBe('offline');
+    expect(chat().error).toBe('聊天数据不完整，请重试');
+    expect(chat().error).not.toContain('Cannot read properties');
+    expect(chat().ready).toBe(true);
+  });
 });
 
 describe('useChat send()', () => {
@@ -593,7 +613,7 @@ describe('useChat 其他事件分派', () => {
       bootstrap: () => {
         boots += 1;
         if (boots === 1) return json(bootstrapInfo());
-        return json(bootstrapInfo({ messages: { messages: [message({ id: 'm_9', seq: 9 })], hasMore: false, lastEventSeq: 60, lastMessageSeq: 9, oldestSeq: 9 } }));
+        return json(bootstrapInfo({ conversation: undefined, messages: { messages: [message({ id: 'm_9', seq: 9 })], hasMore: false, lastEventSeq: 60, lastMessageSeq: 9, oldestSeq: 9 } }));
       }
     });
     await push('reply.thinking', {});
@@ -603,6 +623,8 @@ describe('useChat 其他事件分派', () => {
     // reload 是整屏重置：列表换成新载荷，翻页标记和活动状态一起归零。
     expect(chat().messages.map((m) => m.id)).toEqual(['m_9']);
     expect(chat().hasMore).toBe(false);
+    expect(chat().persona?.name).toBe('SOOYA');
+    expect(chat().error).toBeNull();
     expect(chat().activity).toEqual({ thinking: false, label: null });
   });
 
