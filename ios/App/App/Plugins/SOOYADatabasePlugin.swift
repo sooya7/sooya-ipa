@@ -369,14 +369,14 @@ final class SOOYADatabaseStore {
         try lock.sooyaWithLock {
             let connection = try requireConnectionLocked()
             try validateSQL(sql)
-            let before = sqlite3_total_changes64(connection)
+            let before = Int64(sqlite3_total_changes(connection))
             let code = sqlite3_exec(connection, sql, nil, nil, nil)
             guard code == SQLITE_OK else {
                 throw sqliteError(connection, operation: "execute", fallbackCode: code)
             }
             return SOOYAExecuteResult(
-                changes: sqlite3_changes64(connection),
-                totalChanges: sqlite3_total_changes64(connection) - before
+                changes: Int64(sqlite3_changes(connection)),
+                totalChanges: Int64(sqlite3_total_changes(connection)) - before
             )
         }
     }
@@ -404,7 +404,7 @@ final class SOOYADatabaseStore {
             guard statements.count <= 10_000 else {
                 throw SOOYADatabaseError.invalidRequest
             }
-            let before = sqlite3_total_changes64(connection)
+            let before = Int64(sqlite3_total_changes(connection))
             try executeTransactionControlLocked(connection, sql: mode.beginSQL)
 
             do {
@@ -418,7 +418,7 @@ final class SOOYADatabaseStore {
                 try executeTransactionControlLocked(connection, sql: "COMMIT")
                 return SOOYATransactionResult(
                     results: results,
-                    totalChanges: sqlite3_total_changes64(connection) - before
+                    totalChanges: Int64(sqlite3_total_changes(connection)) - before
                 )
             } catch {
                 try? executeTransactionControlLocked(connection, sql: "ROLLBACK")
@@ -619,7 +619,7 @@ final class SOOYADatabaseStore {
             throw sqliteError(connection, operation: "run", fallbackCode: code)
         }
         return SOOYARunResult(
-            changes: sqlite3_changes64(connection),
+            changes: Int64(sqlite3_changes(connection)),
             lastInsertRowID: sqlite3_last_insert_rowid(connection)
         )
     }

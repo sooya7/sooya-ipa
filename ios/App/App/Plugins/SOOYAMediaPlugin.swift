@@ -148,7 +148,9 @@ final class SOOYAMediaStore {
         }
         do {
             let value = try decoder.decode(SOOYAMediaMetadata.self, from: Data(contentsOf: sidecar))
-            guard value.id == id, value.bytes == try fileSize(object) else { throw SOOYAMediaError.corruptMetadata }
+            guard value.id == id else { throw SOOYAMediaError.corruptMetadata }
+            let size = try fileSize(object)
+            guard value.bytes == size else { throw SOOYAMediaError.corruptMetadata }
             return value
         } catch let error as SOOYAMediaError { throw error }
         catch { throw SOOYAMediaError.corruptMetadata }
