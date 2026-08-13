@@ -24,11 +24,11 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		5A0000000000000000000001 /* SOOYADatabasePlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Plugins/SOOYADatabasePlugin.swift; sourceTree = "<group>"; };
-		5A0000000000000000000002 /* SOOYAHttpPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Plugins/SOOYAHttpPlugin.swift; sourceTree = "<group>"; };
-		5A0000000000000000000003 /* SOOYAMcpPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Plugins/SOOYAMcpPlugin.swift; sourceTree = "<group>"; };
-		5A0000000000000000000004 /* SOOYAMediaPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Plugins/SOOYAMediaPlugin.swift; sourceTree = "<group>"; };
-		5A0000000000000000000005 /* SOOYASecretsPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Plugins/SOOYASecretsPlugin.swift; sourceTree = "<group>"; };
+		5A0000000000000000000001 /* SOOYADatabasePlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SOOYADatabasePlugin.swift; sourceTree = "<group>"; };
+		5A0000000000000000000002 /* SOOYAHttpPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SOOYAHttpPlugin.swift; sourceTree = "<group>"; };
+		5A0000000000000000000003 /* SOOYAMcpPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SOOYAMcpPlugin.swift; sourceTree = "<group>"; };
+		5A0000000000000000000004 /* SOOYAMediaPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SOOYAMediaPlugin.swift; sourceTree = "<group>"; };
+		5A0000000000000000000005 /* SOOYASecretsPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SOOYASecretsPlugin.swift; sourceTree = "<group>"; };
 		2FAD9762203C412B000D30F8 /* config.xml */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = config.xml; sourceTree = "<group>"; };
 		50379B222058CBB4000EE86E /* capacitor.config.json */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.json; path = capacitor.config.json; sourceTree = "<group>"; };
 		504EC3041FED79650016851F /* App.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = App.app; sourceTree = BUILT_PRODUCTS_DIR; };

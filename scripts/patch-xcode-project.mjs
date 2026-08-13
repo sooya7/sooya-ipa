@@ -58,10 +58,10 @@ async function main() {
       `$1${buildFileEntries}\n`
     );
 
-    // 2. PBXFileReference entries (path Plugins/<name>, sourceTree <group>)
+    // 2. PBXFileReference entries (relative to the Plugins group)
     const fileRefEntries = fileRefs
       .map(({ name, fileRef }) =>
-        `\t\t${fileRef} /* ${name} */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Plugins/${name}; sourceTree = "<group>"; };`)
+        `\t\t${fileRef} /* ${name} */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ${name}; sourceTree = "<group>"; };`)
       .join('\n');
     content = content.replace(
       /(\/\* Begin PBXFileReference section \*\/\n)/,
