@@ -1,39 +1,97 @@
 # SOOYA-IPA 交接文档(HANDOFF)
 
-> 最后更新:2026-08-13。给后续任何开发代理(Codex/ZCode)的完整状态说明。
-> 总方案:`docs/sooya-iphone-migration-plan.md`(20 个 Task)。本仓库是 **IPA 版**(iPhone 全本地),服务器版在 `sooya7/sooya` 仓库(继续运行,main 不动)。
+> 最后更新:2026-08-13(含 GitHub 推送 + iOS 构建验证)。
+> **给后续任何开发代理(Codex/ZCode)**:先读本文件,再读 `docs/sooya-iphone-migration-plan.md`(总方案,20 个 Task),最后 `git log --oneline` 看提交历史。所有进度都在磁盘和 git 里,不需要依赖任何人的会话记忆。
 
-## 1. 当前进度(按方案 Task)
+---
+
+## 1. 项目概览
+
+SOOYA 有两个仓库,职责分离:
+
+| 仓库 | 位置 | 角色 | 状态 |
+|---|---|---|---|
+| `sooya7/sooya` | `C:\Users\iulze\Desktop\sooya` | **服务器版**(Node/Fastify/Ombre MCP),线上运行 | main 不动,继续服役直到 cutover T9 |
+| `sooya7/sooya-ipa` | `C:\Users\iulze\Desktop\sooya-ipa` | **IPA 版**(iPhone 全本地),本仓库 | 主战场,12 commits,CI + iOS 构建全绿 |
+
+**最终目标**(方案 §1):聊天、Life、动态、记忆、MCP、Tool Runtime、模型、媒体、SQLite、配置全在 iPhone 本地;服务器只提供 IPA 和 OTA 静态文件。**明确不做**:主动消息、APNs、Push、本地通知、服务器业务 API。
+
+---
+
+## 2. 当前状态(2026-08-13)
 
 ### ✅ 已完成并验证
-- **Task 1/2/3**:core contracts、platform interfaces、async db repos — core 17 文件/72 测试全绿,boundary test 锁死 Node 边界
-- **Task 4/5/6/9/11 的 Native 层**:5 个 Swift 插件(SOOYADatabase/Secrets/Http/Mcp/Media)+ XCTest 套件;pbxproj 已注入插件(见 scripts/patch-xcode-project.mjs,幂等);entitlements/ATS/packageClassList 已配
-- **iOS 编译已验证**:2026-08-13 GitHub Actions(macOS)成功产出 unsigned IPA(2.68 MB artifact `SOOYA-unsigned-ipa`)。过程中修掉:SPM 无 workspace(用 -project/-scheme + 共享 App.xcscheme)、Plugins group 挂载路径、FileReference 相对路径、`sqlite3_changes64` 需 iOS 15.4(换 32 位 API)、Media 插件 guard 语法
-- **Task 7 骨架**:SooyaClient 接口 + LocalEventBus + LocalSooyaClient + TestLocalClient + nativeBoot(LocalCore ↔ Capacitor 插件接线,App 生命周期 + 键盘 inset)
-- **Task 12/14 逻辑层**:life catch-up、moment-policy、local-task-scheduler 已在 core(有测试)
-- **Task 16 基础**:Capacitor 8 工程(com.sooya.app,无 server.url)、safe-area/keyboard CSS 变量(--sooya-safe-top/-bottom/--sooya-keyboard-height)
-- **Task 17/18 工具层**:migration-tools(portable 导出/校验/回滚、OTA manifest)10/10 测试
-- **服务器版记忆修复已上线**:sooya7/sooya main `c2c903c`(零调用假成功→skipped/uncertain),CI 全绿
-- **仓库已推送 GitHub**:`sooya7/sooya-ipa`(private),CI 4 job 全绿 + ios-build 成功
+- **Task 1/2/3**:core contracts、platform interfaces、async db repos — core **17 文件/72 测试**全绿;boundary test 锁死 Node 依赖(生产 Core 零 Node import)
+- **Task 4/5/6/9/11 的 Native 层**:5 个 Swift 插件 + XCTest 套件:
+  - `SOOYADatabasePlugin`(SQLite C API:WAL、FTS5 trigram 探测、批量事务、backup/restore、integrity)
+  - `SOOYASecretsPlugin`(Keychain,**只有 has/set/delete,无 get**;accessGroup 探测;错误不泄漏 secret)
+  - `SOOYAHttpPlugin`(URLSession:SSE、重定向剥 Authorization、timeout/abort、生产拒绝明文)
+  - `SOOYAMcpPlugin`(streamable-http + legacy fallback、分页、Bearer/OAuth token 引用)
+  - `SOOYAMediaPlugin`(沙盒原子写、SHA256、缩略图、路径穿越拒绝)
+- **iOS 编译已验证**:GitHub Actions(macOS)成功产出 unsigned IPA(artifact `SOOYA-unsigned-ipa`,2.68 MB)。过程中修掉的问题见 §5「踩过的坑」
+- **Task 7 骨架**:`SooyaClient` 接口 + `LocalEventBus` + `LocalSooyaClient` + `TestLocalClient` + `nativeBoot.ts`(LocalCore ↔ Capacitor 插件接线、App 生命周期、键盘 inset)
+- **LocalCore 骨架**(`packages/core/src/app/local-core.ts`):SooyaClient 15 方法全部实现(读路径全走本地 repo;send/withdraw/upload 最小可用;onAppActive/onAppInactive 生命周期)
+- **Task 12/14 逻辑层**:`life/catch-up`、`moments/moment-policy`、`jobs/local-task-scheduler` 已在 core(有测试)
+- **Task 16 基础**:Capacitor 8 工程(`com.sooya.app`,无 `server.url`)、safe-area/keyboard CSS 变量(`--sooya-safe-top/-bottom/--sooya-keyboard-height`)
+- **Task 17/18 工具层**:`migration-tools`(portable 导出/校验/回滚、OTA manifest)10/10 测试;`scripts/` 4 个 CLI + `patch-xcode-project.mjs`
+- **服务器版记忆修复已上线**:`sooya7/sooya` main `c2c903c`(零调用假成功→skipped/uncertain),CI 全绿,自动部署
+- **仓库已推送 GitHub**:`sooya7/sooya-ipa`(**private**),CI 4 job 全绿 + ios-build 成功
 
-### ❌ 未完成(建议顺序)
-1. **sooya-ipa 推 GitHub** → 触发 ci.yml + ios-build.yml(macOS 编译 unsigned IPA,验证 Swift 插件;Windows 本地无法 xcodebuild)
-2. **Task 6:Provider 移植** — server 的 OpenAI/Anthropic/OpenAI-compatible/Embedding/Image/Fish 搬进 core,`fetch`→HttpTransport
-3. **Task 8:Reply/Core 移植** — Context/Summary/Replier/ReplyCoordinator 搬进 core;目前 send 只写库+排队,无模型调用
-4. Task 10 Local Memory 完整化(Ombre 导入/embedding)、Task 11 MCP 前台管理(web McpAdminPage 还走服务器 admin API)、Task 15 Admin Local、Task 5 ConfigRepository
-5. Task 13 动态收口改名、Task 17 服务器导出接入、Task 18 OTA 服务端/回滚、Task 19 CI 真跑通、Task 20 服务器退役
+### ❌ 未完成(按建议顺序)
+1. **Task 6:Provider 移植** — server 的 OpenAI/Anthropic/OpenAI-compatible/Embedding/Image/Fish 搬进 core,`fetch`→`HttpTransport`(native HTTP 插件已就绪)
+2. **Task 8:Reply/Core 移植** — Context/Summary/Replier/ReplyCoordinator 搬进 core;当前 `send` 只写库+排队,**没有模型调用,聊天还不能真正回复**
+3. **Task 10:Local Memory 完整化** — LocalMemoryProvider 骨架有;Ombre 导出→导入、embedding 链路未做
+4. **Task 11:MCP 前台管理** — web `McpAdminPage` 还走服务器 admin API;本地 CRUD/JSON 导入/OAuth/工具授权未做
+5. **Task 15:Admin Local** — 还依赖 admin token + `/api/admin/*`;需改本机状态页(§71)
+6. **Task 5:ConfigRepository** — persona/models 配置从 JSON 迁 SQLite + secret refs
+7. **Task 13**:动态收口改名(Proactive→Moment,§45);**Task 17**:服务器导出侧接入;**Task 18**:OTA 服务端 + App 内 updater(检查/应用/回滚,§77-81);**Task 19**:CI 完整化;**Task 20**:服务器退役(cutover T0-T12,§96)
 
-## 2. 关键技术决策(不要偏离)
+---
 
-- **依赖方向**:web → `@sooya/core`(vite alias + tsconfig paths 指向 `../core/src/**/*.ts` 源码,core 是 TS 源码包);core 零 dependencies
-- **better-sqlite3 只在测试**:core `test/db/node-local-database.ts` 从 core 自身 package.json 解析(devDeps);migration-tools `src/sqlite.mjs` 从自身目录解析。生产 Core 永不 import 它
-- **DB 契约**:`LocalDatabase`(open/close/execute/run/query/transaction/integrityCheck/backup)全部 async,事务=单次 native batch(测试断言 transactionCalls)
-- **Secrets**:Keychain 只有 has/set/delete,**无 get**(SOOYASecretsPlugin);service `com.sooya.app.secrets.v1`,accessGroup `TEAMID.com.sooya.app`(App.entitlements 用 `$(AppIdentifierPrefix)`)
-- **Memory 语义**(服务器版修复同款):零 tool call→skipped、全失败→uncertain、≥1 成功→completed;receipt 只记脱敏元数据
-- **web 本地化**:`installSooyaClient()` 只在 `isNativeSooya()` 时由 nativeBoot 调用;浏览器保持远程 api 回退;`useChat` 默认 `currentSooyaClient() ?? api`
-- **iOS 工程**:SPM(CapApp-SPM,无 Podfile);自定义插件必须 `node scripts/patch-xcode-project.mjs` 注入 pbxproj(cap sync 不会自动加)
+## 3. 架构与依赖方向(不要偏离)
 
-## 3. 验证命令(新仓库根目录)
+```
+React UI (packages/web)
+  └─ SooyaClient 接口(web/src/lib/sooyaClient.ts + local/LocalSooyaClient.ts)
+       └─ LocalCore (packages/core/src/app/local-core.ts, 纯 TS, 零依赖)
+            ├─ LocalDatabase  → SOOYADatabasePlugin (Swift SQLite)
+            ├─ SecretsPlatform → SOOYASecretsPlugin (Keychain)
+            ├─ HttpTransport   → SOOYAHttpPlugin (URLSession)
+            ├─ MediaPlatform   → SOOYAMediaPlugin (沙盒)
+            └─ McpTransport    → SOOYAMcpPlugin (streamable-http)
+```
+
+- **依赖方向**:web → `@sooya/core`(vite alias + tsconfig paths 指向 `../core/src/*.ts` 源码;core 是 TS 源码包,exports 有 6 个键:`.` `./tools` `./providers` `./platform` `./util/tool-history` `./app`)
+- **core 零 dependencies**(devDeps 只有 typescript/vitest/better-sqlite3);boundary test 断言 exports 键数量——**加导出必须同步改 `packages/core/test/boundary.test.ts`**
+- **better-sqlite3 只在测试**:core `test/db/node-local-database.ts` 从 core 自身 package.json 解析;migration-tools `src/sqlite.mjs` 从自身目录解析。生产 Core 永不 import 它
+- **DB 契约**:`LocalDatabase`(open/close/execute/run/query/transaction/integrityCheck/backup)全 async;事务 = 单次 native batch(测试断言 `transactionCalls`)
+- **web 本地化**:`installSooyaClient()` 只在 `isNativeSooya()` 时由 `nativeBoot.ts` 调用;浏览器保持远程 api 回退;`useChat` 默认 `currentSooyaClient() ?? api`
+- **Memory 语义**(服务器版修复同款):零 tool call→`skipped`、全失败→`uncertain`、≥1 成功→`completed`;receipt 只记脱敏元数据,不记参数/凭据
+- **iOS 工程**:SPM(CapApp-SPM,无 Podfile);自定义插件必须 `node scripts/patch-xcode-project.mjs` 注入 pbxproj(cap sync 不会自动加);共享 scheme 已提交(`App.xcscheme`)
+
+---
+
+## 4. 踩过的坑(全部已修复,别再踩)
+
+### iOS 构建(2026-08-13 在 CI 上连续修了 4 轮)
+1. **SPM 工程没有 `.xcworkspace`**(CocoaPods 才有)→ 用 `-project ios/App/App.xcodeproj -scheme App`,且必须提交共享 scheme(已提交)
+2. **`-target` 构建不支持 `-derivedDataPath`** → 必须 `-scheme` 才能用
+3. **patch 脚本 Plugins group 没挂进 App group**(正则缩进错,静默失败)→ 用唯一锚点 `50B271D01FEDC1A000F3C39B /* public */,` 插入;已修复
+4. **FileReference 路径重复 `Plugins/Plugins/`** → 文件引用相对 Plugins group 时 path 只写文件名,不带 `Plugins/` 前缀;已修复
+5. **`sqlite3_changes64/total_changes64` 需 iOS 15.4**(工程 target 15.0)→ 换 `sqlite3_changes/total_changes` + `Int64()` 转换;已修复
+6. **Media 插件 guard 语法**:`value.bytes == try fileSize(object)` 在 guard 里非法 → 拆成先取 `let size = try ...` 再比较;已修复
+
+### 环境/流程
+- **Windows 无法 xcodebuild** — Swift 改动必须在 GitHub Actions(macOS)验证,本地只保证源码正确
+- **git push 需要代理**:sooya-ipa 仓库 `git config --local http.proxy socks5h://127.0.0.1:7890`(原仓库有,新仓库必须单独配)
+- **web 的 MessageItem 测试是已知并发 flake**(单独跑必过),与本地化无关,别浪费时间
+- **core 的 repo 层是单行压缩风格**(子代理产物),新增 repo 保持文件内风格一致即可
+- **cap sync 会覆盖 `ios/App/App/capacitor.config.json`**(packageClassList)——自定义插件靠 pbxproj 注入 + App target 编译,不依赖 packageClassList(已加但 cap sync 后可能被重写,无影响)
+- **主仓库(服务器版)的迁移导出工具在服务器仓库跑**,本仓库只含导入/校验/OTA 侧
+
+---
+
+## 5. 验证命令(sooya-ipa 根目录)
 
 ```bash
 npm install
@@ -43,18 +101,30 @@ npm run build               # web → packages/web/dist
 node scripts/patch-xcode-project.mjs   # iOS 插件接线(幂等)
 ```
 
-## 4. 坑与注意
+CI(推送后自动):`ci.yml`(4 job)+ `ios-build.yml`(macOS unsigned IPA,paths 过滤已含 workflow 自身)。
 
-- web 的 MessageItem 测试是**已知并发 flake**(单独跑必过),与本地化无关
-- `packages/web/src/local/nativeBoot.ts` 里 `Capacitor.Plugins` 用了类型断言(类型定义缺 Plugins 属性)
-- core 的 boundary.test.ts 断言 exports 键数量——加导出必须同步改它
-- 测试文件风格:core 的 repo 层是单行压缩风格,新代码保持 repo 内一致即可
-- Windows 无法验证 iOS 编译;Swift 源码改动后必须在 GitHub Actions(macOS)验证
-- 主仓库(服务器版)的迁移导出工具 `export-portable` 在**服务器仓库**跑,本仓库只含导入/校验/OTA
+---
 
-## 5. 下一步建议
+## 6. 给 Codex 的开场指令(可直接复制)
 
-1. push sooya-ipa → GitHub 新建仓库 → CI 验证(尤其 ios-build)
-2. Task 6 Provider 移植(先 OpenAI chat + Fish,最小闭环)
-3. Task 8 ReplyCoordinator(保留 batch/revision/interrupt/publish 语义,只换 DB/事件/transport)
-4. 每次里程碑跑全量测试 + typecheck,commit 用英文 conventional 风格,per-module 拆分
+> 读 HANDOFF.md 和 docs/sooya-iphone-migration-plan.md。项目在 C:\Users\iulze\Desktop\sooya-ipa,12 commits,core 72/web 570/migration 10 测试全绿,CI + iOS 构建已验证。按 HANDOFF §2 未完成清单做 Task 6(Provider 移植)→ Task 8(ReplyCoordinator)。提交用英文 conventional,per-module 拆分,每个里程碑跑全量测试 + typecheck + build,Swift 改动必须推 CI 验证。不要动服务器版仓库(sooya7/sooya)的 main。
+
+---
+
+## 7. 关键验收标准(方案摘录,完成时对照)
+
+- §100 数据验收:messages/moments/stickers count 一致、media SHA256 一致、`foreign_key_check=0`、`integrity_check=ok`
+- §99 最硬标准:`systemctl stop sooya` + `docker stop sooya-ombre-brain` 后,手机仍能完整使用
+- §105 密钥验收:Web bundle/SQLite/备份/日志里搜不到真实 API Key/MCP Token
+- §107 OTA 验收:坏包自动回滚,任何失败不把 App 变砖
+- §108 自签验收:覆盖安装后 DB/Media/Keychain 保留(前提:同一签名证书!)
+
+---
+
+## 8. 用户工作流约定
+
+- 中文交流;commit 用英文 conventional(如 `fix(ios): ...`)
+- per-module commits,不混提交
+- 服务器版 main 保持稳定;IPA 版独立演进
+- IPA 更新:TS 改动未来走 OTA,Swift 改动重签 IPA(用户用全能签,自备证书)
+- 如需公开仓库:`gh repo edit sooya7/sooya-ipa --visibility public`(当前 private)
