@@ -1,6 +1,6 @@
 # SOOYA-IPA 交接文档(HANDOFF)
 
-> 最后更新:2026-08-14(Native Base 3 + Ombre/Local 双向同步基础收口中)。
+> 最后更新:2026-08-14（仓库内实现已收口；真实凭据、设备与线上服务验收项待完成）。
 > **给后续任何开发代理(Codex/ZCode)**:先读本文件,再读 `docs/sooya-iphone-migration-plan.md`(总方案,20 个 Task),最后 `git log --oneline` 看提交历史。所有进度都在磁盘和 git 里,不需要依赖任何人的会话记忆。
 
 ### 当前方案与交流文档
@@ -23,7 +23,7 @@ SOOYA 有两个仓库,职责分离:
 
 ---
 
-## 2. 当前状态(2026-08-13)
+## 2. 当前状态(2026-08-14)
 
 ### ✅ 已完成并验证
 - **Task 1/2/3**:core contracts、platform interfaces、async db repos — core **17 文件/72 测试**全绿;boundary test 锁死 Node 依赖(生产 Core 零 Node import)
@@ -38,7 +38,7 @@ SOOYA 有两个仓库,职责分离:
 - **LocalCore 骨架**(`packages/core/src/app/local-core.ts`):SooyaClient 15 方法全部实现(读路径全走本地 repo;send/withdraw/upload 最小可用;onAppActive/onAppInactive 生命周期)
 - **Task 12/14 逻辑层**:`life/catch-up`、`moments/moment-policy`、`jobs/local-task-scheduler` 已在 core(有测试)
 - **Task 16 基础**:Capacitor 8 工程(`com.sooya.app`,无 `server.url`)、safe-area/keyboard CSS 变量(`--sooya-safe-top/-bottom/--sooya-keyboard-height`)
-- **Task 17/18 工具层**:`migration-tools`(portable 导出/校验/回滚、OTA manifest)10/10 测试;`scripts/` 4 个 CLI + `patch-xcode-project.mjs`
+- **Task 17/18 工具层**:`migration-tools`(portable 导出/校验/回滚、OTA manifest)11/11 测试;`scripts/` 4 个 CLI + `patch-xcode-project.mjs`
 - **服务器版记忆修复已上线**:`sooya7/sooya` main `c2c903c`(零调用假成功→skipped/uncertain),CI 全绿,自动部署
 - **本轮本地化实现**:ConfigRepository(SQLite)+Keychain secret refs、OpenAI-compatible/Anthropic/Embedding/Rerank/Image/TTS Provider、ReplyCoordinator、SQLite 本地记忆与批次 receipt、MCP 本地 CRUD/连接/工具注册/安全策略、Admin 本地 bridge、图库/动态/Life 本地路由
 - **通知与 OTA**:通知仅做能力探测且默认关闭；原生 updater 有 native/schema/capability gate、pending/last-good 状态；OTA workflow 产出 manifest + bundle artifact
