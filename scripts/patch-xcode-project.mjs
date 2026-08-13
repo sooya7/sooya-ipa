@@ -77,8 +77,8 @@ async function main() {
       `$1${pluginGroup}\n`
     );
     content = content.replace(
-      /\t\t\t\t504EC3061FED79650016851F \/\* App \*\/ = \{\n\t\t\t\t\tisa = PBXGroup;\n\t\t\t\t\tchildren = \(\n/,
-      `$&\t\t\t\t\t${PLUGIN_GROUP_ID} /* Plugins */,\n`
+      /(50B271D01FEDC1A000F3C39B \/\* public \*\/,\n)/,
+      `$1\t\t\t\t\t${PLUGIN_GROUP_ID} /* Plugins */,\n`
     );
 
     // 4. Sources build phase membership
