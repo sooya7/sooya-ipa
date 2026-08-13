@@ -25,7 +25,7 @@ node scripts/build-ota.mjs \
   --bundle packages/web/dist \
   --out build/ota \
   --release-id ota-20260813-01 \
-  --native-min 3 --native-max 3 \
+  --native-min 4 --native-max 4 \
   --schema-min 46 --schema-max 46 \
   --bridge-capability database.sqlite \
   --bridge-capability keychain.secrets \
@@ -44,9 +44,13 @@ range, schema range and required bridge capabilities. The app rejects a
 manifest outside those gates and records pending/last-good state through the
 native updater. A production host must publish the manifest and matching
 `bundle.zip` as static HTTPS files; the app only checks an explicitly stored
-`ota.manifestUrl` preference. CI signs the canonical manifest with Ed25519
-when `OTA_PRIVATE_KEY` is configured and can publish immutable bundles plus
-`stable.json` when `OTA_PUBLISH_URL` and `OTA_PUBLISH_TOKEN` are configured.
+`ota.manifestUrl` preference. The configured production endpoint is
+`https://sooya.icu/ota`, so the stable manifest is
+`https://sooya.icu/ota/stable.json`. CI signs the canonical manifest with
+Ed25519 when `OTA_PRIVATE_KEY` is configured and publishes immutable bundles
+plus `stable.json` when `OTA_PUBLISH_URL` and `OTA_PUBLISH_TOKEN` are
+configured. The server accepts authenticated PUTs only under `/ota/` and
+serves the resulting files over HTTPS.
 
 ## Optional Ombre memory sync
 
