@@ -52,6 +52,7 @@ function MemoryPage({ onNotice }: { onNotice: (message: string) => void }) {
   const [results, setResults] = useState<Array<Record<string, unknown>> | null>(null);
   const [catalog, setCatalog] = useState<Record<string, unknown> | null>(null);
   const [catalogState, setCatalogState] = useState<'idle' | 'loading' | 'available' | 'unsupported'>('idle');
+  const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -93,18 +94,31 @@ function MemoryPage({ onNotice }: { onNotice: (message: string) => void }) {
     }
   };
 
-  return <PageFrame title="她的记忆" description="长期记忆由 Ombre Brain 管理；SOOYA 只提供安全搜索、轻量活动和回滚观察。">
+  const syncMemory = async () => {
+    setSyncing(true);
+    try {
+      await adminApi.syncMemory();
+      onNotice('记忆同步已完成');
+      await load();
+    } catch (cause) {
+      onNotice(cause instanceof Error ? cause.message : '记忆同步失败');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  return <PageFrame title="她的记忆" description="Ombre 在线时优先召回，Local SQLite 永久保留可用镜像；断网时自动降级，不影响聊天。">
     {error && <AdminState kind="error" message={error} onRetry={() => void load()} />}
     {status && <section className="admin-memory-status" data-testid="admin-ombre-status">
       <article className="admin-card"><span className="admin-card-kicker">连接状态</span><strong>{status.connection === 'connected' ? 'Ombre Brain' : 'Ombre Brain · degraded'}</strong><span className={`admin-status-chip ${status.connection === 'connected' ? 'is-ready' : 'is-warn'}`}>{status.connection === 'connected' ? '已连接' : '降级'}</span></article>
-      <article className="admin-card"><span className="admin-card-kicker">最近记忆提交</span><strong>{status.lastCommit ? String(status.lastCommit.state ?? '已记录') : '暂无'}</strong><small>{status.lastCommit ? `不确定 ${status.uncertain} · 待处理 ${status.pending}` : '暂无本地提交记录'}</small></article>
+      <article className="admin-card"><span className="admin-card-kicker">同步状态</span><strong>{status.sync?.state ?? (status.connection === 'connected' ? 'ready' : 'degraded')}</strong><small>待推送 {status.sync?.pendingPush ?? status.pending} · 冲突 {status.sync?.conflicts ?? 0}</small></article>
       <article className="admin-card"><span className="admin-card-kicker">最近整理</span><strong>{dateText(status.lastDream)}</strong><small>Dashboard {status.dashboardUrl ? <a href={status.dashboardUrl} target="_blank" rel="noreferrer">打开</a> : '仅服务器本地可用或未配置'}</small></article>
     </section>}
     <section className="admin-card admin-memory-search">
       <div className="admin-card-heading"><div><h3>搜索她的记忆</h3><p>查询通过 Ombre MCP 的只读 breath_search；搜索结果不会进入回复上下文。</p></div></div>
       <form onSubmit={search} className="admin-inline-search"><input aria-label="搜索她的记忆" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="例如：她喜欢的事情…" /><button type="submit" disabled={searching || !query.trim()}>{searching ? '搜索中…' : '搜索'}</button></form>
       {results && <div className="admin-memory-results">{results.map((result, index) => <article className="admin-memory-result" key={`${index}-${String(result.bucketId ?? '')}`}><strong>{typeof result.bucketId === 'string' ? `bucket ${result.bucketId}` : '记忆结果'}</strong><p>{String(result.raw ?? '')}</p>{typeof result.score === 'number' && <small>score {result.score}</small>}</article>)}</div>}
-      <div className="admin-actions"><button type="button" onClick={() => void browseCatalog()} disabled={catalogState === 'loading'}>{catalogState === 'loading' ? '读取目录中…' : '浏览记忆目录'}</button>{catalogState === 'unsupported' && <span className="admin-muted">当前 Ombre schema 未提供 catalog 能力</span>}</div>
+      <div className="admin-actions"><button type="button" onClick={() => void browseCatalog()} disabled={catalogState === 'loading'}>{catalogState === 'loading' ? '读取目录中…' : '浏览记忆目录'}</button><button type="button" onClick={() => void syncMemory()} disabled={syncing}>{syncing ? '同步中…' : '立即同步'}</button>{catalogState === 'unsupported' && <span className="admin-muted">当前 Ombre schema 未提供 catalog 能力</span>}</div>
       {catalog && <pre className="admin-safe-pre">{JSON.stringify(catalog, null, 2)}</pre>}
     </section>
     <section className="admin-card"><div className="admin-card-heading"><div><h3>最近记忆活动</h3><p>仅保留安全摘要，不展示 prompt、tool args 或完整记忆正文。</p></div></div>{activity.length ? activity.map((item) => <div className="admin-list-row" key={item.id}><span><strong>{item.type}</strong><small>{JSON.stringify(item.detail)}</small></span><small>{dateText(item.createdAt)}</small></div>) : <AdminState kind="empty" message="暂无 Ombre 活动" />}</section>
@@ -227,4 +241,3 @@ export function ContentManagementPage({ onNotice }: { onNotice: (message: string
   const page = useMemo(() => tab === 'memory' ? <MemoryPage onNotice={onNotice} /> : tab === 'stickers' ? <StickerPage onNotice={onNotice} /> : tab === 'media' ? <MediaPage onNotice={onNotice} /> : <ChatPage onNotice={onNotice} />, [onNotice, tab]);
   return <section className="admin-content-management" data-testid="admin-content-management"><ContentSubnav tab={tab} onChange={changeTab} />{page}</section>;
 }
-

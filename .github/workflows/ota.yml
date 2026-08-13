@@ -39,8 +39,8 @@ jobs:
             --bundle packages/web/dist
             --out build/ota
             --release-id "$RELEASE_ID"
-            --native-min 2 --native-max 2
-            --schema-min 45 --schema-max 45
+            --native-min 3 --native-max 3
+            --schema-min 46 --schema-max 46
             --bridge-capability database.sqlite
             --bridge-capability keychain.secrets
             --bridge-capability http.native
@@ -56,6 +56,7 @@ jobs:
             --bridge-capability ota.updater
             --bridge-capability ota.signature.ed25519
           )
+          test -n "${OTA_PRIVATE_KEY:-}" || { echo 'OTA_PRIVATE_KEY is required'; exit 1; }
           if [ -n "${OTA_PUBLISH_URL:-}" ]; then
             ota_args+=(--bundle-url "${OTA_PUBLISH_URL%/}/bundles/${RELEASE_ID}/bundle.zip")
           else
@@ -79,6 +80,7 @@ jobs:
     env:
       OTA_PUBLISH_URL: ${{ secrets.OTA_PUBLISH_URL }}
       OTA_PUBLISH_TOKEN: ${{ secrets.OTA_PUBLISH_TOKEN }}
+      OTA_PRIVATE_KEY: ${{ secrets.OTA_PRIVATE_KEY }}
       RELEASE_ID: ota-${{ github.sha }}
     steps:
       - uses: actions/download-artifact@v4
@@ -86,15 +88,14 @@ jobs:
           name: sooya-ota-${{ github.sha }}
           path: build
       - name: Publish immutable OTA and stable pointer
-        if: env.OTA_PUBLISH_URL != '' && env.OTA_PUBLISH_TOKEN != ''
         run: |
           set -euo pipefail
+          test -n "${OTA_PRIVATE_KEY:-}" || { echo 'OTA_PRIVATE_KEY is required'; exit 1; }
+          test -n "${OTA_PUBLISH_URL:-}" || { echo 'OTA_PUBLISH_URL is required'; exit 1; }
+          test -n "${OTA_PUBLISH_TOKEN:-}" || { echo 'OTA_PUBLISH_TOKEN is required'; exit 1; }
           base="${OTA_PUBLISH_URL%/}"
           auth=(-H "Authorization: Bearer ${OTA_PUBLISH_TOKEN}")
           curl --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/bundle.zip "${base}/bundles/${RELEASE_ID}/bundle.zip"
           curl --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/manifests/${RELEASE_ID}/ota-manifest.json"
           curl --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/stable.json.tmp"
           curl --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/stable.json"
-      - name: Explain skipped publish
-        if: env.OTA_PUBLISH_URL == '' || env.OTA_PUBLISH_TOKEN == ''
-        run: echo 'OTA_PUBLISH_URL/OTA_PUBLISH_TOKEN not configured; artifact build remains available for manual/static publication.'

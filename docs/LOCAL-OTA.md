@@ -25,8 +25,8 @@ node scripts/build-ota.mjs \
   --bundle packages/web/dist \
   --out build/ota \
   --release-id ota-20260813-01 \
-  --native-min 2 --native-max 2 \
-  --schema-min 45 --schema-max 45 \
+  --native-min 3 --native-max 3 \
+  --schema-min 46 --schema-max 46 \
   --bridge-capability database.sqlite \
   --bridge-capability keychain.secrets \
   --bridge-capability http.native \
@@ -47,6 +47,16 @@ native updater. A production host must publish the manifest and matching
 `ota.manifestUrl` preference. CI signs the canonical manifest with Ed25519
 when `OTA_PRIVATE_KEY` is configured and can publish immutable bundles plus
 `stable.json` when `OTA_PUBLISH_URL` and `OTA_PUBLISH_TOKEN` are configured.
+
+## Optional Ombre memory sync
+
+Local SQLite remains the durability source of truth. If an MCP server with id
+`ombre` is configured in local admin settings, memory recall uses Ombre and
+local results together, while new local memories are queued for background
+sync. Timeouts, authentication errors and disconnects degrade to local-only
+recall; the durable outbox and tombstones retry push/forget operations after
+the service returns. Without an `ombre` server entry, the app remains fully
+local and does not attempt a network connection.
 
 ## Verification
 
