@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build-ota:
@@ -26,25 +27,41 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run check:ota-migrations -- origin/main...HEAD
       - run: npm run build
       - name: Build integrity-gated OTA package
         env:
           RELEASE_ID: ota-${{ github.sha }}
+          OTA_PRIVATE_KEY: ${{ secrets.OTA_PRIVATE_KEY }}
+          OTA_PUBLISH_URL: ${{ secrets.OTA_PUBLISH_URL }}
         run: |
-          node scripts/build-ota.mjs \
-            --bundle packages/web/dist \
-            --out build/ota \
-            --release-id "$RELEASE_ID" \
-            --bundle-url bundle.zip \
-            --native-min 1 --native-max 1 \
-            --schema-min 44 --schema-max 44 \
-            --bridge-capability database.sqlite \
-            --bridge-capability keychain.secrets \
-            --bridge-capability http.native \
-            --bridge-capability mcp.native \
-            --bridge-capability media.sandbox \
-            --bridge-capability notifications.local \
+          ota_args=(
+            --bundle packages/web/dist
+            --out build/ota
+            --release-id "$RELEASE_ID"
+            --native-min 2 --native-max 2
+            --schema-min 45 --schema-max 45
+            --bridge-capability database.sqlite
+            --bridge-capability keychain.secrets
+            --bridge-capability http.native
+            --bridge-capability http.stream
+            --bridge-capability http.websocket
+            --bridge-capability mcp.native
+            --bridge-capability mcp.transport
+            --bridge-capability media.sandbox
+            --bridge-capability archive.zip
+            --bridge-capability oauth.system
+            --bridge-capability notifications.local
+            --bridge-capability notifications.push-client
             --bridge-capability ota.updater
+            --bridge-capability ota.signature.ed25519
+          )
+          if [ -n "${OTA_PUBLISH_URL:-}" ]; then
+            ota_args+=(--bundle-url "${OTA_PUBLISH_URL%/}/bundles/${RELEASE_ID}/bundle.zip")
+          else
+            ota_args+=(--bundle-url bundle.zip)
+          fi
+          node scripts/build-ota.mjs "${ota_args[@]}"
           (cd build/ota && zip -qry ../bundle.zip bundle)
           node --input-type=module -e "import { createHash } from 'node:crypto'; import { readFile, writeFile } from 'node:fs/promises'; const file = await readFile('build/bundle.zip'); const manifestPath = 'build/ota/ota-manifest.json'; const manifest = JSON.parse(await readFile(manifestPath, 'utf8')); manifest.bundle.zipSha256 = createHash('sha256').update(file).digest('hex'); await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\\n');"
       - uses: actions/upload-artifact@v4
@@ -54,3 +71,30 @@ jobs:
             build/ota/ota-manifest.json
             build/bundle.zip
           if-no-files-found: error
+
+  publish-ota:
+    if: github.ref == 'refs/heads/main'
+    needs: build-ota
+    runs-on: ubuntu-latest
+    env:
+      OTA_PUBLISH_URL: ${{ secrets.OTA_PUBLISH_URL }}
+      OTA_PUBLISH_TOKEN: ${{ secrets.OTA_PUBLISH_TOKEN }}
+      RELEASE_ID: ota-${{ github.sha }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sooya-ota-${{ github.sha }}
+          path: build
+      - name: Publish immutable OTA and stable pointer
+        if: env.OTA_PUBLISH_URL != '' && env.OTA_PUBLISH_TOKEN != ''
+        run: |
+          set -euo pipefail
+          base="${OTA_PUBLISH_URL%/}"
+          auth=(-H "Authorization: Bearer ${OTA_PUBLISH_TOKEN}")
+          curl --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/bundle.zip "${base}/bundles/${RELEASE_ID}/bundle.zip"
+          curl --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/manifests/${RELEASE_ID}/ota-manifest.json"
+          curl --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/stable.json.tmp"
+          curl --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/stable.json"
+      - name: Explain skipped publish
+        if: env.OTA_PUBLISH_URL == '' || env.OTA_PUBLISH_TOKEN == ''
+        run: echo 'OTA_PUBLISH_URL/OTA_PUBLISH_TOKEN not configured; artifact build remains available for manual/static publication.'

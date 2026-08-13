@@ -103,7 +103,7 @@ async function main() {
         content = content.slice(0, childrenEnd) + entries + content.slice(childrenEnd);
       }
     }
-    if (!content.includes(`\n\t\t\t\t\t${PLUGIN_GROUP_ID} /* Plugins */,`)) {
+    if (!content.includes(`${PLUGIN_GROUP_ID} /* Plugins */,`)) {
       content = content.replace(
         /(50B271D01FEDC1A000F3C39B \/\* public \*\/,\n)/,
         `$1\t\t\t\t\t${PLUGIN_GROUP_ID} /* Plugins */,\n`

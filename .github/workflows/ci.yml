@@ -31,6 +31,8 @@ jobs:
       - run: npm run check:freeze -- origin/main...HEAD
       - name: Typecheck
         run: npm run typecheck
+      - name: OTA migration guard
+        run: npm run check:ota-migrations -- origin/${{ github.base_ref || 'main' }}...HEAD
       - name: Build web
         run: npm run build
 

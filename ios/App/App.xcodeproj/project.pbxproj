@@ -101,7 +101,6 @@
 				504EC3131FED79650016851F /* Info.plist */,
 				2FAD9762203C412B000D30F8 /* config.xml */,
 				50B271D01FEDC1A000F3C39B /* public */,
-					SOOYA00000000000000000P10 /* Plugins */,
 				SOOYA00000000000000000P10 /* Plugins */,
 			);
 			path = App;
@@ -417,4 +416,3 @@
 	};
 	rootObject = 504EC2FC1FED79650016851F /* Project object */;
 }
-
