@@ -20,7 +20,9 @@ const PLUGIN_FILES = [
   'SOOYAMediaPlugin.swift',
   'SOOYASecretsPlugin.swift',
   'SOOYAArchivePlugin.swift',
-  'SOOYAWebSocketPlugin.swift'
+  'SOOYAWebSocketPlugin.swift',
+  'SOOYAReleasePlugin.swift',
+  'SOOYAReleaseConfig.swift'
 ];
 
 const PLUGIN_GROUP_ID = 'SOOYA00000000000000000P10';

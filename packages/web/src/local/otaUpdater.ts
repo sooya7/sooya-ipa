@@ -2,8 +2,7 @@ import { Capacitor } from '@capacitor/core';
 import type { LocalCore } from '@sooya/core/app';
 import { LATEST_SCHEMA_VERSION } from '@sooya/core/app';
 
-const NATIVE_BRIDGE_VERSION = 2;
-const BRIDGE_CAPABILITIES = ['database.sqlite', 'keychain.secrets', 'http.native', 'http.stream', 'http.websocket', 'mcp.native', 'mcp.transport', 'media.sandbox', 'archive.zip', 'oauth.system', 'notifications.local', 'notifications.push-client', 'ota.updater', 'ota.signature.ed25519'];
+export interface NativeReleaseInfo { nativeBaseVersion: number; bridgeVersion: number; capabilities: string[]; otaPublicKey: string; }
 
 interface OtaManifest {
   format: 'sooya-ota/v1';
@@ -33,7 +32,7 @@ interface UpdaterPlugin {
 export class LocalOtaUpdater {
   private readonly plugin: UpdaterPlugin | null;
 
-  constructor(private readonly core: LocalCore) {
+  constructor(private readonly core: LocalCore, private readonly releaseInfo: NativeReleaseInfo) {
     const plugins = (Capacitor as unknown as { Plugins?: Record<string, unknown> }).Plugins ?? {};
     this.plugin = (plugins.CapacitorUpdater as UpdaterPlugin | undefined) ?? null;
   }
@@ -52,9 +51,9 @@ export class LocalOtaUpdater {
       const response = await fetch(manifestUrl, { cache: 'no-store' });
       if (!response.ok) throw new Error(`OTA manifest request failed (${response.status})`);
       const manifest = await response.json() as unknown;
-      validateManifest(manifest);
+      validateManifest(manifest, this.releaseInfo);
       const value = manifest as OtaManifest;
-      await verifyManifestSignature(value);
+      await verifyManifestSignature(value, this.releaseInfo);
       const state = await this.readState();
       if (state.blocked_web_version === value.releaseId) return { checked: true, downloaded: false, releaseId: value.releaseId, reason: 'release-blocked' };
       if (state.pending_web_version === value.releaseId && state.pending_bundle_id) return { checked: true, downloaded: false, releaseId: value.releaseId, reason: 'already-pending' };
@@ -85,8 +84,8 @@ export class LocalOtaUpdater {
     if (state.blocked_web_version === state.pending_web_version) return { applied: false, releaseId: state.pending_web_version, reason: 'release-blocked' };
     try {
       const manifest = state.pending_manifest_json ? JSON.parse(state.pending_manifest_json) as unknown : null;
-      validateManifest(manifest);
-      await verifyManifestSignature(manifest);
+      validateManifest(manifest, this.releaseInfo);
+      await verifyManifestSignature(manifest, this.releaseInfo);
       await this.plugin.set({ id: state.pending_bundle_id });
       return { applied: true, releaseId: state.pending_web_version };
     } catch (error) {
@@ -108,8 +107,8 @@ export class LocalOtaUpdater {
   }
 }
 
-export async function startOtaUpdater(core: LocalCore): Promise<LocalOtaUpdater> {
-  const updater = await prepareOtaUpdater(core);
+export async function startOtaUpdater(core: LocalCore, releaseInfo: NativeReleaseInfo): Promise<LocalOtaUpdater> {
+  const updater = await prepareOtaUpdater(core, releaseInfo);
   await updater.notifyReady();
   const manifestUrl = await core.configRepo.getPreference('ota.manifestUrl', '');
   if (manifestUrl) void updater.checkAndApply(manifestUrl);
@@ -119,30 +118,29 @@ export async function startOtaUpdater(core: LocalCore): Promise<LocalOtaUpdater>
 /** Prepare a pending bundle before rendering, but only mark it ready after the
  * React shell has mounted. This keeps a bad bundle from being acknowledged as
  * healthy merely because the database/bootstrap phase completed. */
-export async function prepareOtaUpdater(core: LocalCore): Promise<LocalOtaUpdater> {
-  const updater = new LocalOtaUpdater(core);
+export async function prepareOtaUpdater(core: LocalCore, releaseInfo: NativeReleaseInfo): Promise<LocalOtaUpdater> {
+  const updater = new LocalOtaUpdater(core, releaseInfo);
   await updater.applyPendingOnColdBoot();
   return updater;
 }
 
-export function validateManifest(value: unknown): asserts value is OtaManifest {
+export function validateManifest(value: unknown, releaseInfo: NativeReleaseInfo): asserts value is OtaManifest {
   if (!isRecord(value) || value.format !== 'sooya-ota/v1' || typeof value.releaseId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{2,100}$/u.test(value.releaseId)) throw new Error('invalid OTA manifest identity');
   if (!isRecord(value.bundle) || typeof value.bundle.sha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(value.bundle.sha256) || typeof value.bundle.bytes !== 'number' || typeof value.bundle.fileCount !== 'number' || (value.bundle.zipSha256 !== undefined && (typeof value.bundle.zipSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(value.bundle.zipSha256)))) throw new Error('invalid OTA bundle identity');
   if (!isRecord(value.compatibility) || !gate(value.compatibility.native) || !gate(value.compatibility.schema) || !Array.isArray(value.compatibility.bridgeCapabilities)) throw new Error('invalid OTA compatibility gates');
-  if (NATIVE_BRIDGE_VERSION < value.compatibility.native.min || NATIVE_BRIDGE_VERSION > value.compatibility.native.max) throw new Error('OTA native version gate rejected');
+  if (releaseInfo.nativeBaseVersion < value.compatibility.native.min || releaseInfo.nativeBaseVersion > value.compatibility.native.max) throw new Error('OTA native version gate rejected');
   if (LATEST_SCHEMA_VERSION < value.compatibility.schema.min || LATEST_SCHEMA_VERSION > value.compatibility.schema.max) throw new Error('OTA schema version gate rejected');
-  const missing = value.compatibility.bridgeCapabilities.filter((capability) => !BRIDGE_CAPABILITIES.includes(capability));
+  const missing = value.compatibility.bridgeCapabilities.filter((capability) => !releaseInfo.capabilities.includes(capability));
   if (missing.length) throw new Error(`OTA bridge capability missing: ${missing.join(', ')}`);
-  if (value.signature && value.signature.algorithm !== 'ed25519') throw new Error('unsupported OTA signature algorithm');
+  if (!value.signature || value.signature.algorithm !== 'ed25519') throw new Error('OTA signature is required');
 }
 
-async function verifyManifestSignature(value: OtaManifest): Promise<void> {
-  if (!value.signature) return;
+async function verifyManifestSignature(value: OtaManifest, releaseInfo: NativeReleaseInfo): Promise<void> {
+  if (!value.signature) throw new Error('OTA signature is required');
   const rawPublicKey = fromBase64(value.signature.publicKey ?? '');
   const signature = fromBase64(value.signature.value);
   if (rawPublicKey.length !== 32 || signature.length !== 64) throw new Error('invalid OTA Ed25519 key or signature length');
-  const pinned = (globalThis as unknown as { SOOYA_OTA_PUBLIC_KEY_B64?: string }).SOOYA_OTA_PUBLIC_KEY_B64;
-  if (pinned && pinned !== value.signature.publicKey) throw new Error('OTA Ed25519 public key is not pinned');
+  if (value.signature.publicKey !== releaseInfo.otaPublicKey) throw new Error('OTA Ed25519 public key is not pinned');
   if (!globalThis.crypto?.subtle) throw new Error('OTA Ed25519 verification is unavailable');
   try {
     const key = await globalThis.crypto.subtle.importKey('raw', arrayBuffer(rawPublicKey), { name: 'Ed25519' } as Algorithm, false, ['verify']);

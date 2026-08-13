@@ -11,7 +11,7 @@ import { migrateDatabase } from '@sooya/core/app';
 import { installSooyaClient } from '../lib/sooyaClient.js';
 import { LocalSooyaClient } from './LocalSooyaClient.js';
 import { probeNotificationCapabilities } from './notificationCapabilities.js';
-import { prepareOtaUpdater, type LocalOtaUpdater } from './otaUpdater.js';
+import { prepareOtaUpdater, type LocalOtaUpdater, type NativeReleaseInfo } from './otaUpdater.js';
 
 /**
  * Native bootstrap: wires the Capacitor Swift plugins into LocalCore and
@@ -28,6 +28,12 @@ function nativePlugin(name: string): NativePluginCall {
   const plugin = plugins[name];
   if (!plugin) throw new Error(`native plugin ${name} is unavailable`);
   return plugin as NativePluginCall;
+}
+
+export async function getNativeReleaseInfo(): Promise<NativeReleaseInfo> {
+  const value = await nativePlugin('SOOYARelease').call<NativeReleaseInfo>('getReleaseInfo', {});
+  if (!Number.isSafeInteger(value.nativeBaseVersion) || !Number.isSafeInteger(value.bridgeVersion) || !Array.isArray(value.capabilities) || typeof value.otaPublicKey !== 'string' || !value.otaPublicKey) throw new Error('native release info is invalid');
+  return value;
 }
 
 /** LocalDatabase adapter over SOOYADatabasePlugin (Swift + SQLite C API). */
@@ -225,7 +231,7 @@ export async function installNativeLocalCore(): Promise<boolean> {
   installSooyaClient(new LocalSooyaClient(core));
   void probeNotificationCapabilities(core);
   nativeOtaCore = core;
-  nativeOtaUpdater = await prepareOtaUpdater(core);
+  nativeOtaUpdater = await prepareOtaUpdater(core, await getNativeReleaseInfo());
   void wireNativeLifecycle(core);
   return true;
 }
