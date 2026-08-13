@@ -8,11 +8,13 @@
 ### ✅ 已完成并验证
 - **Task 1/2/3**:core contracts、platform interfaces、async db repos — core 17 文件/72 测试全绿,boundary test 锁死 Node 边界
 - **Task 4/5/6/9/11 的 Native 层**:5 个 Swift 插件(SOOYADatabase/Secrets/Http/Mcp/Media)+ XCTest 套件;pbxproj 已注入插件(见 scripts/patch-xcode-project.mjs,幂等);entitlements/ATS/packageClassList 已配
+- **iOS 编译已验证**:2026-08-13 GitHub Actions(macOS)成功产出 unsigned IPA(2.68 MB artifact `SOOYA-unsigned-ipa`)。过程中修掉:SPM 无 workspace(用 -project/-scheme + 共享 App.xcscheme)、Plugins group 挂载路径、FileReference 相对路径、`sqlite3_changes64` 需 iOS 15.4(换 32 位 API)、Media 插件 guard 语法
 - **Task 7 骨架**:SooyaClient 接口 + LocalEventBus + LocalSooyaClient + TestLocalClient + nativeBoot(LocalCore ↔ Capacitor 插件接线,App 生命周期 + 键盘 inset)
 - **Task 12/14 逻辑层**:life catch-up、moment-policy、local-task-scheduler 已在 core(有测试)
 - **Task 16 基础**:Capacitor 8 工程(com.sooya.app,无 server.url)、safe-area/keyboard CSS 变量(--sooya-safe-top/-bottom/--sooya-keyboard-height)
 - **Task 17/18 工具层**:migration-tools(portable 导出/校验/回滚、OTA manifest)10/10 测试
 - **服务器版记忆修复已上线**:sooya7/sooya main `c2c903c`(零调用假成功→skipped/uncertain),CI 全绿
+- **仓库已推送 GitHub**:`sooya7/sooya-ipa`(private),CI 4 job 全绿 + ios-build 成功
 
 ### ❌ 未完成(建议顺序)
 1. **sooya-ipa 推 GitHub** → 触发 ci.yml + ios-build.yml(macOS 编译 unsigned IPA,验证 Swift 插件;Windows 本地无法 xcodebuild)
