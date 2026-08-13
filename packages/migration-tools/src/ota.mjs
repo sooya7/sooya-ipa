@@ -29,6 +29,7 @@ export async function buildOtaPackage(options) {
   const native = validateGate(options.native, 'native');
   const schema = validateGate(options.schema, 'schema');
   const bridgeCapabilities = validateCapabilities(options.bridgeCapabilities);
+  const bundleUrl = typeof options.bundleUrl === 'string' && options.bundleUrl.trim() ? options.bundleUrl.trim() : undefined;
   if (path.relative(bundleDir, outputDir) === '' || !path.relative(bundleDir, outputDir).startsWith('..')) {
     throw new Error('OTA output must be outside bundle source');
   }
@@ -54,6 +55,7 @@ export async function buildOtaPackage(options) {
       createdAt,
       bundle,
       compatibility: { native, schema, bridgeCapabilities },
+      ...(bundleUrl ? { bundleUrl } : {}),
       files
     };
     await fsp.writeFile(path.join(temporary, MANIFEST_NAME), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });

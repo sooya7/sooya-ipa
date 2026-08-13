@@ -1,0 +1,56 @@
+name: OTA web bundle
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core/**'
+      - 'packages/web/**'
+      - 'packages/migration-tools/**'
+      - 'scripts/build-ota.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ota:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Build integrity-gated OTA package
+        env:
+          RELEASE_ID: ota-${{ github.sha }}
+        run: |
+          node scripts/build-ota.mjs \
+            --bundle packages/web/dist \
+            --out build/ota \
+            --release-id "$RELEASE_ID" \
+            --bundle-url bundle.zip \
+            --native-min 1 --native-max 1 \
+            --schema-min 44 --schema-max 44 \
+            --bridge-capability database.sqlite \
+            --bridge-capability keychain.secrets \
+            --bridge-capability http.native \
+            --bridge-capability mcp.native \
+            --bridge-capability media.sandbox \
+            --bridge-capability notifications.local \
+            --bridge-capability ota.updater
+          (cd build/ota && zip -qry ../bundle.zip bundle)
+          node --input-type=module -e "import { createHash } from 'node:crypto'; import { readFile, writeFile } from 'node:fs/promises'; const file = await readFile('build/bundle.zip'); const manifestPath = 'build/ota/ota-manifest.json'; const manifest = JSON.parse(await readFile(manifestPath, 'utf8')); manifest.bundle.zipSha256 = createHash('sha256').update(file).digest('hex'); await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\\n');"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sooya-ota-${{ github.sha }}
+          path: |
+            build/ota/ota-manifest.json
+            build/bundle.zip
+          if-no-files-found: error

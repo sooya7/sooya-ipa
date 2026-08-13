@@ -1,6 +1,6 @@
 # SOOYA-IPA 交接文档(HANDOFF)
 
-> 最后更新:2026-08-13(含 GitHub 推送 + iOS 构建验证)。
+> 最后更新:2026-08-13(本地化、Provider/Reply、Admin/MCP、迁移、OTA、CI 收口中)。
 > **给后续任何开发代理(Codex/ZCode)**:先读本文件,再读 `docs/sooya-iphone-migration-plan.md`(总方案,20 个 Task),最后 `git log --oneline` 看提交历史。所有进度都在磁盘和 git 里,不需要依赖任何人的会话记忆。
 
 ---
@@ -35,16 +35,14 @@ SOOYA 有两个仓库,职责分离:
 - **Task 16 基础**:Capacitor 8 工程(`com.sooya.app`,无 `server.url`)、safe-area/keyboard CSS 变量(`--sooya-safe-top/-bottom/--sooya-keyboard-height`)
 - **Task 17/18 工具层**:`migration-tools`(portable 导出/校验/回滚、OTA manifest)10/10 测试;`scripts/` 4 个 CLI + `patch-xcode-project.mjs`
 - **服务器版记忆修复已上线**:`sooya7/sooya` main `c2c903c`(零调用假成功→skipped/uncertain),CI 全绿,自动部署
-- **仓库已推送 GitHub**:`sooya7/sooya-ipa`(**private**),CI 4 job 全绿 + ios-build 成功
+- **本轮本地化实现**:ConfigRepository(SQLite)+Keychain secret refs、OpenAI-compatible/Anthropic/Embedding/Rerank/Image/TTS Provider、ReplyCoordinator、SQLite 本地记忆与批次 receipt、MCP 本地 CRUD/连接/工具注册/安全策略、Admin 本地 bridge、图库/动态/Life 本地路由
+- **通知与 OTA**:通知仅做能力探测且默认关闭；原生 updater 有 native/schema/capability gate、pending/last-good 状态；OTA workflow 产出 manifest + bundle artifact
+- **CI 约束**:Native Base 冻结守卫、Node 22 核心测试、Web 570 测试、migration-tools 10 测试、typecheck/build、unsigned IPA workflow 均已接入
 
-### ❌ 未完成(按建议顺序)
-1. **Task 6:Provider 移植** — server 的 OpenAI/Anthropic/OpenAI-compatible/Embedding/Image/Fish 搬进 core,`fetch`→`HttpTransport`(native HTTP 插件已就绪)
-2. **Task 8:Reply/Core 移植** — Context/Summary/Replier/ReplyCoordinator 搬进 core;当前 `send` 只写库+排队,**没有模型调用,聊天还不能真正回复**
-3. **Task 10:Local Memory 完整化** — LocalMemoryProvider 骨架有;Ombre 导出→导入、embedding 链路未做
-4. **Task 11:MCP 前台管理** — web `McpAdminPage` 还走服务器 admin API;本地 CRUD/JSON 导入/OAuth/工具授权未做
-5. **Task 15:Admin Local** — 还依赖 admin token + `/api/admin/*`;需改本机状态页(§71)
-6. **Task 5:ConfigRepository** — persona/models 配置从 JSON 迁 SQLite + secret refs
-7. **Task 13**:动态收口改名(Proactive→Moment,§45);**Task 17**:服务器导出侧接入;**Task 18**:OTA 服务端 + App 内 updater(检查/应用/回滚,§77-81);**Task 19**:CI 完整化;**Task 20**:服务器退役(cutover T0-T12,§96)
+### ⏳ 发布前验证
+1. GitHub connector 将本地改动写入 `agent/complete-local-ota`，再由 Actions 验证 Swift/Xcode、CI 和 OTA artifact。
+2. 通过后开 draft PR；同一份 TypeScript bundle 可继续走 OTA，Swift/Capacitor 变化仍需重新签 IPA。
+3. 生产更新域名尚未在仓库中硬编码：在本机 Admin/SQLite 中设置 `ota.manifestUrl` 后才启用自动检查，避免误连未知主机。
 
 ---
 
@@ -107,7 +105,7 @@ CI(推送后自动):`ci.yml`(4 job)+ `ios-build.yml`(macOS unsigned IPA,paths �
 
 ## 6. 给 Codex 的开场指令(可直接复制)
 
-> 读 HANDOFF.md 和 docs/sooya-iphone-migration-plan.md。项目在 C:\Users\iulze\Desktop\sooya-ipa,12 commits,core 72/web 570/migration 10 测试全绿,CI + iOS 构建已验证。按 HANDOFF §2 未完成清单做 Task 6(Provider 移植)→ Task 8(ReplyCoordinator)。提交用英文 conventional,per-module 拆分,每个里程碑跑全量测试 + typecheck + build,Swift 改动必须推 CI 验证。不要动服务器版仓库(sooya7/sooya)的 main。
+> 读 HANDOFF.md 和 docs/sooya-iphone-migration-plan.md。项目在 `sooya7/sooya-ipa`，不要动服务器版 `sooya7/sooya` 的 main。先确认 branch/CI 状态，再完成本地化收口或修 CI；提交用英文 conventional，Swift 改动必须在 macOS Actions 验证。
 
 ---
 
