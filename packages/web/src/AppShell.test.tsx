@@ -143,3 +143,4 @@ describe('AppShell route lifecycle', () => {
     expect(lifecycle.chatMounts).toBe(0);
   });
 });
+

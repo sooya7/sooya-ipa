@@ -50,3 +50,4 @@ function safeUrl(value: string): string | null {
     return null;
   }
 }
+

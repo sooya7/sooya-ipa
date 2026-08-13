@@ -95,3 +95,4 @@ console.error(`[preflight] ${problems.length} issue(s) found — downgrade is NO
 for (const p of problems) console.error(`  - ${p}`);
 console.error('[preflight] resolve the issues, or restore a pre-upgrade backup (preferred).');
 process.exit(1);
+

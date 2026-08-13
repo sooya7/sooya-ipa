@@ -14,6 +14,7 @@ import { shouldStartDateSeparator, shouldStartMessageGroup, userTimeZone } from 
 import { estimateMessageHeight } from './lib/estimateMessageHeight.js';
 import { DateSeparator } from './components/DateSeparator.js';
 import { api, type MessageSearchHit } from './lib/api.js';
+import { currentSooyaClient } from './lib/sooyaClient.js';
 
 const NEAR_BOTTOM_PX = 120;
 export type ChatController = ReturnType<typeof useChat>;
@@ -197,7 +198,8 @@ export function ChatView({ chat, viewStateRef }: { chat: ChatController; viewSta
     if (!searchQuery.trim()) return;
     setHistoryBusy(true); setHistoryError(null);
     try {
-      const result = await api.messageSearch(searchQuery, { limit: 30 });
+      const local = currentSooyaClient();
+      const result = local ? await local.messageSearch(searchQuery, { limit: 30 }) : await api.messageSearch(searchQuery, { limit: 30 });
       setSearchHits(result.hits); setSearchIndex(0);
       if (result.hits[0]) await jumpToSearchHit(result.hits[0]);
     } catch (error) { setHistoryError(error instanceof Error ? error.message : '搜索失败'); }
@@ -214,7 +216,8 @@ export function ChatView({ chat, viewStateRef }: { chat: ChatController; viewSta
     if (!dateQuery) return;
     setHistoryBusy(true); setHistoryError(null);
     try {
-      const result = await api.messagesByDate(dateQuery, userTimeZone());
+      const local = currentSooyaClient();
+      const result = local ? await local.messagesByDate(dateQuery, userTimeZone()) : await api.messagesByDate(dateQuery, userTimeZone());
       chat.addMessages(result.messages);
       if (result.messages[0]) await jumpToSearchHit({ message: result.messages[0], snippet: '', matchedPartId: null });
     } catch (error) { setHistoryError(error instanceof Error ? error.message : '日期跳转失败'); }

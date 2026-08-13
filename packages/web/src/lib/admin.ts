@@ -1,5 +1,6 @@
 import { ApiError } from './api.js';
 import { clearMediaCache } from './authenticatedMedia.js';
+import { currentSooyaClient } from './sooyaClient.js';
 import type { ModelPreset, ModelSlot } from './modelPresets.js';
 import type { WorldPresence } from './types.js';
 
@@ -67,6 +68,8 @@ export async function adminRequest<T>(
   path: string,
   options: { method?: string; body?: unknown; headers?: HeadersInit; signal?: AbortSignal } = {}
 ): Promise<T> {
+  const localRequest = currentSooyaClient()?.adminRequest;
+  if (localRequest) return await localRequest<T>(path, options);
   const headers = new Headers(options.headers);
   const token = getAdminToken();
   if (token) headers.set('X-Admin-Token', token);

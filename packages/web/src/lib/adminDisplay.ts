@@ -26,3 +26,4 @@ export function formatAdminClock(value: string | number | Date): string {
   const date = value instanceof Date ? value : new Date(value);
   return Number.isFinite(date.getTime()) ? CLOCK_FORMATTER.format(date) : '—';
 }
+

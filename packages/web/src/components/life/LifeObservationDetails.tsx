@@ -112,3 +112,4 @@ export function LifeObservationDetails({ data, overview }: {
     </div>
   );
 }
+

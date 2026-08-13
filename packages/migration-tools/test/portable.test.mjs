@@ -305,3 +305,4 @@ test('portable verifier rejects a validly checksummed package containing a token
 
   await assert.rejects(verifyPortablePackage(packageDir, { verifySnapshot: false }), /credential pattern/i);
 });
+

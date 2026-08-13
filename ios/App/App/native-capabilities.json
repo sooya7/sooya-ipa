@@ -1,0 +1,19 @@
+{
+  "nativeVersion": "2.0.0",
+  "bridgeVersion": 2,
+  "capabilities": [
+    "database.sqlite",
+    "keychain.secrets",
+    "http.native",
+    "http.stream",
+    "http.websocket",
+    "media.sandbox",
+    "archive.zip",
+    "mcp.transport",
+    "oauth.system",
+    "notifications.local",
+    "notifications.push-client",
+    "ota.updater",
+    "ota.signature.ed25519"
+  ]
+}

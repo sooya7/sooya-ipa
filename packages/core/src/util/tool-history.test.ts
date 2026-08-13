@@ -31,3 +31,4 @@ describe('tool result safety', () => {
     expect(clipUtf8('你a', 2)).toBe('');
   });
 });
+

@@ -54,3 +54,4 @@ export function writeComposerDraft(storage: Storage | undefined, conversationId:
 export function clearComposerDraft(storage: Storage | undefined, conversationId: string): void {
   try { storage?.removeItem(composerDraftKey(conversationId)); } catch { /* private mode */ }
 }
+

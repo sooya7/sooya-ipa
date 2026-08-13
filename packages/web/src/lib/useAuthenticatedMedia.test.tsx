@@ -126,3 +126,4 @@ describe('useAuthenticatedMedia lifecycle', () => {
     container.remove();
   });
 });
+

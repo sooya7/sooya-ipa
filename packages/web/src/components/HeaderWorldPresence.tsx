@@ -45,3 +45,4 @@ export function HeaderWorldPresence({ presence }: { presence: WorldPresence | nu
     </div>
   );
 }
+

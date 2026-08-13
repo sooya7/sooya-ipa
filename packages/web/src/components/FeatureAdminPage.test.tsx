@@ -91,3 +91,4 @@ describe('管理面板中文数据值', () => {
     expect(emotionLabel('sleepy')).toBe('困倦');
   });
 });
+

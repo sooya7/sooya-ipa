@@ -37,3 +37,4 @@ describe('provider-neutral contracts', () => {
     expectTypeOf<Parameters<ImageProvider['edit']>[1]>().toEqualTypeOf<BinaryData>();
   });
 });
+

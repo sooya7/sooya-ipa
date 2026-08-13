@@ -86,3 +86,4 @@ test('portable and OTA CLIs execute end to end on synthetic inputs', async () =>
   assert.equal(lastGood.state.pending, null);
   assert.equal(lastGood.state.lastGood.releaseId, 'release-cli-fixture');
 });
+

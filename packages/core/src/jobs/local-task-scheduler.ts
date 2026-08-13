@@ -99,3 +99,4 @@ export class LocalTaskScheduler {
 function safeError(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).replace(/\s+/gu, ' ').slice(0, 300);
 }
+

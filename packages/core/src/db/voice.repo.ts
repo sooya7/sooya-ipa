@@ -14,3 +14,4 @@ export class VoiceRepo{
   async list(limit=50):Promise<VoiceGenerationRow[]>{return await this.db.query('SELECT * FROM voice_generations ORDER BY created_at DESC LIMIT ?',[clampInteger(limit,1,200)]);}
 }
 export { VoiceRepo as VoiceGenerationRepo };
+

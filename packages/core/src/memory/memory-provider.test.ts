@@ -69,6 +69,25 @@ describe('LocalMemoryProvider commit boundary', () => {
     expect(extract).not.toHaveBeenCalled();
     expect(store.commit).not.toHaveBeenCalled();
   });
+
+  it('attaches provider embeddings without making the local commit depend on them', async () => {
+    const committed: unknown[] = [];
+    const store: LocalMemoryStore = {
+      receipt: async () => null,
+      commit: async (_input, candidates) => { committed.push(...candidates); return { state: 'completed', inserted: 1, merged: 0 }; },
+      search: async () => [], list: async () => [], update: async () => null,
+      forget: async () => false, maintain: async () => ({ removed: 0, reembedded: 0 })
+    };
+    const local = new LocalMemoryProvider({
+      store,
+      extract: async () => [{ kind: 'event', content: '用户去了海边', importance: 0.6, confidence: 0.8 }],
+      currentRevision: async () => 1,
+      embeddingProvider: { name: 'embed', configured: true, embed: async () => ({ vectors: [[0.1, 0.2]], model: 'mini', dimensions: 2 }), inspectHealth: async () => ({ capability: 'embedding', configured: true, ok: true, provider: 'mini', checkedAt: '' }) }
+    });
+
+    await local.commit({ batchId: 'b-embedding', revision: 1, userText: '海边', assistantText: '记住了' });
+    expect(committed[0]).toMatchObject({ embedding: [0.1, 0.2], embeddingModel: 'mini' });
+  });
 });
 
 describe('MemoryRouter and HybridMemoryProvider', () => {
@@ -105,5 +124,28 @@ describe('MemoryRouter and HybridMemoryProvider', () => {
 
     await new HybridMemoryProvider({ local: provider({ commit: localCommit }), remote: provider({ commit: remoteCommit }), mirrorWrites: true }).commit(input);
     expect(remoteCommit).toHaveBeenCalledOnce();
+  });
+});
+
+describe('LocalMemoryProvider retrieval upgrades', () => {
+  it('combines local vector retrieval and rerank when both capabilities are available', async () => {
+    const store: LocalMemoryStore = {
+      receipt: async () => null,
+      commit: async () => ({ state: 'completed', inserted: 0, merged: 0 }),
+      search: async () => [],
+      searchHybrid: async () => [entry('a', '用户喜欢猫', 0.2), entry('b', '用户住在上海', 0.8)],
+      list: async () => [], update: async () => null, forget: async () => false,
+      maintain: async () => ({ removed: 0, reembedded: 0 })
+    };
+    const result = await new LocalMemoryProvider({
+      store,
+      extract: async () => [],
+      currentRevision: async () => 1,
+      embeddingProvider: { name: 'embed', configured: true, embed: async () => ({ vectors: [[1, 0]], model: 'e', dimensions: 2 }), inspectHealth: async () => ({ capability: 'embedding', configured: true, ok: true, provider: 'e', checkedAt: '' }) },
+      rerankProvider: { name: 'rerank', configured: true, rerank: async () => [{ index: 1, score: 0.99 }, { index: 0, score: 0.1 }], inspectHealth: async () => ({ capability: 'rerank', configured: true, ok: true, provider: 'r', checkedAt: '' }) }
+    }).recall({ query: '猫', limit: 2 });
+
+    expect(result.strategy).toBe('hybrid');
+    expect(result.entries.map((item) => item.id)).toEqual(['b', 'a']);
   });
 });

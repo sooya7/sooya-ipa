@@ -193,6 +193,7 @@ export async function fetchAuthenticatedMedia(
   path: string,
   options: AuthenticatedMediaOptions
 ): Promise<AuthenticatedMediaResult> {
+  if (/^(?:local-)?media:\/\//u.test(path)) return await fetchLocalMedia(path, options);
   const safePath = credentialFreeMediaPath(path);
   const baseOrigin = typeof window === 'undefined' ? 'http://sooya.local' : window.location.origin;
   const target = new URL(safePath, baseOrigin);
@@ -231,6 +232,27 @@ export async function fetchAuthenticatedMedia(
   } catch {
     throw new AuthenticatedMediaError('blob_url', response.status, '媒体预览创建失败');
   }
+  blobByObjectUrl.set(url, blob);
+  return { url, blob, contentType };
+}
+
+/** Native LocalCore media uses an opaque URI instead of an HTTP endpoint. */
+async function fetchLocalMedia(path: string, options: AuthenticatedMediaOptions): Promise<AuthenticatedMediaResult> {
+  const id = path.replace(/^(?:local-)?media:\/\//u, '').split(/[?#]/u, 1)[0] ?? '';
+  if (!id || options.signal?.aborted) throw new DOMException('aborted', 'AbortError');
+  const { currentSooyaClient } = await import('./sooyaClient.js');
+  const client = currentSooyaClient();
+  if (!client?.adminRequest) throw new AuthenticatedMediaError('origin', null, '本地媒体通道不可用');
+  const value = await client.adminRequest<{ dataBase64?: string; mime?: string }>(`/api/admin/media/${encodeURIComponent(id)}/data`, { signal: options.signal });
+  if (!value.dataBase64) throw new AuthenticatedMediaError('missing', 404, '媒体不存在');
+  const binary = atob(value.dataBase64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  const contentType = value.mime?.split(';', 1)[0]?.trim().toLowerCase() || 'application/octet-stream';
+  if (!matchesExpectedType(contentType, options.expected)) throw new AuthenticatedMediaError('content_type', 200, '媒体类型不匹配');
+  const blob = new Blob([bytes], { type: contentType });
+  if (blob.size === 0) throw new AuthenticatedMediaError('empty', 200, '媒体内容为空');
+  const url = URL.createObjectURL(blob);
   blobByObjectUrl.set(url, blob);
   return { url, blob, contentType };
 }

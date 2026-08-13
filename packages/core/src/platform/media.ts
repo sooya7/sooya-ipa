@@ -29,3 +29,4 @@ export interface MediaPlatform {
 }
 
 export type MediaAdapter = MediaPlatform;
+

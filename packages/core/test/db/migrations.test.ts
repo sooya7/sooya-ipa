@@ -14,7 +14,7 @@ afterEach(async () => {
 });
 
 describe('local schema migrations', () => {
-  it('preserves schema 1-35 and appends the eight local migrations in order', () => {
+  it('preserves schema 1-35 and appends the local migrations in order', () => {
     expect(MIGRATIONS.slice(0, 35).map((migration) => migration.version)).toEqual(
       Array.from({ length: 35 }, (_, index) => index + 1)
     );
@@ -26,22 +26,24 @@ describe('local schema migrations', () => {
       [40, 'moment_runtime_cleanup'],
       [41, 'local_memory_provider'],
       [42, 'local_update_state'],
-      [43, 'local_backup_metadata']
+      [43, 'local_backup_metadata'],
+      [44, 'local_provider_and_preferences'],
+      [45, 'ota_two_phase_state']
     ]);
-    expect(LATEST_SCHEMA_VERSION).toBe(43);
+    expect(LATEST_SCHEMA_VERSION).toBe(45);
   });
 
   it('migrates a fresh database and is idempotent', async () => {
     const db = createDb();
     const now = () => '2026-08-13T02:00:00.000Z';
 
-    await expect(migrateDatabase(db, { now })).resolves.toMatchObject({ version: 43 });
+    await expect(migrateDatabase(db, { now })).resolves.toMatchObject({ version: 45 });
     const callsAfterFirstRun = db.transactionCalls;
-    await expect(migrateDatabase(db, { now })).resolves.toMatchObject({ version: 43, applied: [] });
+    await expect(migrateDatabase(db, { now })).resolves.toMatchObject({ version: 45, applied: [] });
 
     const applied = await db.query<{ version: number; name: string }>('SELECT version, name FROM schema_migrations ORDER BY version');
-    expect(applied).toHaveLength(43);
-    expect(applied.at(-1)).toEqual({ version: 43, name: 'local_backup_metadata' });
+    expect(applied).toHaveLength(45);
+    expect(applied.at(-1)).toEqual({ version: 45, name: 'ota_two_phase_state' });
     expect(db.transactionCalls).toBe(callsAfterFirstRun);
   });
 
@@ -60,7 +62,8 @@ describe('local schema migrations', () => {
       'life_clock_state',
       'local_memory_receipts',
       'local_update_state',
-      'local_backup_metadata'
+      'local_backup_metadata',
+      'provider_configs', 'app_preferences', 'notification_capabilities'
     ])));
 
     const policyColumns = await db.query<{ name: string }>('PRAGMA table_info(mcp_tool_policies)');

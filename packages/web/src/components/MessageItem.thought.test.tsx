@@ -126,3 +126,4 @@ describe('InnerThoughtChip in MessageItem', () => {
     expect(container.querySelectorAll('[data-testid="inner-thought"]').length).toBe(0);
   });
 });
+

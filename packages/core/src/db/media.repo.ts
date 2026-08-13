@@ -204,3 +204,4 @@ export function toMediaRef(row: MediaRow): MediaRef {
     animated: row.animated === 1
   };
 }
+

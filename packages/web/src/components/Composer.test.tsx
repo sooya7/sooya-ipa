@@ -821,3 +821,4 @@ describe('Composer 用户语音入口', () => {
     expect(container.querySelector('[data-testid="mock-recorder"]')).toBeNull();
   });
 });
+

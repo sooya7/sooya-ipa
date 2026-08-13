@@ -217,3 +217,4 @@ export class TestLocalClient implements SooyaClient {
     return { capabilities: {}, stickers: { available: this.storedStickers.length, total: this.storedStickers.length } };
   }
 }
+

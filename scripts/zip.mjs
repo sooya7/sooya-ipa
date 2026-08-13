@@ -131,3 +131,4 @@ export async function createZip(sourceDir, zipPath, prefix) {
   await fsp.writeFile(zipPath, Buffer.concat([...chunks, centralBuf, end]));
   return fs.statSync(zipPath).size;
 }
+

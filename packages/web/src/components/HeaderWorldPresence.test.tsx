@@ -62,3 +62,4 @@ describe('HeaderWorldPresence weather icons', () => {
     expect(container?.querySelector('.topbar-world')?.classList.contains('is-stale')).toBe(true);
   });
 });
+

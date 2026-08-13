@@ -800,6 +800,53 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX idx_local_backup_created ON local_backup_metadata(created_at DESC);
       UPDATE app_runtime SET schema_version = 43, updated_at = datetime('now') WHERE id = 1;
     `)
+  },
+  {
+    version: 44,
+    name: 'local_provider_and_preferences',
+    operations: script(`
+      CREATE TABLE provider_configs (
+        capability TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        base_url TEXT NOT NULL,
+        model TEXT NOT NULL,
+        secret_ref TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+        options_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE app_preferences (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE notification_capabilities (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        local_supported INTEGER NOT NULL DEFAULT 0 CHECK (local_supported IN (0,1)),
+        local_enabled INTEGER NOT NULL DEFAULT 0 CHECK (local_enabled IN (0,1)),
+        remote_supported INTEGER NOT NULL DEFAULT 0 CHECK (remote_supported IN (0,1)),
+        remote_enabled INTEGER NOT NULL DEFAULT 0 CHECK (remote_enabled IN (0,1)),
+        checked_at TEXT,
+        detail_json TEXT NOT NULL DEFAULT '{}'
+      );
+      INSERT INTO notification_capabilities(id) VALUES (1);
+      UPDATE app_runtime SET schema_version = 44, updated_at = datetime('now') WHERE id = 1;
+    `)
+  },
+  {
+    version: 45,
+    name: 'ota_two_phase_state',
+    operations: script(`
+      ALTER TABLE local_update_state ADD COLUMN pending_bundle_id TEXT;
+      ALTER TABLE local_update_state ADD COLUMN last_good_bundle_id TEXT;
+      ALTER TABLE local_update_state ADD COLUMN failed_web_version TEXT;
+      ALTER TABLE local_update_state ADD COLUMN blocked_web_version TEXT;
+      ALTER TABLE local_update_state ADD COLUMN last_downloaded_at TEXT;
+      ALTER TABLE local_update_state ADD COLUMN last_failed_at TEXT;
+      INSERT OR IGNORE INTO local_update_state(id,updated_at) VALUES (1,datetime('now'));
+      UPDATE app_runtime SET schema_version = 45, updated_at = datetime('now') WHERE id = 1;
+    `)
   }
 ];
 

@@ -315,3 +315,4 @@ function matchedPartId(message: ChatMessage, query: string): string | null {
   const needle = query.toLocaleLowerCase();
   return message.content.find((part) => [part.text, part.transcript, part.media?.name].filter(Boolean).join(' ').toLocaleLowerCase().includes(needle))?.id ?? null;
 }
+

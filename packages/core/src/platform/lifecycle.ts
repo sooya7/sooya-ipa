@@ -10,3 +10,4 @@ export interface LifecyclePlatform {
 }
 
 export type LifecycleAdapter = LifecyclePlatform;
+

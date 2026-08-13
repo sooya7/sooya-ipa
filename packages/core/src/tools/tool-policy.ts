@@ -87,3 +87,4 @@ export class ToolPolicy {
 function isWriteRisk(risk: ToolRisk): boolean {
   return risk === 'write' || risk === 'external_side_effect' || risk === 'destructive';
 }
+

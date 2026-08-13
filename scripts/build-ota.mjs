@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { buildOtaPackage } from '../packages/migration-tools/src/ota.mjs';
 
-const usage = 'Usage: node scripts/build-ota.mjs --bundle DIR --out DIR --release-id ID --native-min N --native-max N --schema-min N --schema-max N [--bridge-capability NAME]';
+const usage = 'Usage: node scripts/build-ota.mjs --bundle DIR --out DIR --release-id ID --native-min N --native-max N --schema-min N --schema-max N [--bundle-url URL] [--signing-key PEM] [--bridge-capability NAME]';
 
 try {
   const args = parse(process.argv.slice(2));
@@ -12,10 +12,12 @@ try {
       bundleDir: args.bundle,
       outputDir: args.out,
       releaseId: args.releaseId,
+      bundleUrl: args.bundleUrl,
       createdAt: args.createdAt,
       native: { min: integer(args.nativeMin, '--native-min'), max: integer(args.nativeMax, '--native-max') },
       schema: { min: integer(args.schemaMin, '--schema-min'), max: integer(args.schemaMax, '--schema-max') },
-      bridgeCapabilities: args.bridgeCapabilities
+      bridgeCapabilities: args.bridgeCapabilities,
+      signingPrivateKey: args.signingKey ?? process.env.OTA_PRIVATE_KEY
     });
     console.log(JSON.stringify({ ok: true, outputDir: result.outputDir, releaseId: result.manifest.releaseId, manifest: result.manifest }, null, 2));
   }
@@ -27,8 +29,8 @@ try {
 function parse(values) {
   const output = { bridgeCapabilities: [] };
   const map = new Map([
-    ['--bundle', 'bundle'], ['--out', 'out'], ['--release-id', 'releaseId'], ['--created-at', 'createdAt'],
-    ['--native-min', 'nativeMin'], ['--native-max', 'nativeMax'], ['--schema-min', 'schemaMin'], ['--schema-max', 'schemaMax']
+    ['--bundle', 'bundle'], ['--out', 'out'], ['--release-id', 'releaseId'], ['--bundle-url', 'bundleUrl'], ['--created-at', 'createdAt'],
+    ['--native-min', 'nativeMin'], ['--native-max', 'nativeMax'], ['--schema-min', 'schemaMin'], ['--schema-max', 'schemaMax'], ['--signing-key', 'signingKey']
   ]);
   for (let index = 0; index < values.length; index += 1) {
     const value = values[index];

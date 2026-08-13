@@ -54,3 +54,4 @@ export interface StreamEvent {
   createdAt: string;
   payload: Record<string, unknown>;
 }
+

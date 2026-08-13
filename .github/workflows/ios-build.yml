@@ -2,7 +2,7 @@ name: iOS unsigned IPA
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'agent/**']
     paths:
       - 'ios/**'
       - 'packages/web/**'
@@ -10,7 +10,17 @@ on:
       - 'capacitor.config.ts'
       - 'package.json'
       - 'package-lock.json'
+      - 'ios/App/App/native-base.version'
       - '.github/workflows/ios-build.yml'
+  pull_request:
+    paths:
+      - 'ios/**'
+      - 'packages/web/**'
+      - 'packages/core/**'
+      - 'capacitor.config.ts'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'scripts/patch-xcode-project.mjs'
   workflow_dispatch:
 
 jobs:
@@ -18,6 +28,8 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22.14.0
@@ -29,6 +41,8 @@ jobs:
         run: npx cap sync ios
       - name: Wire custom SOOYA plugins into Xcode project
         run: node scripts/patch-xcode-project.mjs
+      - name: Verify Native Base freeze boundary
+        run: npm run check:freeze -- "origin/${{ github.base_ref || 'main' }}...HEAD"
       - name: Build unsigned IPA
         run: |
           xcodebuild \

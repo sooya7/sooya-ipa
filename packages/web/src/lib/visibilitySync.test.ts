@@ -111,3 +111,4 @@ describe('push visibility synchronization', () => {
     sync.dispose();
   });
 });
+

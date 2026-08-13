@@ -15,3 +15,4 @@ export function AppLink({ href, replace = false, onClick, target, download, ...r
   };
   return <a {...rest} href={href} target={target} download={download} onClick={handleClick} />;
 }
+

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -94,4 +95,21 @@ test('pending and last-good metadata bind to a verified OTA manifest', async () 
   assert.equal(state.lastGood.releaseId, 'release-fixture-0003');
   await fsp.writeFile(path.join(stateDir, 'last-good.json'), JSON.stringify({ ...state.lastGood, manifestSha256: '0'.repeat(64) }));
   await assert.rejects(verifyOtaState({ stateDir, packageDir: outputDir }), /manifest sha/i);
+});
+
+test('signs and verifies the canonical OTA manifest payload', async () => {
+  const { bundleDir, outputDir } = await fixture();
+  const keys = crypto.generateKeyPairSync('ed25519');
+  const privateKey = keys.privateKey.export({ format: 'pem', type: 'pkcs8' });
+  const built = await buildOtaPackage({
+    bundleDir, outputDir, releaseId: 'release-fixture-sign-1',
+    native: { min: 1, max: 1 }, schema: { min: 45, max: 45 }, bridgeCapabilities: [], signingPrivateKey: privateKey
+  });
+  assert.equal(built.manifest.signature.algorithm, 'ed25519');
+  assert.equal((await verifyOtaPackage(outputDir, { requireSignature: true })).releaseId, 'release-fixture-sign-1');
+  const manifestPath = path.join(outputDir, 'ota-manifest.json');
+  const manifest = JSON.parse(await fsp.readFile(manifestPath, 'utf8'));
+  manifest.releaseId = 'tampered-release';
+  await fsp.writeFile(manifestPath, JSON.stringify(manifest));
+  await assert.rejects(verifyOtaPackage(outputDir, { requireSignature: true }), /checksum|signature/i);
 });

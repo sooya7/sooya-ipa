@@ -5,3 +5,4 @@ export interface SecretsPlatform {
 }
 
 export type SecretsAdapter = SecretsPlatform;
+

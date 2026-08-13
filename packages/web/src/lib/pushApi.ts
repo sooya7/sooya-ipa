@@ -20,3 +20,4 @@ export async function requestPushApi<T>(path: string, init: RequestInit = {}): P
   if (!response.ok) throw new Error(body.message ?? body.error ?? `通知请求失败 (${response.status})`);
   return body as T;
 }
+

@@ -22,3 +22,4 @@ export class ThoughtRepo{
   async countGenerating():Promise<number>{return(await queryOne<{c:number}>(this.db,"SELECT COUNT(*) c FROM visible_thoughts WHERE status='generating'"))?.c??0;}
 }
 function toThought(row:ThoughtRow):VisibleThought{return{id:row.id,messageId:row.message_id,batchId:row.batch_id,revision:row.revision,kind:row.kind,text:row.text,visibility:row.visibility,status:row.status,createdAt:row.created_at};}
+

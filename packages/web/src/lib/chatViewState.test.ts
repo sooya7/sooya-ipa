@@ -57,3 +57,4 @@ describe('聊天视图滚动锚点', () => {
     expect(isAnchorSettled(21, 20)).toBe(false);
   });
 });
+

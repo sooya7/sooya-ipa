@@ -53,3 +53,4 @@ function parse(values) {
 }
 
 function integer(value, label) { const parsed = Number(value); if (!Number.isSafeInteger(parsed)) throw new Error(`invalid ${label}`); return parsed; }
+

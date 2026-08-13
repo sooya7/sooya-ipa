@@ -150,6 +150,31 @@ final class SOOYAKeychainStore {
         }
     }
 
+    /// Internal-only resolver used by the native HTTP transport. This method
+    /// is deliberately not exposed as a Capacitor plugin method, so API keys
+    /// never cross into JavaScript or the web bundle.
+    func read(key: String) throws -> String? {
+        try validateKey(key)
+        let result = client.copyMatching([
+            kSecClass as String: kSecClassGenericPassword as String,
+            kSecAttrService as String: identity.service,
+            kSecAttrAccessGroup as String: identity.accessGroup,
+            kSecAttrAccount as String: key,
+            kSecMatchLimit as String: kSecMatchLimitOne as String,
+            // Returning attributes together with the value makes Security
+            // return a dictionary containing kSecValueData on device.
+            kSecReturnData as String: true,
+            kSecReturnAttributes as String: true
+        ])
+        switch result.status {
+        case errSecItemNotFound: return nil
+        case errSecSuccess:
+            guard let data = result.value?[kSecValueData as String] as? Data else { throw SOOYAKeychainError.keychainFailed(result.status) }
+            return String(data: data, encoding: .utf8)
+        default: throw SOOYAKeychainError.keychainFailed(result.status)
+        }
+    }
+
     func set(key: String, value: String) throws {
         try validateKey(key)
         guard !value.isEmpty else { throw SOOYAKeychainError.emptyValue }

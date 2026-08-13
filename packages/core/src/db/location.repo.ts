@@ -53,3 +53,4 @@ export class LifeCityRepo{
 }
 
 export function toLifeLocation(row:LifeLocationRow){return{id:row.id,key:row.key,name:row.name,kind:row.kind,cityId:row.city_id,city:row.city,region:row.region,country:row.country,timeZone:row.time_zone,lat:row.lat,lng:row.lng,tags:safeJson<string[]>(row.tags_json,[]),indoor:row.indoor===1,visitWeight:row.visit_weight,source:row.source,active:row.active===1};}
+

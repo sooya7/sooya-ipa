@@ -111,3 +111,4 @@ describe('async Core repositories', () => {
     await expect(memories.get(memory.record.id)).resolves.toMatchObject({ content: '用户喜欢猫', source: 'local' });
   });
 });
+

@@ -84,3 +84,4 @@ describe('warm system theme', () => {
     expect(CSS).toMatch(/\.image-part-placeholder\s*\{[^}]*var\(--shimmer-base\)[^}]*var\(--shimmer-highlight\)/s);
   });
 });
+

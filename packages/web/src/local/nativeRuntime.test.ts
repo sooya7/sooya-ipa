@@ -18,3 +18,4 @@ describe('native runtime boundary', () => {
     expect(shouldRegisterPwaServiceWorker(true, true)).toBe(true);
   });
 });
+

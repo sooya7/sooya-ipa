@@ -144,3 +144,4 @@ export function slotProgress(snapshot: Pick<LifeSnapshot, 'startedAt' | 'endsAt'
 export function sortedLog<T extends { started_at: string }>(rows: T[]): T[] {
   return rows.slice().sort((a, b) => b.started_at.localeCompare(a.started_at));
 }
+

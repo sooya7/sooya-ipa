@@ -27,3 +27,4 @@ export function AuthenticatedAudio({ path, scope, ...props }: AuthenticatedAudio
   if (!url) return <span aria-hidden="true" className={props.className} />;
   return <audio {...props} src={url} controls />;
 }
+

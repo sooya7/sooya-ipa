@@ -13,7 +13,8 @@ export default defineConfig({
     alias: {
       // @sooya/core ships TypeScript sources; compile them with the web build.
       '@sooya/core/app': coreAppEntry,
-      '@sooya/core/platform': path.join(coreRoot, 'platform/index.ts')
+      '@sooya/core/platform': path.join(coreRoot, 'platform/index.ts'),
+      '@sooya/core/tools': path.join(coreRoot, 'tools/index.ts')
     }
   },
   build: {

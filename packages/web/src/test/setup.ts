@@ -7,3 +7,4 @@
  * flag is required for them to actually assert batched updates.
  */
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+

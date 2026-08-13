@@ -29,6 +29,7 @@ export async function buildOtaPackage(options) {
   const native = validateGate(options.native, 'native');
   const schema = validateGate(options.schema, 'schema');
   const bridgeCapabilities = validateCapabilities(options.bridgeCapabilities);
+  const bundleUrl = typeof options.bundleUrl === 'string' && options.bundleUrl.trim() ? options.bundleUrl.trim() : undefined;
   if (path.relative(bundleDir, outputDir) === '' || !path.relative(bundleDir, outputDir).startsWith('..')) {
     throw new Error('OTA output must be outside bundle source');
   }
@@ -48,14 +49,18 @@ export async function buildOtaPackage(options) {
     }
     files.sort((left, right) => left.path.localeCompare(right.path, 'en'));
     const bundle = bundleIdentity(files);
-    const manifest = {
+    const unsignedManifest = {
       format: OTA_FORMAT,
       releaseId,
       createdAt,
       bundle,
       compatibility: { native, schema, bridgeCapabilities },
+      ...(bundleUrl ? { bundleUrl } : {}),
       files
     };
+    const manifest = options.signingPrivateKey
+      ? { ...unsignedManifest, signature: signManifest(unsignedManifest, options.signingPrivateKey) }
+      : unsignedManifest;
     await fsp.writeFile(path.join(temporary, MANIFEST_NAME), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
     await verifyOtaPackage(temporary);
     await fsp.rename(temporary, outputDir);
@@ -86,7 +91,50 @@ export async function verifyOtaPackage(packageDir, options = {}) {
   if (identity.bytes !== manifest.bundle.bytes) throw new Error('OTA bundle byte count mismatch');
   if (identity.fileCount !== manifest.bundle.fileCount) throw new Error('OTA bundle file count mismatch');
   if (options.runtime) assertRuntimeCompatible(manifest, options.runtime);
+  if (options.requireSignature && !manifest.signature) throw new Error('OTA manifest signature is required');
+  if (options.requireSignature || manifest.signature) verifyManifestSignature(manifest);
   return { ...manifest, manifestSha256: sha256Value(text), packageDir: root };
+}
+
+/** Canonical payload shared by Node release tooling and the web updater. */
+export function otaSigningPayload(manifest) {
+  const compatibility = manifest.compatibility;
+  return [
+    manifest.format,
+    manifest.releaseId,
+    manifest.createdAt,
+    manifest.bundle.sha256,
+    String(manifest.bundle.bytes),
+    String(manifest.bundle.fileCount),
+    String(compatibility.native.min),
+    String(compatibility.native.max),
+    String(compatibility.schema.min),
+    String(compatibility.schema.max),
+    [...compatibility.bridgeCapabilities].sort((a, b) => a.localeCompare(b, 'en')).join(','),
+    manifest.bundleUrl ?? ''
+  ].join('\n');
+}
+
+export function signManifest(manifest, privateKey) {
+  const key = crypto.createPrivateKey(privateKey);
+  const publicKey = crypto.createPublicKey(key);
+  const rawPublicKey = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32);
+  return {
+    algorithm: 'ed25519',
+    value: crypto.sign(null, Buffer.from(otaSigningPayload(manifest), 'utf8'), key).toString('base64'),
+    publicKey: rawPublicKey.toString('base64')
+  };
+}
+
+export function verifyManifestSignature(manifest) {
+  const signature = manifest?.signature;
+  if (!signature || signature.algorithm !== 'ed25519' || typeof signature.value !== 'string' || typeof signature.publicKey !== 'string') throw new Error('invalid OTA Ed25519 signature');
+  const raw = Buffer.from(signature.publicKey, 'base64');
+  const value = Buffer.from(signature.value, 'base64');
+  if (raw.length !== 32 || value.length !== 64) throw new Error('invalid OTA Ed25519 key or signature length');
+  const der = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), raw]);
+  if (!crypto.verify(null, Buffer.from(otaSigningPayload(manifest), 'utf8'), { key: crypto.createPublicKey({ key: der, format: 'der', type: 'spki' }) }, value)) throw new Error('OTA Ed25519 signature verification failed');
+  return true;
 }
 
 export function assertRuntimeCompatible(manifest, runtime) {
@@ -183,6 +231,9 @@ function validateOtaManifest(manifest) {
   if (!isRecord(manifest.bundle)) throw new Error('OTA bundle identity is missing');
   validateFileIdentity(manifest.bundle, 'bundle');
   if (!Number.isSafeInteger(manifest.bundle.fileCount) || manifest.bundle.fileCount < 1) throw new Error('invalid OTA bundle file count');
+  if (manifest.signature !== undefined) {
+    if (!isRecord(manifest.signature) || manifest.signature.algorithm !== 'ed25519' || typeof manifest.signature.value !== 'string' || typeof manifest.signature.publicKey !== 'string') throw new Error('invalid OTA signature');
+  }
 }
 
 function validateFileIdentity(value, label) {

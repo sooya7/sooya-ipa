@@ -316,3 +316,4 @@ final class SOOYADatabasePluginTests: XCTestCase {
         return value
     }
 }
+

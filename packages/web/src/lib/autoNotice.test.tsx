@@ -69,3 +69,4 @@ describe('useAutoNotice', () => {
     expect(container.textContent).toContain('无通知');
   });
 });
+

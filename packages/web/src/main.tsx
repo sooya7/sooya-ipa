@@ -12,19 +12,23 @@ import { shouldRegisterPwaServiceWorker, isNativeSooya } from './local/nativeRun
 const container = document.getElementById('root');
 if (!container) throw new Error('root container missing');
 
-// Native (iPhone) installs LocalCore before the first render so the shell
-// boots against local data; browser/PWA keeps the remote API adapter.
-if (isNativeSooya()) {
-  void import('./local/nativeBoot.js')
-    .then(({ installNativeLocalCore }) => installNativeLocalCore())
-    .catch((error) => console.error('LocalCore bootstrap failed, falling back to remote API', error));
-}
-
-createRoot(container).render(
+// Native (iPhone) installs LocalCore before the first render. This is
+// intentionally awaited: rendering once with the remote client would freeze
+// useChat's data-client choice for the lifetime of the page.
+const renderApp = () => createRoot(container).render(
   <StrictMode>
     <AppShell />
   </StrictMode>
 );
+
+if (isNativeSooya()) {
+  void import('./local/nativeBoot.js')
+    .then(({ installNativeLocalCore }) => installNativeLocalCore())
+    .catch((error) => console.error('LocalCore bootstrap failed, falling back to remote API', error))
+    .finally(renderApp);
+} else {
+  renderApp();
+}
 
 if (shouldRegisterPwaServiceWorker(import.meta.env.PROD, 'serviceWorker' in navigator)) {
   window.addEventListener('load', () => {

@@ -224,3 +224,4 @@ private final class RecordingKeychainClient: SOOYAKeychainClient {
         return deleteStatuses.isEmpty ? errSecSuccess : deleteStatuses.removeFirst()
     }
 }
+

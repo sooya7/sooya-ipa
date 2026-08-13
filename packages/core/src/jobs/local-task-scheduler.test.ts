@@ -67,3 +67,4 @@ describe('LocalTaskScheduler', () => {
     expect(TASK_PRIORITY['moment.compose']).toBeGreaterThan(TASK_PRIORITY['memory.maintenance']);
   });
 });
+

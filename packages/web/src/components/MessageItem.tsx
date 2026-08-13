@@ -3,6 +3,7 @@ import { getToken } from '../lib/api.js';
 import { BUBBLE_IMAGE_CSS_WIDTH, fetchAuthenticatedMedia, mediaThumbnailPath, releaseMediaUrl, safeDownloadName } from '../lib/authenticatedMedia.js';
 import { useAuthenticatedMedia } from '../lib/useAuthenticatedMedia.js';
 import { api } from '../lib/api.js';
+import { currentSooyaClient } from '../lib/sooyaClient.js';
 import type { VisibleThought } from '../lib/api.js';
 import { getInnerThoughtMode, limitToThreeSentences, nextInnerThoughtMode, setInnerThoughtMode, INNER_THOUGHT_MODES, type InnerThoughtMode } from '../lib/innerThought.js';
 import type { ChatMessage, MessagePart } from '../lib/types.js';
@@ -154,7 +155,11 @@ function ReadAloudButton({ mediaId }: { mediaId: string }) {
   const [mediaPath, setMediaPath] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
-    api.mediaMeta(mediaId).then((result) => { if (!cancelled) setMediaPath(result.media.url); }).catch(() => undefined);
+    const local = currentSooyaClient();
+    const request = local?.adminRequest
+      ? local.adminRequest<{ media: { url: string } }>(`/api/admin/media/${encodeURIComponent(mediaId)}`)
+      : api.mediaMeta(mediaId);
+    request.then((result) => { if (!cancelled) setMediaPath(result.media.url); }).catch(() => undefined);
     return () => { cancelled = true; };
   }, [mediaId]);
   const media = useAuthenticatedMedia(mediaPath, 'user', 'audio');

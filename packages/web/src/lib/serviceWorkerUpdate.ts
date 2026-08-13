@@ -164,3 +164,4 @@ export async function registerServiceWorkerUpdate(
     while (cleanups.length) cleanups.pop()?.();
   };
 }
+

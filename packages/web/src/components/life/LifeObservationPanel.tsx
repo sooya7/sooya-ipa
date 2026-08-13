@@ -281,3 +281,4 @@ export function LifeObservationPanel({ onNotice }: LifeObservationPanelProps) {
     </section>
   );
 }
+

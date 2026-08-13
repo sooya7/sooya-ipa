@@ -94,3 +94,4 @@ describe('ToolPolicy', () => {
     expect(policy.check(registry.require('ombre.erase'), 'maintenance')).toMatchObject({ allowed: false, reason: 'maintenance-disabled' });
   });
 });
+

@@ -86,3 +86,4 @@ describe('ChatView 视图状态生命周期', () => {
     expect(viewStateRef.current).toEqual({ anchor: null, stickToBottom: false });
   });
 });
+

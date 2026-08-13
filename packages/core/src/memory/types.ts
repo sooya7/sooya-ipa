@@ -1,4 +1,4 @@
-export type MemoryKind = 'profile' | 'preference' | 'relationship' | 'project' | 'event';
+export type MemoryKind = 'profile' | 'preference' | 'relationship' | 'project' | 'event' | 'summary';
 
 export interface MemoryEntry {
   id: string;
@@ -13,13 +13,14 @@ export interface MemoryEntry {
   sourceId?: string;
   sourceHash?: string;
   score?: number;
+  hasEmbedding?: boolean;
 }
 
 export interface MemoryRecallInput { query: string; limit?: number; signal?: AbortSignal; }
 export interface MemoryRecall { entries: MemoryEntry[]; strategy: 'none' | 'fts' | 'embedding' | 'remote' | 'hybrid' | 'hybrid-degraded'; }
 export interface MemoryCommitInput { batchId: string; revision: number; userText: string; assistantText: string; signal?: AbortSignal; }
 export interface MemoryCommitResult { state: 'completed' | 'skipped' | 'uncertain'; inserted: number; merged: number; reason?: string; }
-export interface MemoryCandidate { kind: MemoryKind; content: string; importance: number; confidence: number; expiresAt?: string | null; sourceHash?: string; }
+export interface MemoryCandidate { kind: MemoryKind; content: string; importance: number; confidence: number; expiresAt?: string | null; sourceHash?: string; embedding?: number[]; embeddingModel?: string; }
 
 export interface MemoryProvider {
   wake(signal?: AbortSignal): Promise<string | null>;

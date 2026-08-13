@@ -36,3 +36,4 @@ describe('message temporal grouping', () => {
     expect(shouldStartMessageGroup(message(), message({ id: 'm3', meta: { withdrawnAt: '2026-08-01T00:01:00.000Z' } }), 'UTC')).toBe(true);
   });
 });
+

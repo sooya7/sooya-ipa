@@ -40,3 +40,4 @@ export function useAppRoute(): AppRouteKind {
   }, []);
   return route;
 }
+

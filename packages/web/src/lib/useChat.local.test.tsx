@@ -37,3 +37,4 @@ describe('useChat local client', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
+

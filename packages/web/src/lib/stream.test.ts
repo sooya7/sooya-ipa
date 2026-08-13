@@ -418,3 +418,4 @@ describe('ChatStream 连接状态与退避', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
+

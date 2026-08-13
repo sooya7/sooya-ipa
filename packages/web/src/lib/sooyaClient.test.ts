@@ -113,3 +113,4 @@ describe('TestLocalClient', () => {
     expect(liked.moment.liked).toBe(true);
   });
 });
+

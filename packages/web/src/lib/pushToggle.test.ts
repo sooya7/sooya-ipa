@@ -75,3 +75,4 @@ describe('disablePushSubscription', () => {
     expect(result).toEqual({ browserRemoved: true, serverRemoved: false });
   });
 });
+

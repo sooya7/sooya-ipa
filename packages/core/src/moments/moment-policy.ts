@@ -61,3 +61,4 @@ export class MomentPolicy {
 function normalizeTopic(value: string): string {
   return value.normalize('NFKC').toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
 }
+

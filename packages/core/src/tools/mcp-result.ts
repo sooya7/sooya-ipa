@@ -29,3 +29,4 @@ export function wrapMcpResult(result: McpToolCallResult): SooyaMcpResultEnvelope
     : text;
   return { [SOOYA_MCP_RESULT]: true, value, isError: result.isError === true };
 }
+

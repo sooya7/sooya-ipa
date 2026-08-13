@@ -276,3 +276,4 @@ describe('GalleryPage 缩略图', () => {
     expect(paths).toContainEqual('/api/media/a');
   });
 });
+

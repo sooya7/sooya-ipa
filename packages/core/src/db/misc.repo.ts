@@ -95,3 +95,4 @@ export class AuditRepo {
 
 function toEvent(row: { id: string; seq: number; type: string; payload_json: string; created_at: string }): StreamEvent { return { id: row.id, seq: row.seq, type: row.type, createdAt: row.created_at, payload: safeJson(row.payload_json, {}) }; }
 function priorityForJob(type: string): number { return ({ reply: 100, 'media.extract_text': 90, 'life.conversation': 75, 'weather.refresh': 70, 'sticker.user-meaning.learn': 75, 'sticker.analyze': 20, 'sticker.embed': 15, 'memory.embed.backfill': 10, maintenance: 10, 'backup.create': 5 } as Record<string, number>)[type] ?? 50; }
+

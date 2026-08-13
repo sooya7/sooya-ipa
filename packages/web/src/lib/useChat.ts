@@ -366,3 +366,4 @@ function optimisticPartsFor(message: ChatMessage): ChatMessage['content'] {
     .filter((part) => part.type !== 'system' && part.type !== 'audio')
     .map((part, index) => ({ ...part, id: `localpart_${index}`, status: 'pending' as const }));
 }
+

@@ -71,3 +71,4 @@ describe('platform contracts', () => {
     expectTypeOf<NonNullable<Awaited<ReturnType<MediaPlatform['read']>>>['data']>().toEqualTypeOf<Uint8Array>();
   });
 });
+

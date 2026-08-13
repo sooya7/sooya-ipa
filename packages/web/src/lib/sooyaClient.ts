@@ -28,6 +28,7 @@ export interface SooyaClient {
   life(): Promise<{ activity: string; kind: string; mood: string; startedAt: string; endsAt: string; recent: Array<{ activity: string; startedAt: string; endedAt: string }> }>;
   presence(): Promise<WorldPresence>;
   capabilities(): Promise<{ capabilities: Record<string, { configured: boolean; ok: boolean; detail?: string }>; stickers: { available: number; total: number } }>;
+  adminRequest?<T = unknown>(path: string, options?: { method?: string; body?: unknown; signal?: AbortSignal }): Promise<T>;
   subscribe(listener: LocalEventListener): () => void;
 }
 

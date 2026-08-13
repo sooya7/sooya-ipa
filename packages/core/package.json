@@ -14,8 +14,8 @@
       "import": "./src/tools/index.ts"
     },
     "./providers": {
-      "types": "./src/providers/types.ts",
-      "import": "./src/providers/types.ts"
+      "types": "./src/providers/index.ts",
+      "import": "./src/providers/index.ts"
     },
     "./platform": {
       "types": "./src/platform/index.ts",

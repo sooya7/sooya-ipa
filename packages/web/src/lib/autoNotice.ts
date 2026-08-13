@@ -15,3 +15,4 @@ export function useAutoNotice(timeoutMs = 5000): [string | null, (text: string |
   }, [notice, timeoutMs]);
   return [notice, setNotice];
 }
+

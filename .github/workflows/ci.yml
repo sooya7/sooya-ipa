@@ -8,17 +8,31 @@ on:
   workflow_dispatch:
 
 jobs:
+  freeze-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check Native Base freeze boundary
+        run: npm run check:freeze -- origin/main...HEAD
+
   static-validation:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22.14.0
           cache: npm
       - run: npm ci
+      - run: npm run check:freeze -- origin/main...HEAD
       - name: Typecheck
         run: npm run typecheck
+      - name: OTA migration guard
+        run: npm run check:ota-migrations -- origin/${{ github.base_ref || 'main' }}...HEAD
       - name: Build web
         run: npm run build
 

@@ -25,3 +25,4 @@ export interface SooyaPlatform {
 }
 
 export type PlatformContracts = SooyaPlatform;
+
