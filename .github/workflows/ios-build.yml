@@ -1,0 +1,53 @@
+name: iOS unsigned IPA
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ios/**'
+      - 'packages/web/**'
+      - 'packages/core/**'
+      - 'capacitor.config.ts'
+      - 'package.json'
+      - 'package-lock.json'
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+      - run: npm ci
+      - name: Build web bundle
+        run: npm run build
+      - name: Sync Capacitor iOS project
+        run: npx cap sync ios
+      - name: Wire custom SOOYA plugins into Xcode project
+        run: node scripts/patch-xcode-project.mjs
+      - name: Build unsigned IPA
+        run: |
+          xcodebuild \
+            -workspace ios/App/App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R "build/Release-iphoneos/App.app" Payload/
+          zip -qry SOOYA-unsigned.ipa Payload
+          rm -rf Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SOOYA-unsigned-ipa
+          path: SOOYA-unsigned.ipa
+          if-no-files-found: error

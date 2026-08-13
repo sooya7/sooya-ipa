@@ -1,0 +1,40 @@
+{
+  "name": "sooya-ipa",
+  "version": "1.0.0-local.1",
+  "private": true,
+  "type": "module",
+  "description": "SOOYA iPhone 全本地版 — React UI + TypeScript Local Core + Native Swift bridge",
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "workspaces": [
+    "packages/core",
+    "packages/web",
+    "packages/migration-tools"
+  ],
+  "scripts": {
+    "build": "npm run build -w @sooya/web",
+    "typecheck": "npm run typecheck -w @sooya/core && npm run typecheck -w @sooya/web",
+    "test": "npm run test -w @sooya/core && npm run test -w @sooya/web && npm run test -w @sooya/migration-tools",
+    "ios:add": "cap add ios",
+    "ios:sync": "npm run build && cap sync ios",
+    "ios:open": "cap open ios"
+  },
+  "dependencies": {
+    "@capacitor/app": "8.1.1",
+    "@capacitor/browser": "8.0.4",
+    "@capacitor/core": "8.5.0",
+    "@capacitor/haptics": "8.0.2",
+    "@capacitor/keyboard": "8.0.5",
+    "@capacitor/share": "8.0.1",
+    "@capacitor/splash-screen": "8.0.2",
+    "@capacitor/status-bar": "8.0.3",
+    "nanoid": "3.3.18"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.0",
+    "@capacitor/ios": "8.5.0",
+    "@types/better-sqlite3": "^7.6.12",
+    "better-sqlite3": "^12.11.1"
+  }
+}
