@@ -17,7 +17,7 @@ SOOYA 有两个仓库,职责分离:
 | 仓库 | 位置 | 角色 | 状态 |
 |---|---|---|---|
 | `sooya7/sooya` | `C:\Users\iulze\Desktop\sooya` | **服务器版**(Node/Fastify/Ombre MCP),线上运行 | main 不动,继续服役直到 cutover T9 |
-| `sooya7/sooya-ipa` | `C:\Users\iulze\Desktop\sooya-ipa` | **IPA 版**(iPhone 全本地),本仓库 | 主战场,`main@b4fad812` 已合并 PR3；OTA 服务收口分支将 Native Base 升至 4 |
+| `sooya7/sooya-ipa` | `C:\Users\iulze\Desktop\sooya-ipa` | **IPA 版**(iPhone 全本地),本仓库 | 主战场,`main@4dba878` 已合并 PR4；启动画面修复分支将 Native Base 升至 5 |
 
 **最终目标**(方案 §1):聊天、Life、动态、记忆、MCP、Tool Runtime、模型、媒体、SQLite、配置全在 iPhone 本地;服务器只提供 IPA 和 OTA 静态文件。**明确不做**:主动消息、APNs、Push、本地通知、服务器业务 API。
 
@@ -49,7 +49,7 @@ SOOYA 有两个仓库,职责分离:
 
 ### ⏳ 当前发布状态
 1. `agent/final-native-base-3` / PR3 已合并到 `main`，包含 Native Base 3、只读 `SOOYAReleasePlugin` 和固化 Ed25519 OTA 公钥。
-2. `codex/ota-server-setup` 为 OTA 服务器收口变更：Native Base 升至 4，轮换 OTA 公钥，workflow gate 已同步为 native 4 / schema 46。
+2. `codex/ota-server-setup` / PR4 已将 Native Base 升至 4 并完成 OTA 服务器收口；当前启动画面修复分支将 Native Base 升至 5，workflow gate 同步为 native 5 / schema 46。
 3. GitHub Actions Secrets 已配置：`OTA_PRIVATE_KEY`、`OTA_PUBLISH_URL`、`OTA_PUBLISH_TOKEN`；发布地址为 `https://sooya.icu/ota`。
 4. 生产更新域名不硬编码：合并后在本机 Admin/SQLite 中设置 `ota.manifestUrl`，再进行真实 OTA 验收。
 5. Ombre 同步只有在本机 Admin/SQLite 配置 id 为 `ombre` 的 MCP server 后才启用；默认仍是纯本地，不会因 Ombre 不可用阻断聊天。

@@ -25,7 +25,7 @@ node scripts/build-ota.mjs \
   --bundle packages/web/dist \
   --out build/ota \
   --release-id ota-20260813-01 \
-  --native-min 4 --native-max 4 \
+  --native-min 5 --native-max 5 \
   --schema-min 46 --schema-max 46 \
   --bridge-capability database.sqlite \
   --bridge-capability keychain.secrets \
