@@ -12,6 +12,7 @@ export interface MemoryEntry {
   source: 'local' | 'mcp' | 'ombre-import' | string;
   sourceId?: string;
   sourceHash?: string;
+  remoteRevision?: string | number;
   score?: number;
   hasEmbedding?: boolean;
 }

@@ -847,6 +847,57 @@ export const MIGRATIONS: Migration[] = [
       INSERT OR IGNORE INTO local_update_state(id,updated_at) VALUES (1,datetime('now'));
       UPDATE app_runtime SET schema_version = 45, updated_at = datetime('now') WHERE id = 1;
     `)
+  },
+  {
+    version: 46,
+    name: 'ombre_memory_bidirectional_sync',
+    operations: script(`
+      CREATE TABLE memory_sync_state (
+        local_memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+        remote_source_id TEXT,
+        remote_revision TEXT,
+        sync_state TEXT NOT NULL CHECK (sync_state IN ('pending_push','pending_pull','synced','conflict','error')),
+        last_synced_at TEXT,
+        sync_error TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_memory_sync_remote_id ON memory_sync_state(remote_source_id) WHERE remote_source_id IS NOT NULL;
+      CREATE INDEX idx_memory_sync_state ON memory_sync_state(sync_state, updated_at DESC);
+
+      CREATE TABLE memory_sync_outbox (
+        id TEXT PRIMARY KEY,
+        local_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+        remote_source_id TEXT,
+        operation TEXT NOT NULL CHECK (operation IN ('upsert','forget')),
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL CHECK (status IN ('pending','running','done','failed')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        next_attempt_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_memory_sync_outbox_claim ON memory_sync_outbox(status, next_attempt_at, created_at);
+      CREATE INDEX idx_memory_sync_outbox_local ON memory_sync_outbox(local_memory_id, operation, status);
+
+      CREATE TABLE memory_tombstones (
+        source_id TEXT PRIMARY KEY,
+        local_memory_id TEXT,
+        source_hash TEXT,
+        remote_revision TEXT,
+        deleted_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        synced INTEGER NOT NULL DEFAULT 0 CHECK (synced IN (0,1))
+      );
+      CREATE INDEX idx_memory_tombstones_expiry ON memory_tombstones(expires_at);
+
+      CREATE TABLE memory_sync_cursors (
+        name TEXT PRIMARY KEY,
+        cursor TEXT,
+        updated_at TEXT NOT NULL
+      );
+      UPDATE app_runtime SET schema_version = 46, updated_at = datetime('now') WHERE id = 1;
+    `)
   }
 ];
 

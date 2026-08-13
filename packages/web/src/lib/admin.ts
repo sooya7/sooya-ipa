@@ -289,9 +289,10 @@ export interface AdminMcpOverview {
 }
 
 export interface AdminOmbreStatus {
-  backend: 'ombre';
-  connection: 'connected' | 'degraded';
+  backend: 'ombre' | 'ombre-sync' | 'hybrid' | 'local';
+  connection: 'connected' | 'degraded' | 'disconnected';
   health: Record<string, unknown> | null;
+  sync?: { state: string; pendingPush: number; pendingPull: number; conflicts: number; lastSyncAt: string | null; detail?: string };
   lastCommit: Record<string, unknown> | null;
   pending: number;
   uncertain: number;
@@ -537,6 +538,7 @@ export const adminApi = {
   testMcpServer: (id: string) => adminRequest<{ ok: boolean; server: AdminMcpServer }>(`/api/admin/mcp/${encodeURIComponent(id)}/test`, { method: 'POST' }),
   refreshMcpTools: (id: string) => adminRequest<{ ok: boolean; server: AdminMcpServer }>(`/api/admin/mcp/${encodeURIComponent(id)}/refresh-tools`, { method: 'POST' }),
   ombreStatus: () => adminRequest<AdminOmbreStatus>('/api/admin/memory/status'),
+  syncMemory: () => adminRequest<{ state: string; pushed: number; pulled: number; conflicts: number; pending: number; detail?: string }>('/api/admin/memory/sync', { method: 'POST' }),
   ombreSearch: (query: string, limit = 10) => adminRequest<{ query: string; results: Array<Record<string, unknown>>; raw: string; resultCount: number }>(`/api/admin/memory/ombre/search?q=${encodeURIComponent(query)}&limit=${limit}`),
   ombreCatalog: (limit = 50) => adminRequest<Record<string, unknown>>(`/api/admin/memory/ombre/catalog?limit=${limit}`),
   ombreActivity: (limit = 50) => adminRequest<{ activity: AdminActivityItem[] }>(`/api/admin/memory/activity?limit=${limit}`),

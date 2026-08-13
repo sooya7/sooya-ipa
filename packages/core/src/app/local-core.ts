@@ -8,6 +8,10 @@ import type { MemoryProvider } from '../memory/types.js';
 import { LocalMemoryProvider } from '../memory/local-memory-provider.js';
 import { SqliteLocalMemoryStore } from '../memory/local-store.js';
 import { MemoryExtractor } from '../memory/extractor.js';
+import { MemoryRouter } from '../memory/memory-router.js';
+import { OmbreMcpMemoryProvider } from '../memory/ombre-mcp-memory-provider.js';
+import { MemorySyncService } from '../memory/memory-sync-service.js';
+import { MemorySyncRepository } from '../db/memory-sync.repo.js';
 import type { McpPlatform } from '../platform/mcp.js';
 import { McpRepository } from '../db/mcp.repo.js';
 import { ToolRegistry, ToolPolicy } from '../tools/index.js';
@@ -109,6 +113,7 @@ export class LocalCore implements LocalCoreApi {
   readonly toolPolicy: ToolPolicy;
   readonly memoryRepo: MemoryRepo;
   readonly memoryProvider: MemoryProvider;
+  readonly memorySync?: MemorySyncService;
   readonly summaryRepo: SummaryRepo;
   readonly thoughtsRepo: ThoughtRepo;
   readonly voicesRepo: VoiceRepo;
@@ -148,7 +153,7 @@ export class LocalCore implements LocalCoreApi {
     const configuredProviders = options.http
       ? async () => (await import('../providers/builtin.js')).createConfiguredProviders(options.http!, this.configRepo)
       : undefined;
-    this.memoryProvider = options.memoryProvider ?? new LocalMemoryProvider({
+    const localMemoryProvider = new LocalMemoryProvider({
       store: new SqliteLocalMemoryStore(this.memoryRepo),
       extract: async (input) => await new MemoryExtractor({
         provider: async () => options.chatProvider ?? await options.chatProviderFactory?.() ?? (await configuredProviders?.())?.chat ?? null
@@ -157,6 +162,31 @@ export class LocalCore implements LocalCoreApi {
       embeddingProvider: async () => (await configuredProviders?.())?.embedding ?? null,
       rerankProvider: async () => (await configuredProviders?.())?.rerank ?? null
     });
+    if (options.memoryProvider) {
+      this.memoryProvider = options.memoryProvider;
+    } else if (options.mcp) {
+      const ombre = new OmbreMcpMemoryProvider({
+        mcp: options.mcp,
+        getConfig: async () => {
+          const server = await this.mcpRepo.getServer('ombre');
+          return server?.enabled && server.url ? server : undefined;
+        }
+      });
+      this.memorySync = new MemorySyncService({ local: this.memoryRepo, sync: new MemorySyncRepository(db, now), remote: ombre, now });
+      this.memoryProvider = new MemoryRouter({
+        local: localMemoryProvider,
+        mcp: ombre,
+        mode: 'hybrid',
+        mirrorWrites: false,
+        sync: this.memorySync,
+        remoteEnabled: async () => {
+          const server = await this.mcpRepo.getServer('ombre');
+          return Boolean(server?.enabled && server.url);
+        }
+      });
+    } else {
+      this.memoryProvider = localMemoryProvider;
+    }
     this.momentComposer = new MomentComposer({
       life: new LifeV2Repo(db, now),
       moments: this.momentsRepo,
@@ -204,6 +234,7 @@ export class LocalCore implements LocalCoreApi {
     await this.lifeCatchUp.catchUp().catch(() => undefined);
     await this.momentComposer.compose().catch(() => undefined);
     await this.replies.recover();
+    void this.memorySync?.syncOnce().catch(() => undefined);
   }
 
   /** Background: persist WAL state so the database survives suspension. */
@@ -524,7 +555,15 @@ export class LocalCore implements LocalCoreApi {
       await this.options.db.run("UPDATE memories SET active=0,updated_at=? WHERE active=1", [(this.options.now?.() ?? new Date()).toISOString()]);
       return { cleared: true } as T;
     }
-    if (route === '/api/admin/memory/status') return { backend: 'local', connection: 'connected', health: { state: 'ready' }, lastCommit: null, pending: 0, uncertain: 0, lastDream: null, dashboardUrl: null } as T;
+    if (route === '/api/admin/memory/status') {
+      const health = await this.memoryProvider.health();
+      const sync = this.memorySync ? await this.memorySync.status() : { state: health.state, provider: 'local', pendingPush: 0, pendingPull: 0, conflicts: 0, lastSyncAt: null };
+      return { backend: sync.provider, connection: health.state === 'unavailable' ? 'disconnected' : health.state === 'degraded' ? 'degraded' : 'connected', health, sync, lastCommit: null, pending: sync.pendingPush, uncertain: 0, lastDream: null, dashboardUrl: null } as T;
+    }
+    if (route === '/api/admin/memory/sync' && method === 'POST') {
+      if (!this.memorySync) return { state: 'ready', pushed: 0, pulled: 0, conflicts: 0, pending: 0, detail: 'Ombre sync is not configured' } as T;
+      return await this.memorySync.syncOnce() as T;
+    }
     if (route.startsWith('/api/admin/memory/ombre/search')) {
       const query = url.searchParams.get('q') ?? '';
       const results = await this.memoryRepo.searchFts(query, Number(url.searchParams.get('limit') ?? 10));

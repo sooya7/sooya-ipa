@@ -28,22 +28,23 @@ describe('local schema migrations', () => {
       [42, 'local_update_state'],
       [43, 'local_backup_metadata'],
       [44, 'local_provider_and_preferences'],
-      [45, 'ota_two_phase_state']
+      [45, 'ota_two_phase_state'],
+      [46, 'ombre_memory_bidirectional_sync']
     ]);
-    expect(LATEST_SCHEMA_VERSION).toBe(45);
+    expect(LATEST_SCHEMA_VERSION).toBe(46);
   });
 
   it('migrates a fresh database and is idempotent', async () => {
     const db = createDb();
     const now = () => '2026-08-13T02:00:00.000Z';
 
-    await expect(migrateDatabase(db, { now })).resolves.toMatchObject({ version: 45 });
+    await expect(migrateDatabase(db, { now })).resolves.toMatchObject({ version: 46 });
     const callsAfterFirstRun = db.transactionCalls;
-    await expect(migrateDatabase(db, { now })).resolves.toMatchObject({ version: 45, applied: [] });
+    await expect(migrateDatabase(db, { now })).resolves.toMatchObject({ version: 46, applied: [] });
 
     const applied = await db.query<{ version: number; name: string }>('SELECT version, name FROM schema_migrations ORDER BY version');
-    expect(applied).toHaveLength(45);
-    expect(applied.at(-1)).toEqual({ version: 45, name: 'ota_two_phase_state' });
+    expect(applied).toHaveLength(46);
+    expect(applied.at(-1)).toEqual({ version: 46, name: 'ombre_memory_bidirectional_sync' });
     expect(db.transactionCalls).toBe(callsAfterFirstRun);
   });
 
@@ -63,7 +64,8 @@ describe('local schema migrations', () => {
       'local_memory_receipts',
       'local_update_state',
       'local_backup_metadata',
-      'provider_configs', 'app_preferences', 'notification_capabilities'
+      'provider_configs', 'app_preferences', 'notification_capabilities',
+      'memory_sync_state', 'memory_sync_outbox', 'memory_tombstones', 'memory_sync_cursors'
     ])));
 
     const policyColumns = await db.query<{ name: string }>('PRAGMA table_info(mcp_tool_policies)');

@@ -61,6 +61,17 @@ export interface MemoryCommitResult {
   merged: number;
 }
 
+export interface MirroredMemoryInput {
+  kind: MemoryKind;
+  content: string;
+  importance: number;
+  confidence: number;
+  createdAt?: string;
+  updatedAt?: string;
+  sourceId: string;
+  sourceHash?: string | null;
+}
+
 export interface MemoryReceiptRow {
   batch_id: string;
   revision: number;
@@ -91,6 +102,10 @@ export class MemoryRepo {
 
   async get(id: string): Promise<MemoryRow | undefined> {
     return await queryOne<MemoryRow>(this.db, 'SELECT * FROM memories WHERE id = ?', [id]);
+  }
+
+  async findBySourceId(sourceId: string): Promise<MemoryRow | undefined> {
+    return await queryOne<MemoryRow>(this.db, 'SELECT * FROM memories WHERE active=1 AND source_id=? ORDER BY updated_at DESC LIMIT 1', [sourceId]);
   }
 
   async upsert(input: UpsertMemoryInput): Promise<{ record: MemoryRow; merged: boolean }> {
@@ -268,6 +283,33 @@ export class MemoryRepo {
     const normalized = normalizeMemoryText(content);
     await this.db.run('UPDATE memories SET content=?,normalized=?,importance=?,confidence=?,updated_at=? WHERE id=? AND active=1', [content, normalized, patch.importance ?? current.importance, patch.confidence ?? current.confidence, nowIso(this.now), id]);
     return await this.get(id) ?? null;
+  }
+
+  /** Upserts an Ombre mirror without creating a local-to-remote sync loop. */
+  async upsertMirrored(input: MirroredMemoryInput): Promise<{ record: MemoryRow; merged: boolean }> {
+    const normalized = normalizeMemoryText(input.content);
+    const bySource = await queryOne<MemoryRow>(this.db, 'SELECT * FROM memories WHERE active=1 AND source=? AND source_id=? LIMIT 1', ['ombre', input.sourceId]);
+    const byHash = input.sourceHash
+      ? await queryOne<MemoryRow>(this.db, 'SELECT * FROM memories WHERE active=1 AND source_hash=? LIMIT 1', [input.sourceHash])
+      : undefined;
+    const byNormalized = await queryOne<MemoryRow>(this.db, 'SELECT * FROM memories WHERE active=1 AND normalized=? LIMIT 1', [normalized]);
+    const existing = bySource ?? byHash ?? byNormalized;
+    const timestamp = input.updatedAt ?? nowIso(this.now);
+    if (existing) {
+      await this.db.run(
+        `UPDATE memories SET kind=?,content=?,normalized=?,importance=?,confidence=?,updated_at=?,
+         source='ombre',source_id=?,source_hash=?,active=1 WHERE id=?`,
+        [input.kind, input.content, normalized, input.importance, input.confidence, timestamp, input.sourceId, input.sourceHash ?? null, existing.id]
+      );
+      return { record: (await this.get(existing.id))!, merged: true };
+    }
+    const id = newId('mem');
+    await this.db.run(
+      `INSERT INTO memories(id,kind,content,normalized,importance,confidence,created_at,updated_at,expires_at,hits,active,source,source_id,source_hash)
+       VALUES(?,?,?,?,?,?,?,?,NULL,0,1,'ombre',?,?)`,
+      [id, input.kind, input.content, normalized, input.importance, input.confidence, input.createdAt ?? timestamp, timestamp, input.sourceId, input.sourceHash ?? null]
+    );
+    return { record: (await this.get(id))!, merged: false };
   }
 
   async forget(id: string): Promise<boolean> {

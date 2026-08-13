@@ -40,7 +40,7 @@ jobs:
             --out build/ota
             --release-id "$RELEASE_ID"
             --native-min 3 --native-max 3
-            --schema-min 45 --schema-max 45
+            --schema-min 46 --schema-max 46
             --bridge-capability database.sqlite
             --bridge-capability keychain.secrets
             --bridge-capability http.native

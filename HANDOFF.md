@@ -1,6 +1,6 @@
 # SOOYA-IPA 交接文档(HANDOFF)
 
-> 最后更新:2026-08-14(Native Base 3 OTA 信任根收口中)。
+> 最后更新:2026-08-14(Native Base 3 + Ombre/Local 双向同步基础收口中)。
 > **给后续任何开发代理(Codex/ZCode)**:先读本文件,再读 `docs/sooya-iphone-migration-plan.md`(总方案,20 个 Task),最后 `git log --oneline` 看提交历史。所有进度都在磁盘和 git 里,不需要依赖任何人的会话记忆。
 
 ### 当前方案与交流文档
@@ -42,12 +42,23 @@ SOOYA 有两个仓库,职责分离:
 - **服务器版记忆修复已上线**:`sooya7/sooya` main `c2c903c`(零调用假成功→skipped/uncertain),CI 全绿,自动部署
 - **本轮本地化实现**:ConfigRepository(SQLite)+Keychain secret refs、OpenAI-compatible/Anthropic/Embedding/Rerank/Image/TTS Provider、ReplyCoordinator、SQLite 本地记忆与批次 receipt、MCP 本地 CRUD/连接/工具注册/安全策略、Admin 本地 bridge、图库/动态/Life 本地路由
 - **通知与 OTA**:通知仅做能力探测且默认关闭；原生 updater 有 native/schema/capability gate、pending/last-good 状态；OTA workflow 产出 manifest + bundle artifact
-- **CI 约束**:Native Base 冻结守卫、Node 22 核心测试、Web 570 测试、migration-tools 10 测试、typecheck/build、unsigned IPA workflow 均已接入
+- **Ombre/Local Memory 同步基础**:schema 46 新增 `memory_sync_state`、durable outbox、tombstone、cursor；新增 `OmbreMcpMemoryProvider`、`MemorySyncService`，实现 Ombre 在线优先召回、Local 先落盘、断网 Local fallback、失败重试、sourceId/sourceHash 去重、forget 双向 tombstone、冲突状态与 circuit breaker；未配置 `ombre` MCP 时不联网
+- **旧 Ombre 兼容**:自动识别 `memory.*`、`breath_search`、`hold` 等工具；没有 delta 工具时退回 catalog 映射，不阻塞本地运行
+- **CI 约束**:Native Base 冻结守卫、Node 22 核心测试、Web 570 测试、migration-tools 11 测试、typecheck/build、unsigned IPA workflow 均已接入
 
 ### ⏳ 当前发布状态
 1. `agent/final-native-base-3` / PR3 已包含 Native Base 3、只读 `SOOYAReleasePlugin` 和固化 Ed25519 OTA 公钥。
-2. PR3 的 CI 与 macOS unsigned IPA 已通过；合并前仍需配置 `OTA_PRIVATE_KEY`、`OTA_PUBLISH_URL`、`OTA_PUBLISH_TOKEN`。
+2. PR3 的 CI 与 macOS unsigned IPA 已通过；当前分支新增 schema 46，OTA workflow gate 已同步为 `schema 46`；合并前仍需配置 `OTA_PRIVATE_KEY`、`OTA_PUBLISH_URL`、`OTA_PUBLISH_TOKEN`。
 3. 生产更新域名不硬编码：合并后在本机 Admin/SQLite 中设置 `ota.manifestUrl`，再进行真实 OTA 验收。
+4. Ombre 同步只有在本机 Admin/SQLite 配置 id 为 `ombre` 的 MCP server 后才启用；默认仍是纯本地，不会因 Ombre 不可用阻断聊天。
+
+### ⏳ 仍需外部条件才能完成
+
+- PR3 合并到 `main`，并在 GitHub Actions Secrets 中配置真实 OTA 发布凭据；本代理不能替用户写入或生成生产密钥。
+- 用同一签名证书生成正式 IPA、真机安装一次，完成 Native Self-Test、正常 OTA、坏包拒绝/回滚、断网/恢复验收。
+- 从 `sooya7/sooya` 服务器导出真实 DB snapshot、media、config、Ombre memory，导入真实 iPhone 并核对 counts、SHA256、`integrity_check` 与 `foreign_key_check=0`。
+- 连接真实 Ombre MCP 做 catalog/delta、push/pull、edit/forget 冲突和长期断网恢复验收；仓库目前只有 credential-free fixture，不能冒充真实服务验收。
+- 在确认真机完全可用后，由有服务器权限的人执行 `systemctl stop sooya`、停止 Ombre runtime，并保留静态 OTA host（以及可选独立 Ombre MCP）。服务器仓库 `sooya7/sooya` 的 main 仍按约束不改。
 
 ---
 
@@ -98,11 +109,13 @@ React UI (packages/web)
 
 ```bash
 npm install
-npm test                    # core(81)+ web(570)+ migration-tools(11)
+npm test                    # core(87)+ web(570)+ migration-tools(11)
 npm run typecheck           # core + web
 npm run build               # web → packages/web/dist
 node scripts/patch-xcode-project.mjs   # iOS 插件接线(幂等)
 ```
+
+本轮本地复验实际结果：Core `87/87`、Web `570/570`、migration-tools `11/11` 全绿；测试使用 Node 22 与 `TZ=UTC`，与 CI 的 Node 22 约束一致。
 
 CI(推送后自动):`ci.yml`(5 job)+ `ios-build.yml`(macOS unsigned IPA)+ PR3 OTA 信任根校验。
 
