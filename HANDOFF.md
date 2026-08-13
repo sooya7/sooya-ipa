@@ -17,7 +17,7 @@ SOOYA 有两个仓库,职责分离:
 | 仓库 | 位置 | 角色 | 状态 |
 |---|---|---|---|
 | `sooya7/sooya` | `C:\Users\iulze\Desktop\sooya` | **服务器版**(Node/Fastify/Ombre MCP),线上运行 | main 不动,继续服役直到 cutover T9 |
-| `sooya7/sooya-ipa` | `C:\Users\iulze\Desktop\sooya-ipa` | **IPA 版**(iPhone 全本地),本仓库 | 主战场,`main@940f8102` 已落地；PR3 为 Native Base 3 收口分支 |
+| `sooya7/sooya-ipa` | `C:\Users\iulze\Desktop\sooya-ipa` | **IPA 版**(iPhone 全本地),本仓库 | 主战场,`main@b4fad812` 已合并 PR3；OTA 服务收口分支将 Native Base 升至 4 |
 
 **最终目标**(方案 §1):聊天、Life、动态、记忆、MCP、Tool Runtime、模型、媒体、SQLite、配置全在 iPhone 本地;服务器只提供 IPA 和 OTA 静态文件。**明确不做**:主动消息、APNs、Push、本地通知、服务器业务 API。
 
@@ -48,14 +48,16 @@ SOOYA 有两个仓库,职责分离:
 - **CI 约束**:Native Base 冻结守卫、Node 22 核心测试、Web 570 测试、migration-tools 11 测试、typecheck/build、unsigned IPA workflow 均已接入
 
 ### ⏳ 当前发布状态
-1. `agent/final-native-base-3` / PR3 已包含 Native Base 3、只读 `SOOYAReleasePlugin` 和固化 Ed25519 OTA 公钥。
-2. PR3 的 CI 与 macOS unsigned IPA 已通过；当前分支新增 schema 46，OTA workflow gate 已同步为 `schema 46`；合并前仍需配置 `OTA_PRIVATE_KEY`、`OTA_PUBLISH_URL`、`OTA_PUBLISH_TOKEN`。
-3. 生产更新域名不硬编码：合并后在本机 Admin/SQLite 中设置 `ota.manifestUrl`，再进行真实 OTA 验收。
-4. Ombre 同步只有在本机 Admin/SQLite 配置 id 为 `ombre` 的 MCP server 后才启用；默认仍是纯本地，不会因 Ombre 不可用阻断聊天。
+1. `agent/final-native-base-3` / PR3 已合并到 `main`，包含 Native Base 3、只读 `SOOYAReleasePlugin` 和固化 Ed25519 OTA 公钥。
+2. `codex/ota-server-setup` 为 OTA 服务器收口变更：Native Base 升至 4，轮换 OTA 公钥，workflow gate 已同步为 native 4 / schema 46。
+3. GitHub Actions Secrets 已配置：`OTA_PRIVATE_KEY`、`OTA_PUBLISH_URL`、`OTA_PUBLISH_TOKEN`；发布地址为 `https://sooya.icu/ota`。
+4. 生产更新域名不硬编码：合并后在本机 Admin/SQLite 中设置 `ota.manifestUrl`，再进行真实 OTA 验收。
+5. Ombre 同步只有在本机 Admin/SQLite 配置 id 为 `ombre` 的 MCP server 后才启用；默认仍是纯本地，不会因 Ombre 不可用阻断聊天。
 
 ### ⏳ 仍需外部条件才能完成
 
-- PR3 合并到 `main`，并在 GitHub Actions Secrets 中配置真实 OTA 发布凭据；本代理不能替用户写入或生成生产密钥。
+- OTA 服务器已在指定主机的 `/opt/sooya-ota` 隔离目录运行，`/ota/*` 入口仅允许 Bearer Token PUT，公网 GET 使用 HTTPS。
+- 待完成：合并 OTA 收口分支，使用用户签名证书生成正式 IPA，并在真机安装后完成迁移、OTA、回滚与断网恢复验收。
 - 用同一签名证书生成正式 IPA、真机安装一次，完成 Native Self-Test、正常 OTA、坏包拒绝/回滚、断网/恢复验收。
 - 从 `sooya7/sooya` 服务器导出真实 DB snapshot、media、config、Ombre memory，导入真实 iPhone 并核对 counts、SHA256、`integrity_check` 与 `foreign_key_check=0`。
 - 连接真实 Ombre MCP 做 catalog/delta、push/pull、edit/forget 冲突和长期断网恢复验收；仓库目前只有 credential-free fixture，不能冒充真实服务验收。
