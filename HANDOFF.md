@@ -1,7 +1,12 @@
 # SOOYA-IPA 交接文档(HANDOFF)
 
-> 最后更新:2026-08-13(本地化、Provider/Reply、Admin/MCP、迁移、OTA、CI 收口中)。
+> 最后更新:2026-08-14(Native Base 3 OTA 信任根收口中)。
 > **给后续任何开发代理(Codex/ZCode)**:先读本文件,再读 `docs/sooya-iphone-migration-plan.md`(总方案,20 个 Task),最后 `git log --oneline` 看提交历史。所有进度都在磁盘和 git 里,不需要依赖任何人的会话记忆。
+
+### 当前方案与交流文档
+
+- 最终落地方案：`docs/SOOYA-IPA-main940f8102-最终落地方案-含Ombre优先双向同步.md`
+- 本文件是项目交接、决策和发布状态记录；方案原文与本文件位于同一分支，避免实现分支和文档分叉。
 
 ---
 
@@ -12,7 +17,7 @@ SOOYA 有两个仓库,职责分离:
 | 仓库 | 位置 | 角色 | 状态 |
 |---|---|---|---|
 | `sooya7/sooya` | `C:\Users\iulze\Desktop\sooya` | **服务器版**(Node/Fastify/Ombre MCP),线上运行 | main 不动,继续服役直到 cutover T9 |
-| `sooya7/sooya-ipa` | `C:\Users\iulze\Desktop\sooya-ipa` | **IPA 版**(iPhone 全本地),本仓库 | 主战场,12 commits,CI + iOS 构建全绿 |
+| `sooya7/sooya-ipa` | `C:\Users\iulze\Desktop\sooya-ipa` | **IPA 版**(iPhone 全本地),本仓库 | 主战场,`main@940f8102` 已落地；PR3 为 Native Base 3 收口分支 |
 
 **最终目标**(方案 §1):聊天、Life、动态、记忆、MCP、Tool Runtime、模型、媒体、SQLite、配置全在 iPhone 本地;服务器只提供 IPA 和 OTA 静态文件。**明确不做**:主动消息、APNs、Push、本地通知、服务器业务 API。
 
@@ -39,10 +44,10 @@ SOOYA 有两个仓库,职责分离:
 - **通知与 OTA**:通知仅做能力探测且默认关闭；原生 updater 有 native/schema/capability gate、pending/last-good 状态；OTA workflow 产出 manifest + bundle artifact
 - **CI 约束**:Native Base 冻结守卫、Node 22 核心测试、Web 570 测试、migration-tools 10 测试、typecheck/build、unsigned IPA workflow 均已接入
 
-### ⏳ 发布前验证
-1. GitHub connector 将本地改动写入 `agent/complete-local-ota`，再由 Actions 验证 Swift/Xcode、CI 和 OTA artifact。
-2. 通过后开 draft PR；同一份 TypeScript bundle 可继续走 OTA，Swift/Capacitor 变化仍需重新签 IPA。
-3. 生产更新域名尚未在仓库中硬编码：在本机 Admin/SQLite 中设置 `ota.manifestUrl` 后才启用自动检查，避免误连未知主机。
+### ⏳ 当前发布状态
+1. `agent/final-native-base-3` / PR3 已包含 Native Base 3、只读 `SOOYAReleasePlugin` 和固化 Ed25519 OTA 公钥。
+2. PR3 的 CI 与 macOS unsigned IPA 已通过；合并前仍需配置 `OTA_PRIVATE_KEY`、`OTA_PUBLISH_URL`、`OTA_PUBLISH_TOKEN`。
+3. 生产更新域名不硬编码：合并后在本机 Admin/SQLite 中设置 `ota.manifestUrl`，再进行真实 OTA 验收。
 
 ---
 
@@ -93,13 +98,13 @@ React UI (packages/web)
 
 ```bash
 npm install
-npm test                    # core(72)+ web(570)+ migration-tools(10)
+npm test                    # core(81)+ web(570)+ migration-tools(11)
 npm run typecheck           # core + web
 npm run build               # web → packages/web/dist
 node scripts/patch-xcode-project.mjs   # iOS 插件接线(幂等)
 ```
 
-CI(推送后自动):`ci.yml`(4 job)+ `ios-build.yml`(macOS unsigned IPA,paths 过滤已含 workflow 自身)。
+CI(推送后自动):`ci.yml`(5 job)+ `ios-build.yml`(macOS unsigned IPA)+ PR3 OTA 信任根校验。
 
 ---
 
