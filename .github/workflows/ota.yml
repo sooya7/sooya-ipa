@@ -39,7 +39,7 @@ jobs:
             --bundle packages/web/dist
             --out build/ota
             --release-id "$RELEASE_ID"
-            --native-min 4 --native-max 4
+            --native-min 5 --native-max 5
             --schema-min 46 --schema-max 46
             --bridge-capability database.sqlite
             --bridge-capability keychain.secrets

@@ -10,7 +10,7 @@ const config: CapacitorConfig = {
   },
   plugins: {
     Keyboard: { resize: 'body' },
-    SplashScreen: { launchAutoHide: false }
+    SplashScreen: { launchAutoHide: true }
   }
 };
 
