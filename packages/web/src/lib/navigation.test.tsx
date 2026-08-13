@@ -112,3 +112,4 @@ describe('navigate 与浏览器历史', () => {
     expect(host.textContent).toBe('admin');
   });
 });
+

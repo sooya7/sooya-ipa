@@ -45,3 +45,4 @@ export function ChatHeader({ persona, connection, statusLabel, life, presence, o
     </header>
   );
 }
+

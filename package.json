@@ -19,7 +19,8 @@
     "ios:add": "cap add ios",
     "ios:sync": "npm run build && cap sync ios",
     "ios:open": "cap open ios",
-    "check:freeze": "node scripts/freeze-guard.mjs"
+    "check:freeze": "node scripts/freeze-guard.mjs",
+    "check:ota-migrations": "node scripts/ota-migration-guard.mjs"
   },
   "dependencies": {
     "@capacitor/app": "8.1.1",

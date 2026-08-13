@@ -80,3 +80,4 @@ describe('ToolRegistry', () => {
     expect(() => new ToolRegistry().register(tool)).toThrow(message);
   });
 });
+

@@ -217,3 +217,4 @@ describe('contactBoundaryPayload', () => {
     expect(contactBoundaryPayload(settings)).not.toHaveProperty('tzOffsetMinutes');
   });
 });
+

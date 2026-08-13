@@ -103,3 +103,4 @@ describe('AudioBubble layout', () => {
     expect(draw({ duration: 12.5 }).duration).toBe('0:12');
   });
 });
+

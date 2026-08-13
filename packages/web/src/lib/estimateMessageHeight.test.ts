@@ -82,3 +82,4 @@ describe('estimateMessageHeight', () => {
     expect(quoted).toBe(plain + 44);
   });
 });
+

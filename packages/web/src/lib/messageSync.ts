@@ -86,3 +86,4 @@ export function replaceFailedMessage(list: ChatMessage[], clientMsgId: string, s
   });
   return [...kept, saved].sort((a, b) => (a.seq !== b.seq ? a.seq - b.seq : a.createdAt.localeCompare(b.createdAt)));
 }
+

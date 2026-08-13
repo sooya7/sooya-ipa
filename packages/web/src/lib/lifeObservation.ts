@@ -121,3 +121,4 @@ export function contactBoundaryPayload(settings: LifeSettings): Partial<LifePane
     proactiveMode: settings.proactiveMode ?? 'auto'
   };
 }
+

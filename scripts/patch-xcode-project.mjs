@@ -18,7 +18,9 @@ const PLUGIN_FILES = [
   'SOOYAHttpPlugin.swift',
   'SOOYAMcpPlugin.swift',
   'SOOYAMediaPlugin.swift',
-  'SOOYASecretsPlugin.swift'
+  'SOOYASecretsPlugin.swift',
+  'SOOYAArchivePlugin.swift',
+  'SOOYAWebSocketPlugin.swift'
 ];
 
 const PLUGIN_GROUP_ID = 'SOOYA00000000000000000P10';
@@ -28,6 +30,7 @@ const BUILD_FILE_OFFSET = 0x100n;
 
 const PBXPROJ = 'ios/App/App.xcodeproj/project.pbxproj';
 const ENTITLEMENTS_PATH = 'App/App.entitlements';
+const SPM_PACKAGE = 'ios/App/CapApp-SPM/Package.swift';
 
 function hexId(value) {
   return value.toString(16).toUpperCase().padStart(24, '0');
@@ -44,12 +47,13 @@ async function main() {
     buildFile: hexId(FILE_REF_BASE + BUILD_FILE_OFFSET + BigInt(index))
   }));
 
-  const alreadyWired = fileRefs.every(({ buildFile }) => content.includes(`${buildFile} /* `));
-  if (alreadyWired) {
+  const missingRefs = fileRefs.filter(({ buildFile }) => !content.includes(`${buildFile} /* `));
+  if (missingRefs.length === 0) {
     console.log('plugin sources already wired; nothing to do');
   } else {
-    // 1. PBXBuildFile entries
-    const buildFileEntries = fileRefs
+    // 1. PBXBuildFile entries. Only add missing files: cap sync may leave the
+    // earlier custom-plugin entries in place while this script grows the set.
+    const buildFileEntries = missingRefs
       .map(({ name, fileRef, buildFile }) =>
         `\t\t${buildFile} /* ${name} in Sources */ = {isa = PBXBuildFile; fileRef = ${fileRef} /* ${name} */; };`)
       .join('\n');
@@ -59,7 +63,7 @@ async function main() {
     );
 
     // 2. PBXFileReference entries (relative to the Plugins group)
-    const fileRefEntries = fileRefs
+    const fileRefEntries = missingRefs
       .map(({ name, fileRef }) =>
         `\t\t${fileRef} /* ${name} */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ${name}; sourceTree = "<group>"; };`)
       .join('\n');
@@ -72,17 +76,42 @@ async function main() {
     const pluginGroup = `\t\t${PLUGIN_GROUP_ID} /* Plugins */ = {\n\t\t\tisa = PBXGroup;\n\t\t\tchildren = (\n${fileRefs
       .map(({ name, fileRef }) => `\t\t\t\t${fileRef} /* ${name} */,`)
       .join('\n')}\n\t\t\t);\n\t\t\tpath = Plugins;\n\t\t\tsourceTree = "<group>";\n\t\t};`;
-    content = content.replace(
-      /(\/\* Begin PBXGroup section \*\/\n)/,
-      `$1${pluginGroup}\n`
-    );
-    content = content.replace(
-      /(50B271D01FEDC1A000F3C39B \/\* public \*\/,\n)/,
-      `$1\t\t\t\t\t${PLUGIN_GROUP_ID} /* Plugins */,\n`
-    );
+    if (!content.includes(`${PLUGIN_GROUP_ID} /* Plugins */ = {`)) {
+      content = content.replace(
+        /(\/\* Begin PBXGroup section \*\/\n)/,
+        `$1${pluginGroup}\n`
+      );
+    } else {
+      const groupPattern = new RegExp(
+        `(\\t\\t${PLUGIN_GROUP_ID} \/\\* Plugins \\/\\* = \\{[\\s\\S]*?\\n\\t\\t\\tchildren = \\(\\n)([\\s\\S]*?)(\\n\\t\\t\\t\\);\\n\\t\\t\\tpath = Plugins;)`
+      );
+      content = content.replace(groupPattern, (_match, head, children, tail) =>
+        `${head}${children}${missingRefs
+          .map(({ name, fileRef }) => `\n\t\t\t\t${fileRef} /* ${name} */,`)
+          .join('')}${tail}`
+      );
+      // The fallback uses plain offsets so a future formatting change in the
+      // generated project cannot silently leave a missing plugin unwired.
+      const groupStart = content.indexOf(`${PLUGIN_GROUP_ID} /* Plugins */ = {`);
+      const childrenEnd = content.indexOf('\n\t\t\t);', groupStart);
+      if (groupStart < 0 || childrenEnd < 0) throw new Error('Plugins group children not found');
+      if (!missingRefs.every(({ fileRef }) => content.slice(groupStart, childrenEnd).includes(`${fileRef} /* `))) {
+        const entries = missingRefs
+          .filter(({ fileRef }) => !content.slice(groupStart, childrenEnd).includes(`${fileRef} /* `))
+          .map(({ name, fileRef }) => `\n\t\t\t\t${fileRef} /* ${name} */,`)
+          .join('');
+        content = content.slice(0, childrenEnd) + entries + content.slice(childrenEnd);
+      }
+    }
+    if (!content.includes(`\n\t\t\t\t\t${PLUGIN_GROUP_ID} /* Plugins */,`)) {
+      content = content.replace(
+        /(50B271D01FEDC1A000F3C39B \/\* public \*\/,\n)/,
+        `$1\t\t\t\t\t${PLUGIN_GROUP_ID} /* Plugins */,\n`
+      );
+    }
 
     // 4. Sources build phase membership
-    const sourceEntries = fileRefs
+    const sourceEntries = missingRefs
       .map(({ name, buildFile }) => `\t\t\t\t\t${buildFile} /* ${name} in Sources */,`)
       .join('\n');
     content = content.replace(
@@ -106,6 +135,24 @@ async function main() {
     await fsp.writeFile(file, content, 'utf8');
     console.log('CODE_SIGN_ENTITLEMENTS configured');
   }
+
+  // cap sync may regenerate the managed SPM manifest. Keep the native archive
+  // capability present without requiring a second manual Xcode edit.
+  const spmPath = path.join(root, SPM_PACKAGE);
+  let spm = await fsp.readFile(spmPath, 'utf8');
+  if (!spm.includes('ZIPFoundation.git')) {
+    spm = spm.replace(
+      '        .package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", exact: "8.5.0"),',
+      '        .package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", exact: "8.5.0"),\n        .package(url: "https://github.com/weichsel/ZIPFoundation.git", from: "0.9.19"),'
+    );
+  }
+  if (!spm.includes('.product(name: "ZIPFoundation", package: "ZIPFoundation")')) {
+    spm = spm.replace(
+      '                .product(name: "CapacitorStatusBar", package: "CapacitorStatusBar")',
+      '                .product(name: "CapacitorStatusBar", package: "CapacitorStatusBar"),\n                .product(name: "ZIPFoundation", package: "ZIPFoundation")'
+    );
+  }
+  await fsp.writeFile(spmPath, spm, 'utf8');
 }
 
 main().catch((error) => {

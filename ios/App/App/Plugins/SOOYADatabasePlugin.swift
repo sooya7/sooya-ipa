@@ -1,6 +1,7 @@
 import Capacitor
 import Foundation
 import SQLite3
+import CryptoKit
 
 private let sooyaSQLiteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
@@ -1176,7 +1177,7 @@ private extension SOOYARunResult {
 
 private extension SOOYAQueryResult {
     var bridgeObject: [String: Any] {
-        [
+        return [
             "columns": columns,
             "rows": rows.map { row in row.mapValues(\.bridgeValue) }
         ]
@@ -1233,9 +1234,14 @@ private extension SOOYADatabaseInfo {
 
 private extension SOOYABackupInfo {
     var bridgeObject: [String: Any] {
-        [
+        let sha256: String = {
+            guard let data = try? Data(contentsOf: fileURL) else { return "" }
+            return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        }()
+        return [
             "fileName": fileName,
             "sizeBytes": sizeBytes,
+            "sha256": sha256,
             "verified": verified,
             "createdAt": ISO8601DateFormatter().string(from: createdAt)
         ]

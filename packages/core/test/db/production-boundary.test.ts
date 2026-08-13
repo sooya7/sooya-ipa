@@ -18,3 +18,4 @@ function walk(root: string): string[] {
     return entry.isDirectory() ? walk(target) : [target];
   });
 }
+

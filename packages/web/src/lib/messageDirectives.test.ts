@@ -39,3 +39,4 @@ describe('stripModelDirectivesForDisplay', () => {
     expect(stripModelDirectivesForDisplay('数组 arr[[0]] 和 [备注] 都是普通文字')).toBe('数组 arr[[0]] 和 [备注] 都是普通文字');
   });
 });
+

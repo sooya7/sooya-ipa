@@ -227,3 +227,4 @@ export function ContentManagementPage({ onNotice }: { onNotice: (message: string
   const page = useMemo(() => tab === 'memory' ? <MemoryPage onNotice={onNotice} /> : tab === 'stickers' ? <StickerPage onNotice={onNotice} /> : tab === 'media' ? <MediaPage onNotice={onNotice} /> : <ChatPage onNotice={onNotice} />, [onNotice, tab]);
   return <section className="admin-content-management" data-testid="admin-content-management"><ContentSubnav tab={tab} onChange={changeTab} />{page}</section>;
 }
+

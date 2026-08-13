@@ -39,3 +39,4 @@ describe('limitToThreeSentences', () => {
     expect(result.endsWith('…')).toBe(true);
   });
 });
+

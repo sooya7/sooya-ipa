@@ -69,3 +69,4 @@ describe('ImageViewerHost 打开目标', () => {
     expect(currentSrc()).toBe('blob:b');
   });
 });
+

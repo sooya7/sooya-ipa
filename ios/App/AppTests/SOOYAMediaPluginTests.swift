@@ -70,3 +70,4 @@ final class SOOYAMediaPluginTests: XCTestCase {
         XCTAssertFalse(names.contains { $0.hasSuffix(".partial") })
     }
 }
+

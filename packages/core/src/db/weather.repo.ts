@@ -19,3 +19,4 @@ export class WeatherRepo {
 }
 
 export function toWeatherSnapshot(row:WeatherSnapshotRow,stale:boolean):WeatherSnapshot{return{observedAt:row.observed_at,condition:row.condition,temperatureC:row.temperature_c??undefined,feelsLikeC:row.feels_like_c??undefined,humidity:row.humidity??undefined,precipitationMm:row.precipitation_mm??undefined,windKph:row.wind_kph??undefined,visibilityKm:row.visibility_km??undefined,pressureHpa:row.pressure_hpa??undefined,provider:row.provider,locationKey:row.location_key,stale};}
+

@@ -81,3 +81,4 @@ describe('shared colour tokens', () => {
     expect(ADMIN).not.toMatch(/\.life-observation[^}]*box-shadow:/s);
   });
 });
+

@@ -195,3 +195,4 @@ for (const [name, size, maskable] of [
 }
 
 console.log(`icons written to ${ICON_DIR}, avatars to ${AVATAR_DIR}`);
+

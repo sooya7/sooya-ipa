@@ -67,3 +67,4 @@ export function formatHeaderWeather(weather: WorldPresence['weather']): string |
 export function weatherConditionLabel(condition: string): string {
   return WEATHER_LABELS[condition] ?? condition;
 }
+

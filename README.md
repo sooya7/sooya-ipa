@@ -49,3 +49,4 @@ iOS 编译与 unsigned IPA 由 GitHub Actions(macOS runner)完成;Windows 本地
 | core | vitest | 平台接口、tools、memory、life、jobs、db repos(better-sqlite3 仅测试) |
 | web | vitest | 组件 + LocalClient 契约(sooyaClient.test / useChat.local.test) |
 | migration-tools | node:test | 便携包/OTA/校验/回滚 |
+

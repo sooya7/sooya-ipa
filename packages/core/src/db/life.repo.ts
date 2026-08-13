@@ -27,7 +27,9 @@ export class LifeRepo {
       previous = { id: newId('life'), activity: existing.activity, kind: existing.kind, mood: existing.mood, started_at: existing.started_at, ended_at: input.startedAt, shared: 0, created_at: timestamp };
       operations.push(runOperation('INSERT INTO life_log(id,activity,kind,mood,started_at,ended_at,shared,created_at) VALUES(?,?,?,?,?,?,0,?)', [previous.id, previous.activity, previous.kind, previous.mood, previous.started_at, previous.ended_at, previous.created_at]));
       if (existing.kind !== 'sleep' && options.recordCompletionEvent !== false) {
-        operations.push(lifeEventOperation({ logId: previous.id, eventType: 'activity.completed', activity: previous.activity, kind: previous.kind, description: `完成了${previous.activity}`, moodBefore: previous.mood, moodAfter: input.mood, happenedAt: previous.ended_at, shareable: SHAREABLE_KINDS.has(previous.kind) }, timestamp));
+        const event = lifeEventRow({ logId: previous.id, eventType: 'activity.completed', activity: previous.activity, kind: previous.kind, description: `完成了${previous.activity}`, moodBefore: previous.mood, moodAfter: input.mood, happenedAt: previous.ended_at, shareable: SHAREABLE_KINDS.has(previous.kind) }, timestamp);
+        operations.push(lifeEventOperation(event));
+        if (event.shareable) operations.push(shareCandidateOperation(event, timestamp));
       }
     }
     operations.push(runOperation(`INSERT INTO life_state(id,activity,kind,mood,started_at,ends_at,updated_at,meta_json)
@@ -81,7 +83,25 @@ export class LifeRepo {
 }
 
 function lifeEventRow(input: LifeEventInput, timestamp: string): LifeEventRow { return { id: newId('life_event'), plan_id: input.planId ?? null, log_id: input.logId ?? null, event_type: input.eventType, activity: input.activity, kind: input.kind, description: input.description, mood_before: input.moodBefore ?? null, mood_after: input.moodAfter ?? null, happened_at: input.happenedAt, shareable: input.shareable ? 1 : 0, shared_at: null, meta_json: JSON.stringify(input.meta ?? {}), created_at: timestamp }; }
-function lifeEventOperation(input: LifeEventInput, timestamp: string) { const row = lifeEventRow(input, timestamp); return runOperation(`INSERT INTO life_events(id,plan_id,log_id,event_type,activity,kind,description,mood_before,mood_after,happened_at,shareable,shared_at,meta_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)`, [row.id,row.plan_id,row.log_id,row.event_type,row.activity,row.kind,row.description,row.mood_before,row.mood_after,row.happened_at,row.shareable,row.meta_json,row.created_at]); }
+function lifeEventOperation(row: LifeEventRow) { return runOperation(`INSERT INTO life_events(id,plan_id,log_id,event_type,activity,kind,description,mood_before,mood_after,happened_at,shareable,shared_at,meta_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)`, [row.id,row.plan_id,row.log_id,row.event_type,row.activity,row.kind,row.description,row.mood_before,row.mood_after,row.happened_at,row.shareable,row.meta_json,row.created_at]); }
+
+function shareCandidateOperation(event: LifeEventRow, timestamp: string) {
+  const occurredAt = Date.parse(event.happened_at);
+  const expiresAt = new Date(Math.max(occurredAt + 7 * 86_400_000, Date.parse(timestamp) + 3_600_000)).toISOString();
+  const meta = JSON.stringify({ activity: event.activity, occurredAt: event.happened_at, topicKey: event.kind });
+  return runOperation(`INSERT INTO life_share_candidates(id,source_type,source_id,novelty,relevance_to_user,emotional_value,urgency,repetition_penalty,status,created_at,expires_at,shared_at,meta_json)
+    VALUES(?,?,?,?,?,?,?,?,'pending',?,?,NULL,?)`, [newId('share'), 'event', event.id, noveltyForLifeKind(event.kind), 0.5, 0.45, 0.1, 0, timestamp, expiresAt, meta]);
+}
+
+function noveltyForLifeKind(kind: string): number {
+  switch (kind) {
+    case 'play': return 0.8;
+    case 'out': return 0.7;
+    case 'meal': return 0.55;
+    case 'chore': return 0.45;
+    default: return 0.35;
+  }
+}
 
 export interface LifeVitalsRow { energy:number; hunger:number; stress:number; social_need:number; loneliness:number; curiosity:number; comfort:number; focus:number; sleep_debt:number; updated_at:string; meta_json:string; }
 export interface LifeDayThemeRow { id:string; local_date:string; theme:string; tone_tags_json:string; source_factors_json:string; created_at:string; }

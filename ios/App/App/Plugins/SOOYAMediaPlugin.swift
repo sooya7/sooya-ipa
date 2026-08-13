@@ -447,3 +447,4 @@ public final class SOOYAMediaPlugin: CAPPlugin, CAPBridgedPlugin {
         call.reject(error.localizedDescription, String(describing: error), error)
     }
 }
+

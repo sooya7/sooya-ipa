@@ -48,3 +48,4 @@ export function limitToThreeSentences(text: string): string {
   const joined = sentences.join(' ').trim();
   return joined.length <= 280 ? joined : `${joined.slice(0, 280)}…`;
 }
+

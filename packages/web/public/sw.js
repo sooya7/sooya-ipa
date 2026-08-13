@@ -114,3 +114,4 @@ self.addEventListener('fetch', (event) => {
     return hit ?? network;
   }));
 });
+

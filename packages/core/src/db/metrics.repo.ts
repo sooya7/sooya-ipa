@@ -16,3 +16,4 @@ export class MetricsRepo{
   async exportRows(fromDate:string,toDate:string):Promise<MetricExportRow[]>{return await this.db.query(`SELECT date,category,metric,sum_value sum,count,COALESCE(min_value,0) min,COALESCE(max_value,0) max FROM metric_daily WHERE date BETWEEN ? AND ? ORDER BY date,category,metric`,[fromDate,toDate]);}
 }
 function percentileAt(buckets:Array<{bucket:number;count:number}>,q:number):number{const total=buckets.reduce((sum,item)=>sum+item.count,0);if(total<=0)return 0;const target=total*q;let cumulative=0;for(const item of buckets){cumulative+=item.count;if(cumulative>=target)return item.bucket;}return buckets.at(-1)?.bucket??0;}
+

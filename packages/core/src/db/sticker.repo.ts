@@ -324,3 +324,4 @@ function stickerOrder(options: StickerListOptions): string {
   if (options.sort === 'recent' || options.scope === 'recent' || options.scope === 'favorite') return 'user_last_used_at IS NULL,user_last_used_at DESC,created_at DESC';
   return 'created_at DESC,id DESC';
 }
+

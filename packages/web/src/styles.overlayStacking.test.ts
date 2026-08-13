@@ -75,3 +75,4 @@ describe('bottom overlay stacking', () => {
     expect(() => declaration(optin, 'bottom')).toThrow();
   });
 });
+

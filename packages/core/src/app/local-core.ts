@@ -2,14 +2,22 @@ import type { LocalDatabase } from '../platform/database.js';
 import type { SecretsPlatform } from '../platform/secrets.js';
 import type { MediaPlatform } from '../platform/media.js';
 import type { HttpPlatform } from '../platform/http.js';
-import { ConfigRepository, JobRepo, LifeCityRepo, LifeRepo, LocationRepo, MediaRepo, MemoryRepo, MessageRepo, MetricsRepo, MomentRepo, ReplyBatchRepo, SettingsRepo, StickerRepo, ThoughtRepo, VoiceRepo, WeatherRepo, type MediaRow, type Sticker } from '../db/index.js';
+import { ConfigRepository, JobRepo, LifeCityRepo, LifeClockRepo, LifeRepo, LifeV2Repo, LocationRepo, MediaRepo, MemoryRepo, MessageRepo, MetricsRepo, MomentRepo, ReplyBatchRepo, SettingsRepo, StickerRepo, SummaryRepo, ThoughtRepo, VoiceRepo, WeatherRepo, type MediaRow, type Sticker } from '../db/index.js';
 import type { ChatProvider } from '../providers/types.js';
+import type { MemoryProvider } from '../memory/types.js';
+import { LocalMemoryProvider } from '../memory/local-memory-provider.js';
+import { SqliteLocalMemoryStore } from '../memory/local-store.js';
+import { MemoryExtractor } from '../memory/extractor.js';
 import type { McpPlatform } from '../platform/mcp.js';
 import { McpRepository } from '../db/mcp.repo.js';
 import { ToolRegistry, ToolPolicy } from '../tools/index.js';
 import type { ToolExecutionContext } from '../tools/registry.js';
 import type { ToolCallRuntime } from '../tools/tool-runtime.js';
 import { ReplyCoordinator } from './reply-coordinator.js';
+import { ContextBuilder } from './context-builder.js';
+import { SummaryBuilder } from './summary-builder.js';
+import { LocalLifeCatchUp } from '../life/catch-up-service.js';
+import { MomentComposer } from '../moments/composer.js';
 import { LATEST_SCHEMA_VERSION } from '../db/migrations.js';
 import type { LocalEvent, LocalEventListener, LocalCoreApi, BootstrapInfo, ChatMessage, LifeState, MessagePage, MediaRef, MessagePart, MessageContext, MessageSearchHit, Moment, StickerInfo, WorldPresence, UploadInputFile, LocalAdminRequestOptions } from './types.js';
 
@@ -24,6 +32,7 @@ export interface LocalCoreOptions {
   toolRegistry?: ToolRegistry;
   toolPolicy?: ToolPolicy;
   toolRuntime?: ToolCallRuntime;
+  memoryProvider?: MemoryProvider;
   replyDebounceMs?: number;
   now?: () => Date;
 }
@@ -76,15 +85,18 @@ class LocalEmitter {
 /**
  * Local SOOYA Core: the in-process, server-free implementation of the client
  * contract. Reads come straight from local repositories; writes persist to the
- * local database and fan out through the event bus. Model calls, tool runtime
- * and MCP wiring are layered on top in later milestones.
+ * local database and fan out through the event bus. Provider streaming, tool runtime
+ * and MCP wiring stay behind this local boundary.
  */
 export class LocalCore implements LocalCoreApi {
   readonly database: LocalDatabase;
   readonly messagesRepo: MessageRepo;
   readonly momentsRepo: MomentRepo;
+  readonly momentComposer: MomentComposer;
   readonly stickersRepo: StickerRepo;
   readonly lifeRepo: LifeRepo;
+  readonly lifeClockRepo: LifeClockRepo;
+  readonly lifeCatchUp: LocalLifeCatchUp;
   readonly lifeCitiesRepo: LifeCityRepo;
   readonly locationsRepo: LocationRepo;
   readonly weatherRepo: WeatherRepo;
@@ -96,12 +108,16 @@ export class LocalCore implements LocalCoreApi {
   readonly toolRegistry: ToolRegistry;
   readonly toolPolicy: ToolPolicy;
   readonly memoryRepo: MemoryRepo;
+  readonly memoryProvider: MemoryProvider;
+  readonly summaryRepo: SummaryRepo;
   readonly thoughtsRepo: ThoughtRepo;
   readonly voicesRepo: VoiceRepo;
   readonly metricsRepo: MetricsRepo;
   readonly mediaRepo: MediaRepo;
   readonly events: LocalEmitter;
   readonly replies: ReplyCoordinator;
+  readonly contextBuilder: ContextBuilder;
+  readonly summaryBuilder: SummaryBuilder;
 
   constructor(private readonly options: LocalCoreOptions) {
     const db = options.db;
@@ -111,6 +127,8 @@ export class LocalCore implements LocalCoreApi {
     this.momentsRepo = new MomentRepo(db, now);
     this.stickersRepo = new StickerRepo(db, now);
     this.lifeRepo = new LifeRepo(db, now);
+    this.lifeClockRepo = new LifeClockRepo(db, now);
+    this.lifeCatchUp = new LocalLifeCatchUp({ clock: this.lifeClockRepo, now, detailedWindowMs: 7 * 86_400_000, maxTransitions: 200 });
     this.lifeCitiesRepo = new LifeCityRepo(db, now);
     this.locationsRepo = new LocationRepo(db, now);
     this.weatherRepo = new WeatherRepo(db, now);
@@ -122,18 +140,54 @@ export class LocalCore implements LocalCoreApi {
     this.toolRegistry = options.toolRegistry ?? new ToolRegistry();
     this.toolPolicy = options.toolPolicy ?? new ToolPolicy(this.toolRegistry);
     this.memoryRepo = new MemoryRepo(db, now);
+    this.summaryRepo = new SummaryRepo(db, now);
     this.thoughtsRepo = new ThoughtRepo(db, now);
     this.voicesRepo = new VoiceRepo(db, now);
     this.metricsRepo = new MetricsRepo(db, now);
     this.mediaRepo = new MediaRepo(db, now);
+    const configuredProviders = options.http
+      ? async () => (await import('../providers/builtin.js')).createConfiguredProviders(options.http!, this.configRepo)
+      : undefined;
+    this.memoryProvider = options.memoryProvider ?? new LocalMemoryProvider({
+      store: new SqliteLocalMemoryStore(this.memoryRepo),
+      extract: async (input) => await new MemoryExtractor({
+        provider: async () => options.chatProvider ?? await options.chatProviderFactory?.() ?? (await configuredProviders?.())?.chat ?? null
+      }).extract(input),
+      currentRevision: async (batchId) => await this.batchesRepo.currentRevision(batchId),
+      embeddingProvider: async () => (await configuredProviders?.())?.embedding ?? null,
+      rerankProvider: async () => (await configuredProviders?.())?.rerank ?? null
+    });
+    this.momentComposer = new MomentComposer({
+      life: new LifeV2Repo(db, now),
+      moments: this.momentsRepo,
+      provider: async () => options.chatProvider ?? await options.chatProviderFactory?.() ?? (await configuredProviders?.())?.chat ?? null,
+      now
+    });
+    this.contextBuilder = new ContextBuilder({
+      messages: this.messagesRepo,
+      summaries: this.summaryRepo,
+      memory: this.memoryProvider,
+      settings: this.settingsRepo,
+      life: this.lifeRepo,
+      locations: this.locationsRepo,
+      weather: this.weatherRepo,
+      stickers: this.stickersRepo,
+      now
+    });
+    this.summaryBuilder = new SummaryBuilder({
+      messages: this.messagesRepo,
+      summaries: this.summaryRepo,
+      provider: async () => options.chatProvider ?? await options.chatProviderFactory?.() ?? (await configuredProviders?.())?.chat ?? null
+    });
     this.events = new LocalEmitter(now);
     this.replies = new ReplyCoordinator({
       messages: this.messagesRepo,
       batches: this.batchesRepo,
-      memory: this.memoryRepo,
+      memory: this.memoryProvider,
       provider: options.chatProvider,
       providerFactory: options.chatProviderFactory ?? (options.http ? async () => (await import('../providers/builtin.js')).createConfiguredProviders(options.http!, this.configRepo).then((providers) => providers.chat) : undefined),
       toolRuntime: options.toolRuntime,
+      contextBuilder: this.contextBuilder,
       now,
       debounceMs: options.replyDebounceMs,
       emit: (type, data) => this.events.emit(type, data)
@@ -147,11 +201,14 @@ export class LocalCore implements LocalCoreApi {
   /** Foreground: recover interrupted jobs before the scheduler drains them. */
   async onAppActive(): Promise<void> {
     await this.jobsRepo.recoverStuck();
+    await this.lifeCatchUp.catchUp().catch(() => undefined);
+    await this.momentComposer.compose().catch(() => undefined);
     await this.replies.recover();
   }
 
   /** Background: persist WAL state so the database survives suspension. */
   async onAppInactive(): Promise<void> {
+    this.replies.interruptAll('app_inactive');
     try {
       await this.options.db.execute('PRAGMA wal_checkpoint(TRUNCATE)');
     } catch { /* checkpoint is best-effort */ }
@@ -160,6 +217,8 @@ export class LocalCore implements LocalCoreApi {
   // ---- reads ---------------------------------------------------------------
 
   async bootstrap(): Promise<BootstrapInfo> {
+    await this.lifeCatchUp.catchUp().catch(() => undefined);
+    const persona = await this.settingsRepo.get<Record<string, unknown>>('persona', { name: 'SOOYA', avatar: '', userAvatar: '', tagline: '' });
     const [countRow, maxSeqRow, minSeqRow, page, stickers, life, presence] = await Promise.all([
       this.options.db.query<{ c: number }>("SELECT COUNT(*) c FROM messages WHERE conversation_id = 'main'"),
       this.options.db.query<{ m: number | null }>("SELECT MAX(seq) m FROM messages WHERE conversation_id = 'main'"),
@@ -174,7 +233,12 @@ export class LocalCore implements LocalCoreApi {
     return {
       conversation: {
         conversationId: 'main',
-        persona: { name: 'SOOYA', avatar: '', userAvatar: '', tagline: '' },
+        persona: {
+          name: typeof persona.name === 'string' ? persona.name : 'SOOYA',
+          avatar: typeof persona.avatar === 'string' ? persona.avatar : '',
+          userAvatar: typeof persona.userAvatar === 'string' ? persona.userAvatar : '',
+          tagline: typeof persona.tagline === 'string' ? persona.tagline : ''
+        },
         messageCount,
         lastSeq,
         lastEventSeq: this.events.lastSequence
@@ -240,6 +304,7 @@ export class LocalCore implements LocalCoreApi {
     const admission = await this.batchesRepo.appendOrCreateMessage(message.id, dueAt, dueAt);
     this.events.emit('message.received', { message });
     this.events.emit('reply.queued', { batchId: admission.batch.id, revision: admission.revision, status: admission.batch.status });
+    if (message.seq > 0 && message.seq % 20 === 0) void this.summaryBuilder.build().catch(() => undefined);
     if (this.options.chatProvider || this.options.chatProviderFactory || this.options.http) this.replies.schedule(admission.batch.id, admission.revision);
     return { message, duplicate: false, replyPending: true };
   }
@@ -257,8 +322,9 @@ export class LocalCore implements LocalCoreApi {
   async retryBatch(id: string): Promise<{ batchId: string; revision: number; status: string }> {
     const batch = await this.batchesRepo.get(id);
     if (!batch) throw new Error(`batch ${id} not found`);
-    if (this.options.chatProvider || this.options.chatProviderFactory || this.options.http) this.replies.schedule(batch.id, 0);
-    return { batchId: batch.id, revision: 0, status: batch.status };
+    const retried = await this.batchesRepo.retry(batch.id);
+    if (retried && (this.options.chatProvider || this.options.chatProviderFactory || this.options.http)) this.replies.schedule(retried.id, retried.revision);
+    return { batchId: batch.id, revision: retried?.revision ?? batch.revision, status: retried?.status ?? batch.status };
   }
 
   async upload(files: UploadInputFile[], _options: { signal?: AbortSignal } = {}): Promise<{ media: MediaRef[]; failed: Array<{ filename: string; error: string; code?: string }> }> {
@@ -450,8 +516,8 @@ export class LocalCore implements LocalCoreApi {
       return { applied: decodeURIComponent(applyPreset), models: (await this.adminRequest<{ models: Record<string, unknown> }>('/api/admin/models')).models } as T;
     }
     if (route === '/api/admin/memories' || route === '/api/admin/memory/legacy') {
-      const rows = await this.options.db.query<{ id: string; kind: string; content: string; importance: number; confidence: number; created_at: string; updated_at: string; hits: number }>('SELECT id,kind,content,importance,confidence,created_at,updated_at,hits FROM memories WHERE active=1 ORDER BY updated_at DESC LIMIT ?', [route.endsWith('/legacy') ? 100 : 500]);
-      const memories = rows.map((row) => ({ id: row.id, kind: row.kind, content: row.content, importance: row.importance, confidence: row.confidence, createdAt: row.created_at, updatedAt: row.updated_at, hits: row.hits, hasEmbedding: false }));
+      const rows = await this.options.db.query<{ id: string; kind: string; content: string; importance: number; confidence: number; created_at: string; updated_at: string; hits: number; has_embedding: number }>('SELECT id,kind,content,importance,confidence,created_at,updated_at,hits,embedding IS NOT NULL AS has_embedding FROM memories WHERE active=1 ORDER BY updated_at DESC LIMIT ?', [route.endsWith('/legacy') ? 100 : 500]);
+      const memories = rows.map((row) => ({ id: row.id, kind: row.kind, content: row.content, importance: row.importance, confidence: row.confidence, createdAt: row.created_at, updatedAt: row.updated_at, hits: row.hits, hasEmbedding: row.has_embedding === 1 }));
       return route.endsWith('/legacy') ? { memories, total: memories.length, readOnly: true } as T : { memories, stats: { total: memories.length } } as T;
     }
     if (route === '/api/admin/memories/clear' && method === 'POST') {
@@ -481,6 +547,7 @@ export class LocalCore implements LocalCoreApi {
     const contextId = route.match(/^\/api\/admin\/chat\/history\/([^/]+)\/context$/u)?.[1];
     if (contextId) return await this.messageContext(decodeURIComponent(contextId), { before: Number(url.searchParams.get('before') ?? 10), after: Number(url.searchParams.get('after') ?? 10) }) as T;
     if (route === '/api/admin/chat/clear' && method === 'POST') { const count = await this.messagesRepo.count(); await this.messagesRepo.clearAll(); return { cleared: true, messages: count } as T; }
+    if (route === '/api/admin/chat/summary/build' && method === 'POST') return await this.summaryBuilder.build() as T;
     if (route === '/api/admin/jobs') return { jobs: await this.jobsRepo.list(100) } as T;
     if (route === '/api/admin/errors' && method === 'DELETE') return { cleared: true } as T;
     if (route === '/api/admin/errors') return { errors: [] } as T;
@@ -490,11 +557,12 @@ export class LocalCore implements LocalCoreApi {
       const started = (this.options.now?.() ?? new Date()).toISOString();
       await this.options.db.run(`INSERT INTO local_backup_metadata(id,target,state,schema_version,created_at,detail_json) VALUES(?,?, 'creating', ?, ?, '{}')`, [name, name, LATEST_SCHEMA_VERSION, started]);
       try {
-        await this.options.db.backup(name);
+        const backup = await this.options.db.backup(name);
         const integrity = await this.options.db.integrityCheck();
         const finished = (this.options.now?.() ?? new Date()).toISOString();
-        await this.options.db.run(`UPDATE local_backup_metadata SET state=?,verified_at=?,detail_json=? WHERE id=?`, [integrity.ok ? 'ready' : 'failed', finished, JSON.stringify(integrity), name]);
-        return { backup: { name, path: name, bytes: 0, createdAt: started, sha256: '', verified: integrity.ok, mediaArchived: false } } as T;
+        const detail = { ...integrity, native: backup ?? null };
+        await this.options.db.run(`UPDATE local_backup_metadata SET state=?,bytes=?,sha256=?,verified_at=?,detail_json=? WHERE id=?`, [integrity.ok ? 'ready' : 'failed', backup && typeof backup === 'object' ? backup.sizeBytes ?? null : null, backup && typeof backup === 'object' ? backup.sha256 ?? null : null, finished, JSON.stringify(detail), name]);
+        return { backup: { name, path: name, bytes: backup && typeof backup === 'object' ? backup.sizeBytes ?? 0 : 0, createdAt: started, sha256: backup && typeof backup === 'object' ? backup.sha256 ?? '' : '', verified: integrity.ok && (backup && typeof backup === 'object' ? backup.verified !== false : true), mediaArchived: false } } as T;
       } catch (error) {
         await this.options.db.run(`UPDATE local_backup_metadata SET state='failed',detail_json=? WHERE id=?`, [JSON.stringify({ error: error instanceof Error ? error.message : String(error) }), name]);
         throw error;
@@ -513,6 +581,8 @@ export class LocalCore implements LocalCoreApi {
       return { name, verified: integrity.ok, integrity } as T;
     }
     if (route === '/api/admin/notifications') return { notifications: await this.configRepo.notificationCapabilities() } as T;
+    if (route === '/api/admin/life/catch-up' && method === 'POST') return await this.lifeCatchUp.catchUp() as T;
+    if (route === '/api/admin/moments/compose' && method === 'POST') return await this.momentComposer.compose() as T;
     if (route === '/api/admin/ota' && method === 'GET') return { manifestUrl: await this.configRepo.getPreference('ota.manifestUrl', ''), state: (await this.options.db.query('SELECT * FROM local_update_state WHERE id=1'))[0] ?? null } as T;
     if (route === '/api/admin/ota' && (method === 'PUT' || method === 'PATCH')) {
       const manifestUrl = typeof body.manifestUrl === 'string' ? body.manifestUrl.trim() : '';

@@ -91,3 +91,4 @@ export function LifeContactBoundaryForm({ initial, onNotice }: LifeContactBounda
     </section>
   );
 }
+

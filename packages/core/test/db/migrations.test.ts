@@ -27,22 +27,23 @@ describe('local schema migrations', () => {
       [41, 'local_memory_provider'],
       [42, 'local_update_state'],
       [43, 'local_backup_metadata'],
-      [44, 'local_provider_and_preferences']
+      [44, 'local_provider_and_preferences'],
+      [45, 'ota_two_phase_state']
     ]);
-    expect(LATEST_SCHEMA_VERSION).toBe(44);
+    expect(LATEST_SCHEMA_VERSION).toBe(45);
   });
 
   it('migrates a fresh database and is idempotent', async () => {
     const db = createDb();
     const now = () => '2026-08-13T02:00:00.000Z';
 
-    await expect(migrateDatabase(db, { now })).resolves.toMatchObject({ version: 44 });
+    await expect(migrateDatabase(db, { now })).resolves.toMatchObject({ version: 45 });
     const callsAfterFirstRun = db.transactionCalls;
-    await expect(migrateDatabase(db, { now })).resolves.toMatchObject({ version: 44, applied: [] });
+    await expect(migrateDatabase(db, { now })).resolves.toMatchObject({ version: 45, applied: [] });
 
     const applied = await db.query<{ version: number; name: string }>('SELECT version, name FROM schema_migrations ORDER BY version');
-    expect(applied).toHaveLength(44);
-    expect(applied.at(-1)).toEqual({ version: 44, name: 'local_provider_and_preferences' });
+    expect(applied).toHaveLength(45);
+    expect(applied.at(-1)).toEqual({ version: 45, name: 'ota_two_phase_state' });
     expect(db.transactionCalls).toBe(callsAfterFirstRun);
   });
 

@@ -97,3 +97,4 @@ describe('native batch transactions, FTS and foreign keys', () => {
     expect(integrity).toMatchObject({ ok: true, foreignKeys: [] });
   });
 });
+

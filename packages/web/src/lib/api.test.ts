@@ -404,3 +404,4 @@ describe('mediaUrl', () => {
     expect(mediaUrl('/api/media/media_1')).toBe('/api/media/media_1');
   });
 });
+

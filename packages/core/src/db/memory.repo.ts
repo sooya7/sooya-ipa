@@ -18,6 +18,14 @@ export interface MemoryRow {
   source: string;
   source_id: string | null;
   source_hash: string | null;
+  embedding: Uint8Array | null;
+  embedding_dim: number | null;
+  embedding_model: string | null;
+}
+
+export interface MemorySearchRow extends MemoryRow {
+  fts_score?: number;
+  score?: number;
 }
 
 export interface UpsertMemoryInput {
@@ -36,6 +44,8 @@ export interface MemoryCommitCandidate {
   importance?: number;
   confidence?: number;
   sourceHash?: string | null;
+  embedding?: number[];
+  embeddingModel?: string | null;
 }
 
 export interface MemoryCommitInput {
@@ -142,9 +152,13 @@ export class MemoryRepo {
           inserted += 1;
           const id = newId('mem');
           ops.push(runOperation(
-            `INSERT INTO memories(id,kind,content,normalized,importance,confidence,created_at,updated_at,expires_at,hits,active,source,source_hash)
-             VALUES(?,?,?,?,?,?,?,?,NULL,0,1,'local',?)`,
-            [id, candidate.kind, candidate.content, normalizeds[index]!, candidate.importance ?? 0.5, candidate.confidence ?? 0.6, ts, ts, candidate.sourceHash ?? null]
+            `INSERT INTO memories(id,kind,content,normalized,importance,confidence,created_at,updated_at,expires_at,hits,embedding,embedding_dim,embedding_model,active,source,source_hash)
+             VALUES(?,?,?,?,?,?,?,?,NULL,0,?,?,?,1,'local',?)`,
+            [id, candidate.kind, candidate.content, normalizeds[index]!, candidate.importance ?? 0.5, candidate.confidence ?? 0.6, ts, ts,
+              candidate.embedding ? encodeFloat32(candidate.embedding) : null,
+              candidate.embedding?.length ?? null,
+              candidate.embeddingModel ?? null,
+              candidate.sourceHash ?? null]
           ));
           existingByNormalized.set(normalized, id);
         }
@@ -180,6 +194,65 @@ export class MemoryRepo {
     }
   }
 
+  async searchFtsRows(query: string, limit = 50): Promise<MemorySearchRow[]> {
+    const normalized = query.trim();
+    if (!normalized) return [];
+    const match = normalized.replace(/["'*^()]/gu, ' ').split(/\s+/u).filter(Boolean).map((term) => `"${term}"`).join(' OR ');
+    try {
+      return await this.db.query<MemorySearchRow>(
+        `SELECT m.*, bm25(memories_fts) AS fts_score
+         FROM memories_fts JOIN memories m ON m.rowid = memories_fts.rowid
+         WHERE m.active=1 AND memories_fts MATCH ?
+         ORDER BY bm25(memories_fts) LIMIT ?`,
+        [match, Math.max(1, Math.min(500, Math.trunc(limit)))]
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  async embedded(limit = 1000): Promise<MemoryRow[]> {
+    return await this.db.query<MemoryRow>(
+      'SELECT * FROM memories WHERE active=1 AND embedding IS NOT NULL ORDER BY importance DESC,updated_at DESC LIMIT ?',
+      [Math.max(1, Math.min(5000, Math.trunc(limit)))]
+    );
+  }
+
+  /** Local hybrid retrieval. SQLite stays authoritative; vector math is done in JS. */
+  async hybridSearch(query: string, queryEmbedding: number[] | undefined, limit = 20): Promise<Array<MemorySearchRow>> {
+    const boundedLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
+    const fts = await this.searchFtsRows(query, boundedLimit * 6);
+    const candidates = new Map<string, MemorySearchRow>();
+    for (const row of fts) candidates.set(row.id, { ...row, score: lexicalScore(row.fts_score) });
+    if (fts.length === 0 && query.trim()) {
+      const like = `%${query.trim().slice(0, 120)}%`;
+      const fallback = await this.db.query<MemorySearchRow>(
+        `SELECT * FROM memories WHERE active=1 AND (content LIKE ? OR normalized LIKE ?)
+         ORDER BY importance DESC,updated_at DESC LIMIT ?`,
+        [like, like.toLocaleLowerCase(), boundedLimit * 6]
+      );
+      for (const row of fallback) candidates.set(row.id, { ...row, score: 0.35 });
+    }
+    if (queryEmbedding?.length) {
+      for (const row of await this.embedded(5000)) {
+        const vector = decodeFloat32(row.embedding);
+        const cosine = vector.length === queryEmbedding.length ? cosineSimilarity(queryEmbedding, vector) : 0;
+        if (cosine > 0) candidates.set(row.id, { ...row, score: Math.max(candidates.get(row.id)?.score ?? 0, cosine) });
+      }
+    }
+    const now = Date.now();
+    return [...candidates.values()]
+      .map((row) => ({
+        ...row,
+        score: (row.score ?? 0) * 0.68
+          + row.importance * 0.14
+          + row.confidence * 0.10
+          + recencyScore(row.updated_at, now) * 0.08
+      }))
+      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+      .slice(0, boundedLimit);
+  }
+
   async list(options: { limit?: number; offset?: number; kind?: MemoryKind } = {}): Promise<MemoryRow[]> {
     const limit = Math.max(1, Math.min(500, Math.trunc(options.limit ?? 100)));
     const offset = Math.max(0, Math.trunc(options.offset ?? 0));
@@ -209,4 +282,35 @@ export class MemoryRepo {
   async setEmbedding(id: string, embedding: Uint8Array, dimensions: number, model: string): Promise<void> {
     await this.db.run('UPDATE memories SET embedding=?,embedding_dim=?,embedding_model=?,updated_at=? WHERE id=?', [embedding, dimensions, model, nowIso(this.now), id]);
   }
+}
+
+function lexicalScore(value: number | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) ? 1 / (1 + Math.abs(value)) : 0.45;
+}
+
+function recencyScore(value: string, nowMs: number): number {
+  const age = Math.max(0, nowMs - Date.parse(value));
+  return Number.isFinite(age) ? Math.exp(-age / (45 * 86_400_000)) : 0;
+}
+
+function decodeFloat32(value: unknown): number[] {
+  if (!value) return [];
+  let bytes: Uint8Array;
+  if (value instanceof Uint8Array) bytes = value;
+  else if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
+  else return [];
+  if (bytes.length < 4 || bytes.length % 4 !== 0) return [];
+  return [...new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength))];
+}
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dot = 0; let aa = 0; let bb = 0;
+  for (let index = 0; index < a.length; index += 1) { dot += a[index]! * b[index]!; aa += a[index]! ** 2; bb += b[index]! ** 2; }
+  return aa && bb ? Math.max(0, dot / Math.sqrt(aa * bb)) : 0;
+}
+
+function encodeFloat32(values: number[]): Uint8Array {
+  const output = new Float32Array(values.length);
+  output.set(values.map((value) => Number.isFinite(value) ? value : 0));
+  return new Uint8Array(output.buffer);
 }

@@ -36,3 +36,4 @@ export interface McpPlatform {
 }
 
 export type McpAdapter = McpPlatform;
+

@@ -1,6 +1,6 @@
 import { Capacitor } from '@capacitor/core';
 import { LocalCore } from '@sooya/core/app';
-import type { LocalDatabase, DatabaseValue, DatabaseIntegrityResult, RunResult } from '@sooya/core/platform';
+import type { LocalDatabase, DatabaseValue, DatabaseIntegrityResult, DatabaseBackupResult, RunResult } from '@sooya/core/platform';
 import type { SecretsPlatform } from '@sooya/core/platform';
 import type { MediaPlatform, MediaRecord, MediaSaveRequest } from '@sooya/core/platform';
 import type { HttpPlatform, HttpRequest, HttpResponse, HttpResponseHead } from '@sooya/core/platform';
@@ -11,7 +11,7 @@ import { migrateDatabase } from '@sooya/core/app';
 import { installSooyaClient } from '../lib/sooyaClient.js';
 import { LocalSooyaClient } from './LocalSooyaClient.js';
 import { probeNotificationCapabilities } from './notificationCapabilities.js';
-import { startOtaUpdater } from './otaUpdater.js';
+import { prepareOtaUpdater, type LocalOtaUpdater } from './otaUpdater.js';
 
 /**
  * Native bootstrap: wires the Capacitor Swift plugins into LocalCore and
@@ -51,7 +51,7 @@ export class CapacitorDatabase implements LocalDatabase {
   async integrityCheck(): Promise<DatabaseIntegrityResult> {
     return await this.plugin.call<DatabaseIntegrityResult>('integrity', {});
   }
-  async backup(name: string): Promise<void> { await this.plugin.call('backup', { name }); }
+  async backup(name: string): Promise<DatabaseBackupResult> { return await this.plugin.call<DatabaseBackupResult>('backup', { name }); }
   async restore(name: string): Promise<void> { await this.plugin.call('restore', { name }); }
 }
 
@@ -97,25 +97,87 @@ export class CapacitorHttp implements HttpPlatform {
   private readonly plugin = nativePlugin('SOOYAHttp');
 
   async request(request: HttpRequest): Promise<HttpResponse> {
+    if (request.signal?.aborted) throw request.signal.reason ?? new Error('HTTP request aborted');
+    const id = `http_${crypto.randomUUID()}`;
     const body = request.body === undefined ? {} : request.body instanceof Uint8Array || request.body instanceof ArrayBuffer
       ? { bodyBase64: bytesToBase64(request.body instanceof Uint8Array ? request.body : new Uint8Array(request.body)) }
       : { bodyText: request.body };
-    const result = await this.plugin.call<{ status: number; headers: Record<string, string>; dataBase64: string }>('request', {
-      id: `http_${crypto.randomUUID()}`,
-      url: request.url,
-      method: request.method ?? 'GET',
-      headers: request.headers ?? {},
-      timeoutMs: request.timeoutMs ?? 30_000,
+    const options = {
+      id, url: request.url, method: request.method ?? 'GET', headers: request.headers ?? {}, timeoutMs: request.timeoutMs ?? 30_000,
       ...body,
       ...(request.secretRef ? { secretRef: request.secretRef, secretHeader: request.secretHeader, secretPrefix: request.secretPrefix } : {})
+    };
+    let settled = false;
+    let abortListener: (() => void) | undefined;
+    const result = await new Promise<{ status: number; headers: Record<string, string>; dataBase64: string }>((resolve, reject) => {
+      const finish = (error?: Error, value?: { status: number; headers: Record<string, string>; dataBase64: string }) => {
+        if (settled) return;
+        settled = true;
+        if (abortListener) request.signal?.removeEventListener('abort', abortListener);
+        if (error) reject(error); else resolve(value!);
+      };
+      abortListener = () => {
+        void this.plugin.call('cancel', { id }).catch(() => undefined);
+        finish(request.signal?.reason instanceof Error ? request.signal.reason : new Error('HTTP request aborted'));
+      };
+      request.signal?.addEventListener('abort', abortListener, { once: true });
+      this.plugin.call<typeof result>('request', options).then((value) => finish(undefined, value), (error) => finish(error instanceof Error ? error : new Error(String(error))));
     });
     return { status: result.status, headers: result.headers ?? {}, body: base64ToBytes(result.dataBase64) };
   }
 
   async stream(request: HttpRequest, onChunk: (chunk: Uint8Array) => void): Promise<HttpResponseHead> {
-    const response = await this.request(request);
-    if (response.body.length) onChunk(response.body);
-    return { status: response.status, headers: response.headers };
+    if (request.signal?.aborted) throw request.signal.reason ?? new Error('HTTP stream aborted');
+    const streamPlugin = (this.plugin as unknown as { stream?: (options: Record<string, unknown>, callback: (value: unknown, error?: { message?: string }) => void) => unknown }).stream;
+    if (!streamPlugin) {
+      const response = await this.request(request);
+      if (response.body.length) onChunk(response.body);
+      return { status: response.status, headers: response.headers };
+    }
+    const id = `http_${crypto.randomUUID()}`;
+    const body = request.body === undefined ? {} : request.body instanceof Uint8Array || request.body instanceof ArrayBuffer
+      ? { bodyBase64: bytesToBase64(request.body instanceof Uint8Array ? request.body : new Uint8Array(request.body)) }
+      : { bodyText: request.body };
+    let head: HttpResponseHead | undefined;
+    let settled = false;
+    let abortListener: (() => void) | undefined;
+    const abort = async () => {
+      if (settled) return;
+      await this.plugin.call('cancel', { id }).catch(() => undefined);
+    };
+    const promise = new Promise<HttpResponseHead>((resolve, reject) => {
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        if (abortListener) request.signal?.removeEventListener('abort', abortListener);
+        if (error) reject(error); else if (head) resolve(head); else reject(new Error('native HTTP stream returned no headers'));
+      };
+      const callback = (value: unknown, error?: { message?: string }) => {
+        if (error) { finish(new Error(error.message ?? 'native HTTP stream failed')); return; }
+        if (!isRecordValue(value)) return;
+        if (value.type === 'headers') {
+          head = { status: typeof value.status === 'number' ? value.status : 0, headers: isRecordValue(value.headers) ? value.headers as Record<string, string> : {} };
+        } else if (value.type === 'chunk' && typeof value.dataBase64 === 'string') {
+          onChunk(base64ToBytes(value.dataBase64));
+        } else if (value.type === 'sse') {
+          const event = typeof value.event === 'string' ? `event: ${value.event}\n` : '';
+          const data = typeof value.data === 'string' ? value.data.split('\n').map((line) => `data: ${line}\n`).join('') : '';
+          onChunk(new TextEncoder().encode(`${event}${data}\n`));
+        } else if (value.type === 'complete') finish();
+      };
+      if (request.signal) {
+        abortListener = () => { void abort(); finish(request.signal?.reason instanceof Error ? request.signal.reason : new Error('HTTP stream aborted')); };
+        request.signal.addEventListener('abort', abortListener, { once: true });
+      }
+      try {
+        streamPlugin.call(this.plugin, {
+          id, url: request.url, method: request.method ?? 'GET', headers: request.headers ?? {}, timeoutMs: request.timeoutMs ?? 30_000,
+          ...body,
+          ...(request.secretRef ? { secretRef: request.secretRef, secretHeader: request.secretHeader, secretPrefix: request.secretPrefix } : {})
+        }, callback);
+      } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
+    });
+    return await promise;
   }
 }
 
@@ -146,6 +208,10 @@ export class CapacitorMcp implements McpPlatform {
   async close(): Promise<void> { /* Individual servers are closed by admin/remove or app teardown. */ }
 }
 
+let nativeOtaUpdater: LocalOtaUpdater | null = null;
+let nativeOtaCore: LocalCore | null = null;
+let nativeOtaReady: Promise<void> | null = null;
+
 /** Idempotent native bootstrap. Returns true when LocalCore was installed. */
 export async function installNativeLocalCore(): Promise<boolean> {
   if (!Capacitor.isNativePlatform()) return false;
@@ -158,9 +224,22 @@ export async function installNativeLocalCore(): Promise<boolean> {
   const core = new LocalCore({ db, secrets: new CapacitorSecrets(), mediaStore: new CapacitorMedia(), http: new CapacitorHttp(), mcp: new CapacitorMcp(), toolRegistry: registry, toolPolicy: policy, toolRuntime: runtime });
   installSooyaClient(new LocalSooyaClient(core));
   void probeNotificationCapabilities(core);
-  void startOtaUpdater(core);
+  nativeOtaCore = core;
+  nativeOtaUpdater = await prepareOtaUpdater(core);
   void wireNativeLifecycle(core);
   return true;
+}
+
+/** Called by the mounted React shell; safe to call repeatedly under StrictMode. */
+export async function notifyNativeAppReady(): Promise<void> {
+  if (!nativeOtaUpdater || !nativeOtaCore) return;
+  nativeOtaReady ??= (async () => {
+    const updater = nativeOtaUpdater!;
+    await updater.notifyReady();
+    const manifestUrl = await nativeOtaCore!.configRepo.getPreference('ota.manifestUrl', '').catch(() => '');
+    if (manifestUrl) void updater.checkAndApply(manifestUrl);
+  })();
+  await nativeOtaReady;
 }
 
 /**

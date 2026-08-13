@@ -158,3 +158,4 @@ describe('AdminState', () => {
     expect(adminStateFromError(new ApiError('boom', 500)).kind).toBe('error');
   });
 });
+

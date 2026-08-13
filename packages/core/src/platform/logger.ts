@@ -11,3 +11,4 @@ export interface LoggerPlatform {
 }
 
 export type LoggerAdapter = LoggerPlatform;
+

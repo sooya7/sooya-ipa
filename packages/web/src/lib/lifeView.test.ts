@@ -97,3 +97,4 @@ describe('lifeView', () => {
     expect(rows.map((row) => row.activity)).toEqual(['晚', '早']);
   });
 });
+

@@ -48,3 +48,4 @@ export function adminStateFromError(error: unknown): { kind: 'unauthorized' | 'f
 export function AdminNotice({ kind, children }: { kind: 'ok' | 'error'; children: ReactNode }) {
   return <div className={`admin-notice ${kind === 'error' ? 'admin-notice-error' : ''}`} role="status">{children}</div>;
 }
+

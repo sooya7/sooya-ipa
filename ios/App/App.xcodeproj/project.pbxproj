@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		5A0000000000000000000106 /* SOOYAArchivePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0000000000000000000006 /* SOOYAArchivePlugin.swift */; };
+		5A0000000000000000000107 /* SOOYAWebSocketPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0000000000000000000007 /* SOOYAWebSocketPlugin.swift */; };
 		5A0000000000000000000101 /* SOOYADatabasePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0000000000000000000001 /* SOOYADatabasePlugin.swift */; };
 		5A0000000000000000000102 /* SOOYAHttpPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0000000000000000000002 /* SOOYAHttpPlugin.swift */; };
 		5A0000000000000000000103 /* SOOYAMcpPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0000000000000000000003 /* SOOYAMcpPlugin.swift */; };
@@ -24,6 +26,8 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		5A0000000000000000000006 /* SOOYAArchivePlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SOOYAArchivePlugin.swift; sourceTree = "<group>"; };
+		5A0000000000000000000007 /* SOOYAWebSocketPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SOOYAWebSocketPlugin.swift; sourceTree = "<group>"; };
 		5A0000000000000000000001 /* SOOYADatabasePlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SOOYADatabasePlugin.swift; sourceTree = "<group>"; };
 		5A0000000000000000000002 /* SOOYAHttpPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SOOYAHttpPlugin.swift; sourceTree = "<group>"; };
 		5A0000000000000000000003 /* SOOYAMcpPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SOOYAMcpPlugin.swift; sourceTree = "<group>"; };
@@ -62,6 +66,8 @@
 				5A0000000000000000000003 /* SOOYAMcpPlugin.swift */,
 				5A0000000000000000000004 /* SOOYAMediaPlugin.swift */,
 				5A0000000000000000000005 /* SOOYASecretsPlugin.swift */,
+				5A0000000000000000000006 /* SOOYAArchivePlugin.swift */,
+				5A0000000000000000000007 /* SOOYAWebSocketPlugin.swift */,
 			);
 			path = Plugins;
 			sourceTree = "<group>";
@@ -95,6 +101,7 @@
 				504EC3131FED79650016851F /* Info.plist */,
 				2FAD9762203C412B000D30F8 /* config.xml */,
 				50B271D01FEDC1A000F3C39B /* public */,
+					SOOYA00000000000000000P10 /* Plugins */,
 				SOOYA00000000000000000P10 /* Plugins */,
 			);
 			path = App;
@@ -183,6 +190,8 @@
 			files = (
 				504EC3081FED79650016851F /* AppDelegate.swift in Sources */,
 				9582B6832FE993A70072D4E8 /* SceneDelegate.swift in Sources */,
+					5A0000000000000000000106 /* SOOYAArchivePlugin.swift in Sources */,
+					5A0000000000000000000107 /* SOOYAWebSocketPlugin.swift in Sources */,
 					5A0000000000000000000101 /* SOOYADatabasePlugin.swift in Sources */,
 					5A0000000000000000000102 /* SOOYAHttpPlugin.swift in Sources */,
 					5A0000000000000000000103 /* SOOYAMcpPlugin.swift in Sources */,
@@ -408,3 +417,4 @@
 	};
 	rootObject = 504EC2FC1FED79650016851F /* Project object */;
 }
+

@@ -1,11 +1,11 @@
 import type { ConfigRepository, ProviderConfig } from '../db/config.repo.js';
 import type { HttpPlatform } from '../platform/http.js';
 import type {
-  BinaryData, ChatContentPart, ChatProvider, ChatRequest, ChatResult, ChatToolCall, EmbeddingProvider, EmbeddingResult,
+  BinaryData, ChatContentPart, ChatChunk, ChatProvider, ChatRequest, ChatResult, ChatToolCall, EmbeddingProvider, EmbeddingResult,
   GeneratedImage, HealthStatus, ImageProvider, RerankProvider, RerankMatch, SynthesizedAudio, TTSOptions, TTSProvider
 } from './types.js';
 import { ImageEditUnsupportedError, ProviderNotConfiguredError, ProviderRequestError } from './types.js';
-import { binaryBytes, endpoint, healthStatus, isRecord, requestBytes, requestJson, type SecretHeader, toBase64 } from './http-json.js';
+import { binaryBytes, endpoint, healthStatus, isRecord, requestBytes, requestJson, requestSse, type SecretHeader, toBase64 } from './http-json.js';
 
 export interface ConfiguredProviders {
   chat: ChatProvider | null;
@@ -59,10 +59,11 @@ export class BuiltinChatProvider extends BuiltinProvider implements ChatProvider
     return this.config.provider === 'anthropic' ? await this.anthropic(request) : await this.openAiCompatible(request);
   }
 
-  async stream(request: ChatRequest, onChunk: (chunk: { delta: string }) => void): Promise<ChatResult> {
-    const result = await this.complete(request);
-    if (result.text) onChunk({ delta: result.text });
-    return result;
+  async stream(request: ChatRequest, onChunk: (chunk: ChatChunk) => void): Promise<ChatResult> {
+    if (!this.configured) throw new ProviderNotConfiguredError('chat');
+    return this.config.provider === 'anthropic'
+      ? await this.streamAnthropic(request, onChunk)
+      : await this.streamOpenAiCompatible(request, onChunk);
   }
 
   async inspectHealth(): Promise<HealthStatus> { return this.health('chat'); }
@@ -117,6 +118,96 @@ export class BuiltinChatProvider extends BuiltinProvider implements ChatProvider
       usage: isRecord(response.usage) ? { promptTokens: numberValue(response.usage.input_tokens), completionTokens: numberValue(response.usage.output_tokens) } : undefined,
       model: typeof response.model === 'string' ? response.model : this.model
     };
+  }
+
+  private async streamOpenAiCompatible(request: ChatRequest, onChunk: (chunk: ChatChunk) => void): Promise<ChatResult> {
+    const text: string[] = [];
+    const toolCalls = new Map<number, { id: string; name: string; args: string }>();
+    let finishReason: string | undefined;
+    let usage: { promptTokens?: number; completionTokens?: number } | undefined;
+    let model = this.model;
+    const response = await requestSse(this.http, {
+      url: endpoint(this.config.baseUrl, '/v1/chat/completions'), method: 'POST', signal: request.signal,
+      body: {
+        model: this.model,
+        messages: toOpenAiMessages(request),
+        stream: true,
+        ...(request.maxTokens ? { max_tokens: request.maxTokens } : {}),
+        ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+        ...(request.jsonMode ? { response_format: { type: 'json_object' } } : {}),
+        ...(request.tools?.length ? { tools: request.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })) } : {}),
+        ...(request.toolChoice ? { tool_choice: request.toolChoice === 'none' ? 'none' : request.toolChoice === 'auto' ? 'auto' : { type: 'function', function: { name: request.toolChoice.name } } } : {})
+      }
+    }, (event) => {
+      if (event.data.trim() === '[DONE]') return;
+      const value = parseJsonRecord(event.data);
+      if (!value) return;
+      if (typeof value.model === 'string') model = value.model;
+      const choice = Array.isArray(value.choices) ? value.choices[0] : undefined;
+      if (!isRecord(choice)) {
+        if (isRecord(value.usage)) usage = { promptTokens: numberValue(value.usage.prompt_tokens), completionTokens: numberValue(value.usage.completion_tokens) };
+        return;
+      }
+      const delta = isRecord(choice.delta) ? choice.delta : {};
+      if (typeof delta.content === 'string' && delta.content) { text.push(delta.content); onChunk({ delta: delta.content }); }
+      if (Array.isArray(delta.tool_calls)) for (const raw of delta.tool_calls) {
+        if (!isRecord(raw) || typeof raw.index !== 'number' || !Number.isInteger(raw.index)) continue;
+        const index = raw.index;
+        const current = toolCalls.get(index) ?? { id: '', name: '', args: '' };
+        const fn = isRecord(raw.function) ? raw.function : {};
+        if (typeof raw.id === 'string') current.id = raw.id;
+        if (typeof fn.name === 'string') current.name = fn.name;
+        const argumentsDelta = typeof fn.arguments === 'string' ? fn.arguments : '';
+        current.args += argumentsDelta;
+        toolCalls.set(index, current);
+        onChunk({ delta: '', toolCall: { index, ...(current.id ? { id: current.id } : {}), ...(current.name ? { name: current.name } : {}), ...(argumentsDelta ? { argumentsDelta } : {}) } });
+      }
+      if (typeof choice.finish_reason === 'string') { finishReason = choice.finish_reason; onChunk({ delta: '', finishReason }); }
+      if (isRecord(value.usage)) usage = { promptTokens: numberValue(value.usage.prompt_tokens), completionTokens: numberValue(value.usage.completion_tokens) };
+    }, this.secret);
+    if (response.eventCount === 0) return parseOpenAiFallback(response.rawBody, this.model, onChunk);
+    return { text: text.join(''), toolCalls: finalizeToolCalls(toolCalls), finishReason, usage, model };
+  }
+
+  private async streamAnthropic(request: ChatRequest, onChunk: (chunk: ChatChunk) => void): Promise<ChatResult> {
+    const text: string[] = [];
+    const toolCalls = new Map<number, { id: string; name: string; args: string }>();
+    let finishReason: string | undefined;
+    let usage: { promptTokens?: number; completionTokens?: number } | undefined;
+    let model = this.model;
+    const response = await requestSse(this.http, {
+      url: endpoint(this.config.baseUrl, '/v1/messages'), method: 'POST', signal: request.signal,
+      headers: { 'anthropic-version': '2023-06-01' },
+      body: {
+        model: this.model, max_tokens: request.maxTokens ?? 2048, stream: true,
+        ...(request.system ? { system: request.system } : {}), messages: toAnthropicMessages(request),
+        ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+        ...(request.tools?.length ? { tools: request.tools.map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.inputSchema })) } : {})
+      }
+    }, (event) => {
+      const value = parseJsonRecord(event.data);
+      if (!value) return;
+      if (event.event === 'message_start' && isRecord(value.message)) {
+        if (typeof value.message.model === 'string') model = value.message.model;
+        if (isRecord(value.message.usage)) usage = { promptTokens: numberValue(value.message.usage.input_tokens), completionTokens: numberValue(value.message.usage.output_tokens) };
+      } else if (event.event === 'content_block_start' && isRecord(value.content_block)) {
+        const index = typeof value.index === 'number' ? value.index : toolCalls.size;
+        if (value.content_block.type === 'tool_use') toolCalls.set(index, { id: typeof value.content_block.id === 'string' ? value.content_block.id : '', name: typeof value.content_block.name === 'string' ? value.content_block.name : '', args: '' });
+      } else if (event.event === 'content_block_delta' && isRecord(value.delta)) {
+        const index = typeof value.index === 'number' ? value.index : 0;
+        if (value.delta.type === 'text_delta' && typeof value.delta.text === 'string') { text.push(value.delta.text); onChunk({ delta: value.delta.text }); }
+        if (value.delta.type === 'input_json_delta' && typeof value.delta.partial_json === 'string') {
+          const current = toolCalls.get(index) ?? { id: '', name: '', args: '' };
+          current.args += value.delta.partial_json; toolCalls.set(index, current);
+          onChunk({ delta: '', toolCall: { index, ...(current.id ? { id: current.id } : {}), ...(current.name ? { name: current.name } : {}), argumentsDelta: value.delta.partial_json } });
+        }
+      } else if (event.event === 'message_delta') {
+        if (isRecord(value.delta) && typeof value.delta.stop_reason === 'string') { finishReason = value.delta.stop_reason; onChunk({ delta: '', finishReason }); }
+        if (isRecord(value.usage)) usage = { promptTokens: usage?.promptTokens, completionTokens: numberValue(value.usage.output_tokens) };
+      }
+    }, { ...this.secret, header: 'x-api-key', prefix: '' });
+    if (response.eventCount === 0) return parseAnthropicFallback(response.rawBody, this.model, onChunk);
+    return { text: text.join(''), toolCalls: finalizeToolCalls(toolCalls), finishReason, usage, model };
   }
 }
 
@@ -177,6 +268,7 @@ export class BuiltinTtsProvider extends BuiltinProvider implements TTSProvider {
 }
 
 function numberValue(value: unknown): number | undefined { return typeof value === 'number' ? value : undefined; }
+function parseJsonRecord(value: string): Record<string, unknown> | null { try { const parsed = JSON.parse(value) as unknown; return isRecord(parsed) ? parsed : null; } catch { return null; } }
 function extractText(value: unknown): string { return Array.isArray(value) ? value.flatMap((item) => isRecord(item) && typeof item.text === 'string' ? [item.text] : []).join('') : ''; }
 
 function toOpenAiMessages(request: ChatRequest): Array<Record<string, unknown>> {
@@ -215,4 +307,35 @@ function toOpenAiToolCall(value: unknown): ChatToolCall[] {
   } catch {
     return [{ id: value.id, name: value.function.name, arguments: {}, argumentsError: 'tool arguments are not valid JSON' }];
   }
+}
+
+function finalizeToolCalls(toolCalls: Map<number, { id: string; name: string; args: string }>): ChatToolCall[] {
+  return [...toolCalls.entries()].sort(([a], [b]) => a - b).flatMap(([index, call]) => {
+    if (!call.name) return [];
+    try {
+      const parsed = JSON.parse(call.args || '{}') as unknown;
+      return [{ id: call.id || `tool_${index}`, name: call.name, arguments: isRecord(parsed) ? parsed : {}, ...(isRecord(parsed) ? {} : { argumentsError: 'tool arguments must be an object' }) }];
+    } catch {
+      return [{ id: call.id || `tool_${index}`, name: call.name, arguments: {}, argumentsError: 'tool arguments are not valid JSON' }];
+    }
+  });
+}
+
+function parseOpenAiFallback(body: Uint8Array, model: string, onChunk: (chunk: ChatChunk) => void): ChatResult {
+  const value = parseJsonRecord(new TextDecoder().decode(body));
+  if (!value) throw new ProviderRequestError('stream response was neither SSE nor JSON');
+  const choice = Array.isArray(value.choices) ? value.choices[0] : undefined;
+  const message = isRecord(choice) && isRecord(choice.message) ? choice.message : {};
+  const text = typeof message.content === 'string' ? message.content : extractText(message.content);
+  if (text) onChunk({ delta: text });
+  return { text, toolCalls: Array.isArray(message.tool_calls) ? message.tool_calls.flatMap(toOpenAiToolCall) : undefined, finishReason: isRecord(choice) && typeof choice.finish_reason === 'string' ? choice.finish_reason : undefined, model: typeof value.model === 'string' ? value.model : model };
+}
+
+function parseAnthropicFallback(body: Uint8Array, model: string, onChunk: (chunk: ChatChunk) => void): ChatResult {
+  const value = parseJsonRecord(new TextDecoder().decode(body));
+  if (!value) throw new ProviderRequestError('stream response was neither SSE nor JSON');
+  const content = Array.isArray(value.content) ? value.content : [];
+  const text = content.filter((item): item is Record<string, unknown> => isRecord(item) && item.type === 'text' && typeof item.text === 'string').map((item) => item.text as string).join('');
+  if (text) onChunk({ delta: text });
+  return { text, toolCalls: content.flatMap((item): ChatToolCall[] => isRecord(item) && item.type === 'tool_use' && typeof item.id === 'string' && typeof item.name === 'string' ? [{ id: item.id, name: item.name, arguments: isRecord(item.input) ? item.input : {} }] : []), finishReason: typeof value.stop_reason === 'string' ? value.stop_reason : undefined, model: typeof value.model === 'string' ? value.model : model };
 }

@@ -194,3 +194,4 @@ describe('presetFromConfig（把当前配置存进模型库）', () => {
     expect(presetFromConfig('chat', cfg, full)).toMatch(/最多/);
   });
 });
+

@@ -17,6 +17,15 @@ class FakeHttp implements HttpPlatform {
   }
 }
 
+class StreamingHttp extends FakeHttp {
+  constructor(private readonly chunks: Uint8Array[], private readonly streamHeaders: Record<string, string> = { 'content-type': 'text/event-stream' }) { super([]); }
+  override async stream(request: HttpRequest, onChunk: (chunk: Uint8Array) => void): Promise<HttpResponseHead> {
+    this.requests.push(request);
+    for (const chunk of this.chunks) onChunk(chunk);
+    return { status: 200, headers: this.streamHeaders };
+  }
+}
+
 const config = (capability: ProviderConfig['capability'], options: Partial<ProviderConfig> = {}): ProviderConfig => ({
   capability,
   provider: 'openai-compatible',
@@ -35,6 +44,15 @@ const jsonResponse = (value: unknown): HttpResponse => ({
   headers: { 'content-type': 'application/json' },
   body: new TextEncoder().encode(JSON.stringify(value))
 });
+
+const streamChunks = (value: string, sizes: number[] = [5, 2, 11]): Uint8Array[] => {
+  const bytes = new TextEncoder().encode(value);
+  const chunks: Uint8Array[] = [];
+  let offset = 0;
+  for (const size of sizes) { if (offset >= bytes.length) break; chunks.push(bytes.slice(offset, offset + size)); offset += size; }
+  if (offset < bytes.length) chunks.push(bytes.slice(offset));
+  return chunks;
+};
 
 describe('built-in provider adapters', () => {
   it('sends opaque secret references and parses OpenAI-compatible tool calls', async () => {
@@ -71,5 +89,44 @@ describe('built-in provider adapters', () => {
     expect(Array.from(result.data as Uint8Array)).toEqual([0x49, 0x44, 0x33]);
     expect(result.mime).toBe('audio/mpeg');
     expect(http.requests[0]?.secretRef).toBe('provider.tts.key');
+  });
+
+  it('parses split OpenAI SSE text, tool arguments and finish metadata', async () => {
+    const openAiToolDelta = JSON.stringify({ choices: [{ delta: { content: '好', tool_calls: [{ index: 0, id: 'call-1', function: { name: 'life.today', arguments: '{"day":"today"' } }] } }] });
+    const body = [
+      'data: {"model":"stream-model","choices":[{"delta":{"content":"你"}}]}\n\n',
+      `data: ${openAiToolDelta}\n\n`,
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":4,"completion_tokens":3}}\n\n',
+      'data: [DONE]\n\n'
+    ].join('');
+    const http = new StreamingHttp(streamChunks(body, [1, 3, 2, 7]));
+    const provider = new BuiltinChatProvider(http, config('chat'));
+    const chunks: Array<{ delta: string; toolCall?: unknown; finishReason?: string }> = [];
+    const result = await provider.stream({ messages: [{ role: 'user', content: [{ type: 'text', text: '今天' }] }] }, (chunk) => chunks.push(chunk));
+
+    expect(result).toMatchObject({ text: '你好', finishReason: 'tool_calls', model: 'stream-model', usage: { promptTokens: 4, completionTokens: 3 } });
+    expect(result.toolCalls).toEqual([{ id: 'call-1', name: 'life.today', arguments: { day: 'today' } }]);
+    expect(chunks.map((chunk) => chunk.delta).filter(Boolean)).toEqual(['你', '好']);
+    expect(http.requests[0]).toMatchObject({ secretRef: 'provider.chat.key', secretHeader: 'Authorization' });
+    expect(JSON.parse(String(http.requests[0]?.body))).toMatchObject({ stream: true });
+  });
+
+  it('parses Anthropic event names and input_json_delta fragments', async () => {
+    const body = [
+      'event: message_start\ndata: {"message":{"model":"claude-stream","usage":{"input_tokens":5}}}\n\n',
+      'event: content_block_start\ndata: {"index":0,"content_block":{"type":"tool_use","id":"tool-1","name":"life.today"}}\n\n',
+      'event: content_block_delta\ndata: {"index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"day\\":"}}\n\n',
+      'event: content_block_delta\ndata: {"index":0,"delta":{"type":"input_json_delta","partial_json":"\\"today\\"}"}}\n\n',
+      'event: content_block_start\ndata: {"index":1,"content_block":{"type":"text"}}\n\n',
+      'event: content_block_delta\ndata: {"index":1,"delta":{"type":"text_delta","text":"在的"}}\n\n',
+      'event: message_delta\ndata: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}\n\n'
+    ].join('');
+    const http = new StreamingHttp(streamChunks(body, [4, 1, 9, 2]));
+    const provider = new BuiltinChatProvider(http, config('chat', { provider: 'anthropic', secretRef: 'provider.chat.key' }));
+    const result = await provider.stream({ messages: [{ role: 'user', content: [{ type: 'text', text: '你好' }] }] }, () => undefined);
+
+    expect(result).toMatchObject({ text: '在的', finishReason: 'end_turn', model: 'claude-stream', usage: { promptTokens: 5, completionTokens: 2 } });
+    expect(result.toolCalls).toEqual([{ id: 'tool-1', name: 'life.today', arguments: { day: 'today' } }]);
+    expect(http.requests[0]).toMatchObject({ secretHeader: 'x-api-key', secretPrefix: '' });
   });
 });

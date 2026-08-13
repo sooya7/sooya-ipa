@@ -248,3 +248,4 @@ describe('update checks on a long-lived page', () => {
     expect(container.registration.update).not.toHaveBeenCalled();
   });
 });
+

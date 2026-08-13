@@ -22,6 +22,13 @@ export interface DatabaseIntegrityResult {
   foreignKeys: unknown[];
 }
 
+export interface DatabaseBackupResult {
+  fileName?: string;
+  sizeBytes?: number;
+  sha256?: string;
+  verified?: boolean;
+}
+
 /** Async native-database port shared by Node test and Capacitor adapters. */
 export interface LocalDatabase {
   open(): Promise<void>;
@@ -31,7 +38,7 @@ export interface LocalDatabase {
   query<Row = Record<string, unknown>>(sql: string, values?: DbValue[]): Promise<Row[]>;
   transaction<T = unknown[]>(operations: DbOperation[]): Promise<T>;
   integrityCheck(): Promise<DatabaseIntegrityResult>;
-  backup(target: string): Promise<void>;
+  backup(target: string): Promise<DatabaseBackupResult | void>;
   restore?(target: string): Promise<void>;
 }
 

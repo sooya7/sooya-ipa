@@ -259,3 +259,4 @@ describe('LifeObservationDetails', () => {
     for (const label of forbiddenLabels) expect(container!.textContent).not.toContain(label);
   });
 });
+

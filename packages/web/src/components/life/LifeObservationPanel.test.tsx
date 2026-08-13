@@ -398,3 +398,4 @@ describe('LifeObservationPanel', () => {
     expect(container!.textContent).toContain('上次成功更新于 13:00');
   });
 });
+

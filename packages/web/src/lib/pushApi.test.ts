@@ -71,3 +71,4 @@ describe('requestPushApi', () => {
     await expect(requestPushApi('/api/push/status')).rejects.toThrow('通知请求失败 (502)');
   });
 });
+

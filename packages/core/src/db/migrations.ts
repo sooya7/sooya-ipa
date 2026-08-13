@@ -833,6 +833,20 @@ export const MIGRATIONS: Migration[] = [
       INSERT INTO notification_capabilities(id) VALUES (1);
       UPDATE app_runtime SET schema_version = 44, updated_at = datetime('now') WHERE id = 1;
     `)
+  },
+  {
+    version: 45,
+    name: 'ota_two_phase_state',
+    operations: script(`
+      ALTER TABLE local_update_state ADD COLUMN pending_bundle_id TEXT;
+      ALTER TABLE local_update_state ADD COLUMN last_good_bundle_id TEXT;
+      ALTER TABLE local_update_state ADD COLUMN failed_web_version TEXT;
+      ALTER TABLE local_update_state ADD COLUMN blocked_web_version TEXT;
+      ALTER TABLE local_update_state ADD COLUMN last_downloaded_at TEXT;
+      ALTER TABLE local_update_state ADD COLUMN last_failed_at TEXT;
+      INSERT OR IGNORE INTO local_update_state(id,updated_at) VALUES (1,datetime('now'));
+      UPDATE app_runtime SET schema_version = 45, updated_at = datetime('now') WHERE id = 1;
+    `)
   }
 ];
 

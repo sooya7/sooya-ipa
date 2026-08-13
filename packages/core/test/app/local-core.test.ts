@@ -66,6 +66,18 @@ describe('LocalCore', () => {
     expect(info.presence.location).toBeNull();
   });
 
+  it('turns completed local life activity into a bounded Moment candidate', async () => {
+    await core.lifeRepo.advance({ activity: '早餐', kind: 'meal', mood: 'happy', startedAt: '2026-08-13T01:00:00.000Z', endsAt: '2026-08-13T01:30:00.000Z' });
+    await core.lifeRepo.advance({ activity: '散步', kind: 'out', mood: 'calm', startedAt: '2026-08-13T01:30:00.000Z', endsAt: '2026-08-13T02:00:00.000Z' });
+
+    const candidates = await db.query<{ status: string; source_type: string }>("SELECT status,source_type FROM life_share_candidates");
+    expect(candidates).toEqual([{ status: 'pending', source_type: 'event' }]);
+
+    const composed = await core.momentComposer.compose(new Date('2026-08-13T03:00:00.000Z'));
+    expect(composed.created).toHaveLength(1);
+    expect((await core.moments()).moments[0]?.createdAt).toBe('2026-08-13T01:30:00.000Z');
+  });
+
   it('sends a user message, persists it and emits ordered local events', async () => {
     const seen: string[] = [];
     core.subscribe((event) => seen.push(event.type));

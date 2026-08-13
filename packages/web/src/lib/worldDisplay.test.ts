@@ -42,3 +42,4 @@ describe('world display formatters', () => {
     expect(weatherVisual(condition)).toBe(visual);
   });
 });
+

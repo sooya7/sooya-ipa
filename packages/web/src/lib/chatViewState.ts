@@ -71,3 +71,4 @@ export function anchorScrollCorrection(anchorTopInViewport: number, offsetFromVi
 export function isAnchorSettled(anchorTopInViewport: number, offsetFromViewportTop: number): boolean {
   return Math.abs(anchorTopInViewport - offsetFromViewportTop) < 0.5;
 }
+

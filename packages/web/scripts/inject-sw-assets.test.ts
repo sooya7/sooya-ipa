@@ -139,3 +139,4 @@ describe('inject-sw-assets', () => {
       .toThrow(/service worker not found/);
   });
 });
+

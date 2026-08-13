@@ -154,3 +154,4 @@ describe('validateArguments', () => {
     expect(validateArguments(nested, schema)).toBe('tool arguments contain a forbidden key');
   });
 });
+

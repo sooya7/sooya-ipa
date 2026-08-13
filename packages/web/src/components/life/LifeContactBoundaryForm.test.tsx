@@ -98,3 +98,4 @@ describe('LifeContactBoundaryForm', () => {
     expect(container!.querySelector<HTMLInputElement>('input[name="quietGapMinutes"]')!.value).toBe('240');
   });
 });
+

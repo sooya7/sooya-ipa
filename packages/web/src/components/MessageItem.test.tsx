@@ -263,3 +263,4 @@ describe('MessageItem 图片占位', () => {
     expect(button.style.width).toBe('260px');
   });
 });
+

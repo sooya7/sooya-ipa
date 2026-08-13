@@ -22,3 +22,4 @@ export function formatOneDecimal(value: number | null | undefined): string {
   const rounded = Math.round(value * 10) / 10;
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
 }
+

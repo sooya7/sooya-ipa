@@ -11,3 +11,4 @@ export class MomentRepo{
   async list(limit=50):Promise<MomentRow[]>{return await this.db.query("SELECT * FROM moments WHERE status='published' ORDER BY created_at DESC LIMIT ?",[clampInteger(limit,1,200)]);}
   async setLiked(id:string,liked:boolean):Promise<MomentRow|undefined>{const changed=(await this.db.run('UPDATE moments SET liked=?,updated_at=? WHERE id=?',[liked?1:0,nowIso(this.now),id])).changes;return changed?await this.get(id):undefined;}
 }
+

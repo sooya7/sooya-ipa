@@ -250,3 +250,4 @@ describe('ChatView 锚点恢复', () => {
     expect(viewStateRef.current).toEqual({ anchor: { messageId: 'm1', offsetFromViewportTop: -27 }, stickToBottom: false });
   });
 });
+

@@ -123,3 +123,4 @@ function validateToolDescriptor(tool: ToolDescriptor): void {
     throw new Error(`invalid model tool name: ${tool.modelName}`);
   }
 }
+

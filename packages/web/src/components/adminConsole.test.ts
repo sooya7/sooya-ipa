@@ -103,3 +103,4 @@ describe('merged admin console', () => {
     expect(PANEL).not.toContain("<a className=\"admin-side-action\" href=\"/\"");
   });
 });
+

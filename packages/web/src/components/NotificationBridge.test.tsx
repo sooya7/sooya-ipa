@@ -208,3 +208,4 @@ describe('NotificationBridge', () => {
     expect(toggle()).toBeNull();
   });
 });
+

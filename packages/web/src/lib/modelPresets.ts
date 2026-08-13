@@ -202,3 +202,4 @@ export function presetsBySlot(list: ModelPreset[]): Array<[ModelSlot, ModelPrese
     .map((slot) => [slot, list.filter((item) => item.slot === slot)] as [ModelSlot, ModelPreset[]])
     .filter(([, items]) => items.length > 0);
 }
+

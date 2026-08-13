@@ -84,3 +84,4 @@ describe('LifeCatchUpEngine', () => {
     expect(a.transitions).toEqual(b.transitions);
   });
 });
+

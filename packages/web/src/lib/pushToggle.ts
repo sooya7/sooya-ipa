@@ -58,3 +58,4 @@ export async function disablePushSubscription(
 
   return { browserRemoved: !browserError, serverRemoved, warning };
 }
+

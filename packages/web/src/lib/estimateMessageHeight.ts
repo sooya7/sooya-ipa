@@ -63,3 +63,4 @@ export function estimateMessageHeight(message: ChatMessage, previous: ChatMessag
   if (shouldStartDateSeparator(previous, message, timeZone)) height += DATE_SEPARATOR_H;
   return height + ITEM_PAD_BOTTOM;
 }
+

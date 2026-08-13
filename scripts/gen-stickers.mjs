@@ -471,3 +471,4 @@ manifest.push({ name: 'laugh', file: 'laugh.gif', emotion: '开心', tags: ['大
 
 fs.writeFileSync(path.join(OUT_DIR, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 console.log(`generated ${manifest.length} stickers into ${OUT_DIR}`);
+

@@ -13,8 +13,9 @@ export class SqliteLocalMemoryStore implements LocalMemoryStore {
     return await this.repo.commit(input, candidates);
   }
   async search(query: string, limit = 20): Promise<MemoryEntry[]> {
-    return (await this.repo.searchFts(query, limit)).flatMap((row) => [{ id: row.id, kind: 'event' as const, content: row.content, normalized: row.content.toLocaleLowerCase(), importance: 0.5, confidence: 0.6, createdAt: '', updatedAt: '', source: 'local' as const }]);
+    return (await this.repo.searchFtsRows(query, limit)).map(toEntry);
   }
+  async searchHybrid(query: string, queryEmbedding?: number[], limit = 20): Promise<MemoryEntry[]> { return (await this.repo.hybridSearch(query, queryEmbedding, limit)).map(toEntry); }
   async list(options: { limit?: number; offset?: number; kind?: MemoryEntry['kind'] } = {}): Promise<MemoryEntry[]> { return (await this.repo.list(options)).map(toEntry); }
   async update(id: string, patch: { content?: string; importance?: number; confidence?: number }): Promise<MemoryEntry | null> { const row = await this.repo.update(id, patch); return row ? toEntry(row) : null; }
   async forget(id: string): Promise<boolean> { return await this.repo.forget(id); }
@@ -22,5 +23,5 @@ export class SqliteLocalMemoryStore implements LocalMemoryStore {
 }
 
 function toEntry(row: MemoryRow): MemoryEntry {
-  return { id: row.id, kind: row.kind === 'summary' ? 'event' : row.kind, content: row.content, normalized: row.normalized, importance: row.importance, confidence: row.confidence, createdAt: row.created_at, updatedAt: row.updated_at, source: row.source, sourceId: row.source_id ?? undefined, sourceHash: row.source_hash ?? undefined };
+  return { id: row.id, kind: row.kind, content: row.content, normalized: row.normalized, importance: row.importance, confidence: row.confidence, createdAt: row.created_at, updatedAt: row.updated_at, source: row.source, sourceId: row.source_id ?? undefined, sourceHash: row.source_hash ?? undefined, score: 'score' in row && typeof row.score === 'number' ? row.score : undefined, hasEmbedding: Boolean(row.embedding?.length) };
 }

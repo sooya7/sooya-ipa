@@ -57,3 +57,4 @@ function parse(values) {
 }
 
 function hyphen(value) { return value.replace(/[A-Z]/gu, (letter) => `-${letter.toLowerCase()}`); }
+

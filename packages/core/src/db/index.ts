@@ -1,6 +1,7 @@
 export * from './database.js';
 export * from './config.repo.js';
 export * from './life.repo.js';
+export * from './life-clock.repo.js';
 export * from './location.repo.js';
 export * from './media.repo.js';
 export * from './memory.repo.js';

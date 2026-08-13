@@ -32,3 +32,4 @@ describe('composer draft storage', () => {
     expect(readComposerDraft(sessionStorage, 'main')).toBeNull();
   });
 });
+

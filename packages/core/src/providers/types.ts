@@ -60,7 +60,12 @@ export interface ChatRequest {
   toolChoice?: 'auto' | 'none' | { name: string };
 }
 
-export interface ChatChunk { delta: string; }
+export interface ChatChunk {
+  delta: string;
+  /** Incremental tool-call data emitted by streaming providers. */
+  toolCall?: { index: number; id?: string; name?: string; argumentsDelta?: string };
+  finishReason?: string;
+}
 
 export interface ChatResult {
   text: string;

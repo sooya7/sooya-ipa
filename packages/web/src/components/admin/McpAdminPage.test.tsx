@@ -122,3 +122,4 @@ describe('McpAdminPage', () => {
     expect(container!.querySelector('[role="dialog"]')?.textContent).toContain('UNIQUE LONG TOOL DESCRIPTION');
   });
 });
+

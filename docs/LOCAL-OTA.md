@@ -25,15 +25,17 @@ node scripts/build-ota.mjs \
   --bundle packages/web/dist \
   --out build/ota \
   --release-id ota-20260813-01 \
-  --native-min 1 --native-max 1 \
-  --schema-min 44 --schema-max 44 \
+  --native-min 2 --native-max 2 \
+  --schema-min 45 --schema-max 45 \
   --bridge-capability database.sqlite \
   --bridge-capability keychain.secrets \
   --bridge-capability http.native \
   --bridge-capability mcp.native \
   --bridge-capability media.sandbox \
   --bridge-capability notifications.local \
-  --bridge-capability ota.updater
+  --bridge-capability ota.updater \
+  --bridge-capability ota.signature.ed25519 \
+  --signing-key /secure/path/ota-ed25519-private.pem
 (cd build/ota && zip -qry ../bundle.zip bundle)
 ```
 
@@ -42,7 +44,9 @@ range, schema range and required bridge capabilities. The app rejects a
 manifest outside those gates and records pending/last-good state through the
 native updater. A production host must publish the manifest and matching
 `bundle.zip` as static HTTPS files; the app only checks an explicitly stored
-`ota.manifestUrl` preference.
+`ota.manifestUrl` preference. CI signs the canonical manifest with Ed25519
+when `OTA_PRIVATE_KEY` is configured and can publish immutable bundles plus
+`stable.json` when `OTA_PUBLISH_URL` and `OTA_PUBLISH_TOKEN` are configured.
 
 ## Verification
 
