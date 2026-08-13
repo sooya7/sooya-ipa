@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "ombre": {
+      "enabled": true,
+      "transport": "streamable-http",
+      "url": "https://ombre.invalid/mcp",
+      "auth": {
+        "type": "bearer-env",
+        "env": "OMBRE_MCP_TOKEN"
+      }
+    }
+  }
+}

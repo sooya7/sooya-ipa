@@ -1,0 +1,21 @@
+{
+  "name": "@sooya/migration-tools",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./portable": "./src/portable.mjs",
+    "./sqlite": "./src/sqlite.mjs",
+    "./ota": "./src/ota.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "storageVersion": 2,
+  "chat": {
+    "provider": "openai-chat",
+    "baseUrl": "https://models.invalid/v1",
+    "model": "fixture-chat",
+    "apiKeyEnv": "SOOYA_FIXTURE_CHAT_KEY"
+  }
+}
