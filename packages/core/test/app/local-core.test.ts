@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { LocalCore } from '../../src/app/local-core.js';
 import type { MediaPlatform, MediaRecord, MediaSaveRequest } from '../../src/platform/media.js';
 import type { SecretsPlatform } from '../../src/platform/secrets.js';
+import type { McpPlatform } from '../../src/platform/mcp.js';
 import { migrateDatabase } from '../../src/db/migrations.js';
 import { NodeLocalDatabase } from '../db/node-local-database.js';
 import { MessageRepo } from '../../src/db/index.js';
@@ -38,6 +39,16 @@ class MemorySecrets implements SecretsPlatform {
   async get(key: string): Promise<string | null> { return this.values.get(key) ?? null; }
   async set(key: string, value: string): Promise<void> { this.values.set(key, value); }
   async remove(key: string): Promise<void> { this.values.delete(key); }
+}
+
+function idleMcp(): McpPlatform {
+  return {
+    connect: async (config) => ({ serverId: config.id, state: 'ready' as const, toolCount: 0 }),
+    disconnect: async () => undefined,
+    listTools: async () => [],
+    callTool: async () => ({ structuredContent: {} }),
+    close: async () => undefined
+  };
 }
 
 describe('LocalCore', () => {
@@ -169,5 +180,52 @@ describe('LocalCore', () => {
     const result = await core.withdraw(message.id);
     expect(result.message.meta.withdrawnAt).toBeTruthy();
     expect(result.message.content[0]).toMatchObject({ type: 'text', text: '[消息已撤回]' });
+  });
+
+  it('routes admin memory deletion through the durable forget outbox', async () => {
+    const localCore = new LocalCore({ db, mcp: idleMcp() });
+    const created = await localCore.memoryRepo.upsert({ kind: 'preference', content: '管理员删除的记忆', sourceHash: 'hash-delete' });
+
+    await localCore.adminRequest(`/api/admin/memories/${encodeURIComponent(created.record.id)}`, { method: 'DELETE' });
+
+    await expect(db.query<{ active: number }>('SELECT active FROM memories WHERE id=?', [created.record.id])).resolves.toEqual([{ active: 0 }]);
+    await expect(db.query<{ operation: string; status: string; remote_source_id: string }>('SELECT operation,status,remote_source_id FROM memory_sync_outbox WHERE local_memory_id=?', [created.record.id])).resolves.toEqual([{ operation: 'forget', status: 'pending', remote_source_id: created.record.id }]);
+  });
+
+  it('creates forget tombstones for every memory when admin clears local memories', async () => {
+    const localCore = new LocalCore({ db, mcp: idleMcp() });
+    const first = await localCore.memoryRepo.upsert({ kind: 'event', content: '第一条待清理记忆' });
+    const second = await localCore.memoryRepo.upsert({ kind: 'event', content: '第二条待清理记忆' });
+
+    await localCore.adminRequest('/api/admin/memories/clear', { method: 'POST' });
+
+    await expect(db.query<{ count: number }>('SELECT COUNT(*) count FROM memory_tombstones')).resolves.toEqual([{ count: 2 }]);
+    const expectedIds = [first.record.id, second.record.id].sort();
+    await expect(db.query<{ local_memory_id: string }>('SELECT local_memory_id FROM memory_sync_outbox WHERE operation=\'forget\' ORDER BY local_memory_id')).resolves.toEqual(expectedIds.map((local_memory_id) => ({ local_memory_id })));
+  });
+
+  it('keeps an admin memory active when the atomic forget transaction fails', async () => {
+    const localCore = new LocalCore({ db, mcp: idleMcp() });
+    const created = await localCore.memoryRepo.upsert({ kind: 'event', content: '事务失败时仍应保留' });
+    const originalTransaction = db.transaction.bind(db);
+    db.transaction = async () => { throw new Error('injected transaction failure'); };
+
+    await expect(localCore.adminRequest(`/api/admin/memories/${encodeURIComponent(created.record.id)}`, { method: 'DELETE' })).rejects.toThrow('injected transaction failure');
+    db.transaction = originalTransaction;
+    await expect(db.query<{ active: number }>('SELECT active FROM memories WHERE id=?', [created.record.id])).resolves.toEqual([{ active: 1 }]);
+    await expect(db.query<{ count: number }>('SELECT COUNT(*) count FROM memory_tombstones')).resolves.toEqual([{ count: 0 }]);
+  });
+
+  it('keeps every admin memory active when the clear transaction fails', async () => {
+    const localCore = new LocalCore({ db, mcp: idleMcp() });
+    const first = await localCore.memoryRepo.upsert({ kind: 'event', content: '清空失败一' });
+    const second = await localCore.memoryRepo.upsert({ kind: 'event', content: '清空失败二' });
+    const originalTransaction = db.transaction.bind(db);
+    db.transaction = async () => { throw new Error('injected clear failure'); };
+
+    await expect(localCore.adminRequest('/api/admin/memories/clear', { method: 'POST' })).rejects.toThrow('injected clear failure');
+    db.transaction = originalTransaction;
+    await expect(db.query<{ id: string; active: number }>('SELECT id,active FROM memories WHERE id IN (?,?) ORDER BY id', [first.record.id, second.record.id])).resolves.toEqual([first.record.id, second.record.id].sort().map((id) => ({ id, active: 1 })));
+    await expect(db.query<{ count: number }>('SELECT COUNT(*) count FROM memory_tombstones')).resolves.toEqual([{ count: 0 }]);
   });
 });

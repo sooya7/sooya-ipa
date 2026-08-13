@@ -92,6 +92,60 @@ export class MemorySyncRepository {
     await this.setState({ localMemoryId: input.localMemoryId, remoteSourceId: input.remoteSourceId, state: 'pending_push', error: null });
   }
 
+  async forgetLocal(inputs: Array<{ localMemoryId: string; sourceId: string; sourceHash?: string | null; remoteRevision?: string | number | null; expiresAt: string }>): Promise<number> {
+    if (inputs.length === 0) return 0;
+    // The iOS database bridge caps a transaction at 10,000 statements. Keep
+    // the all-or-nothing contract instead of silently turning a large clear
+    // into a partially deleted local state.
+    if (inputs.length * 5 > 10_000) throw new Error('too many memories for one atomic forget transaction');
+    const operations = inputs.flatMap((input) => {
+      const timestamp = nowIso(this.now);
+      const payload = JSON.stringify({ sourceId: input.sourceId, localMemoryId: input.localMemoryId, sourceHash: input.sourceHash ?? null });
+      return [
+        {
+          type: 'run' as const,
+          sql: 'UPDATE memories SET active=0,updated_at=? WHERE id=? AND active=1',
+          values: [timestamp, input.localMemoryId]
+        },
+        {
+          type: 'run' as const,
+          sql: `INSERT INTO memory_tombstones(source_id,local_memory_id,source_hash,remote_revision,deleted_at,expires_at,synced)
+                VALUES(?,?,?,?,?,?,0) ON CONFLICT(source_id) DO UPDATE SET local_memory_id=excluded.local_memory_id,
+                source_hash=excluded.source_hash,remote_revision=excluded.remote_revision,deleted_at=excluded.deleted_at,
+                expires_at=excluded.expires_at,synced=0`,
+          values: [input.sourceId, input.localMemoryId, input.sourceHash ?? null, input.remoteRevision == null ? null : String(input.remoteRevision), timestamp, input.expiresAt]
+        },
+        {
+          type: 'run' as const,
+          sql: `UPDATE memory_sync_outbox SET remote_source_id=?,payload_json=?,status='pending',last_error=NULL,next_attempt_at=NULL,updated_at=?
+                WHERE id=(SELECT id FROM memory_sync_outbox WHERE local_memory_id=? AND operation='forget' AND status IN ('pending','failed') ORDER BY created_at DESC LIMIT 1)`,
+          values: [input.sourceId, payload, timestamp, input.localMemoryId]
+        },
+        {
+          type: 'run' as const,
+          sql: `INSERT INTO memory_sync_outbox(id,local_memory_id,remote_source_id,operation,payload_json,status,attempts,last_error,next_attempt_at,created_at,updated_at)
+                SELECT ?,?,?, 'forget',?,'pending',0,NULL,NULL,?,?
+                WHERE NOT EXISTS (SELECT 1 FROM memory_sync_outbox WHERE local_memory_id=? AND operation='forget' AND status IN ('pending','failed'))`,
+          values: [newId('memory-sync'), input.localMemoryId, input.sourceId, payload, timestamp, timestamp, input.localMemoryId]
+        },
+        {
+          type: 'run' as const,
+          sql: `INSERT INTO memory_sync_state(local_memory_id,remote_source_id,remote_revision,sync_state,last_synced_at,sync_error,updated_at)
+                VALUES(?,?,?,'pending_push',NULL,NULL,?)
+                ON CONFLICT(local_memory_id) DO UPDATE SET remote_source_id=excluded.remote_source_id,
+                remote_revision=excluded.remote_revision,sync_state='pending_push',sync_error=NULL,updated_at=excluded.updated_at`,
+          values: [input.localMemoryId, input.sourceId, input.remoteRevision == null ? null : String(input.remoteRevision), timestamp]
+        }
+      ];
+    });
+    await this.db.transaction(operations);
+    // Every input was an active row when the operation was assembled. The
+    // transaction either commits all five statements per row or rolls them
+    // all back, so the caller can use the input count without depending on
+    // the Node versus Capacitor transaction result envelope.
+    return inputs.length;
+  }
+
   async pending(limit = 50): Promise<MemorySyncOutboxRow[]> {
     return await this.db.query<MemorySyncOutboxRow>(
       `SELECT * FROM memory_sync_outbox WHERE status IN ('pending','failed')

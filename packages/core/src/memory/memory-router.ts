@@ -84,8 +84,8 @@ export class HybridMemoryProvider implements MemoryProvider {
     return result;
   }
   async forget(id: string): Promise<boolean> {
+    if (this.options.sync) return await this.options.sync.forgetLocal(id);
     const result = await this.options.local.forget(id);
-    if (result && this.options.sync) void this.options.sync.noteLocalForget(id).catch(() => undefined);
     return result;
   }
   maintain(signal?: AbortSignal): Promise<{ removed: number; reembedded: number }> { return this.options.local.maintain(signal); }

@@ -552,7 +552,8 @@ export class LocalCore implements LocalCoreApi {
       return route.endsWith('/legacy') ? { memories, total: memories.length, readOnly: true } as T : { memories, stats: { total: memories.length } } as T;
     }
     if (route === '/api/admin/memories/clear' && method === 'POST') {
-      await this.options.db.run("UPDATE memories SET active=0,updated_at=? WHERE active=1", [(this.options.now?.() ?? new Date()).toISOString()]);
+      if (this.memorySync) await this.memorySync.clearLocal();
+      else await this.options.db.run("UPDATE memories SET active=0,updated_at=? WHERE active=1", [(this.options.now?.() ?? new Date()).toISOString()]);
       return { cleared: true } as T;
     }
     if (route === '/api/admin/memory/status') {
@@ -576,7 +577,8 @@ export class LocalCore implements LocalCoreApi {
     if (route === '/api/admin/memory/activity') return { activity: [] } as T;
     const memoryId = route.match(/^\/api\/admin\/memories\/([^/]+)$/u)?.[1];
     if (memoryId && method === 'DELETE') {
-      const deleted = (await this.options.db.run('UPDATE memories SET active=0,updated_at=? WHERE id=?', [(this.options.now?.() ?? new Date()).toISOString(), decodeURIComponent(memoryId)])).changes > 0;
+      const id = decodeURIComponent(memoryId);
+      const deleted = this.memorySync ? await this.memorySync.forgetLocal(id) : await this.memoryRepo.forget(id);
       return { deleted } as T;
     }
     if (route === '/api/admin/chat/history') {

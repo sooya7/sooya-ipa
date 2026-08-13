@@ -42,7 +42,8 @@ SOOYA 有两个仓库,职责分离:
 - **服务器版记忆修复已上线**:`sooya7/sooya` main `c2c903c`(零调用假成功→skipped/uncertain),CI 全绿,自动部署
 - **本轮本地化实现**:ConfigRepository(SQLite)+Keychain secret refs、OpenAI-compatible/Anthropic/Embedding/Rerank/Image/TTS Provider、ReplyCoordinator、SQLite 本地记忆与批次 receipt、MCP 本地 CRUD/连接/工具注册/安全策略、Admin 本地 bridge、图库/动态/Life 本地路由
 - **通知与 OTA**:通知仅做能力探测且默认关闭；原生 updater 有 native/schema/capability gate、pending/last-good 状态；OTA workflow 产出 manifest + bundle artifact
-- **Ombre/Local Memory 同步基础**:schema 46 新增 `memory_sync_state`、durable outbox、tombstone、cursor；新增 `OmbreMcpMemoryProvider`、`MemorySyncService`，实现 Ombre 在线优先召回、Local 先落盘、断网 Local fallback、失败重试、sourceId/sourceHash 去重、forget 双向 tombstone、冲突状态与 circuit breaker；未配置 `ombre` MCP 时不联网
+- **Ombre/Local Memory 同步基础**:schema 46 新增 `memory_sync_state`、durable outbox、tombstone、cursor；新增 `OmbreMcpMemoryProvider`、`MemorySyncService`，实现 Ombre 在线优先召回、Local 先落盘、断网 Local fallback、失败重试、断线后显式 disconnect/reconnect、sourceId/sourceHash/版本去重、forget 双向 tombstone、冲突状态与 circuit breaker；未配置 `ombre` MCP 时不联网
+- **记忆管理一致性**:旧 schema 的 catalog fallback 对未变化条目不重复重写；Admin/Hybrid delete 与 clear 通过单次 SQLite transaction 同时提交本地 inactive、tombstone、forget outbox 和 sync state，失败时整体回滚
 - **旧 Ombre 兼容**:自动识别 `memory.*`、`breath_search`、`hold` 等工具；没有 delta 工具时退回 catalog 映射，不阻塞本地运行
 - **CI 约束**:Native Base 冻结守卫、Node 22 核心测试、Web 570 测试、migration-tools 11 测试、typecheck/build、unsigned IPA workflow 均已接入
 
@@ -115,7 +116,7 @@ npm run build               # web → packages/web/dist
 node scripts/patch-xcode-project.mjs   # iOS 插件接线(幂等)
 ```
 
-本轮本地复验实际结果：Core `87/87`、Web `570/570`、migration-tools `11/11` 全绿；测试使用 Node 22 与 `TZ=UTC`，与 CI 的 Node 22 约束一致。
+本轮本地复验实际结果：Core `94/94`、Web `570/570`、migration-tools `11/11` 全绿；测试使用 Node 22 与 `TZ=UTC`，与 CI 的 Node 22 约束一致。Web 全量采用单文件串行参数验证；默认并行模式仍有已知 `MessageItem` 测试隔离 flake（详见 §4）。
 
 CI(推送后自动):`ci.yml`(5 job)+ `ios-build.yml`(macOS unsigned IPA)+ PR3 OTA 信任根校验。
 

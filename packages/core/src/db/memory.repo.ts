@@ -276,6 +276,10 @@ export class MemoryRepo {
       : await this.db.query<MemoryRow>('SELECT * FROM memories WHERE active=1 ORDER BY updated_at DESC LIMIT ? OFFSET ?', [limit, offset]);
   }
 
+  async activeRows(): Promise<MemoryRow[]> {
+    return await this.db.query<MemoryRow>('SELECT * FROM memories WHERE active=1 ORDER BY updated_at DESC');
+  }
+
   async update(id: string, patch: { content?: string; importance?: number; confidence?: number }): Promise<MemoryRow | null> {
     const current = await this.get(id);
     if (!current || current.active !== 1) return null;

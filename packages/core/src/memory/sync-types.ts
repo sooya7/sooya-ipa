@@ -27,6 +27,7 @@ export interface MemorySyncCoordinator {
   enqueueLocalChanges(limit?: number): Promise<void>;
   noteLocalUpdate(id: string): Promise<void>;
   noteLocalForget(id: string): Promise<void>;
+  forgetLocal(id: string): Promise<boolean>;
   syncOnce(signal?: AbortSignal): Promise<MemorySyncResult>;
   status(): Promise<MemorySyncStatus>;
 }

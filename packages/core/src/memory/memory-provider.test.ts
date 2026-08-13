@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { HybridMemoryProvider, MemoryRouter } from './memory-router.js';
 import { LocalMemoryProvider, type LocalMemoryStore } from './local-memory-provider.js';
 import type { MemoryEntry, MemoryProvider, MemoryRecall, MemoryCommitInput } from './types.js';
+import type { MemorySyncCoordinator } from './sync-types.js';
 
 function entry(id: string, content: string, score = 0.8): MemoryEntry {
   return {
@@ -124,6 +125,23 @@ describe('MemoryRouter and HybridMemoryProvider', () => {
 
     await new HybridMemoryProvider({ local: provider({ commit: localCommit }), remote: provider({ commit: remoteCommit }), mirrorWrites: true }).commit(input);
     expect(remoteCommit).toHaveBeenCalledOnce();
+  });
+
+  it('uses the atomic sync forget path when hybrid sync is configured', async () => {
+    const localForget = vi.fn(async () => true);
+    const sync: MemorySyncCoordinator = {
+      enqueueLocalChanges: vi.fn(async () => undefined),
+      noteLocalUpdate: vi.fn(async () => undefined),
+      noteLocalForget: vi.fn(async () => undefined),
+      forgetLocal: vi.fn(async () => true),
+      syncOnce: vi.fn(async () => ({ state: 'ready' as const, pushed: 0, pulled: 0, conflicts: 0, pending: 0 })),
+      status: vi.fn(async () => ({ state: 'ready' as const, provider: 'test', pendingPush: 0, pendingPull: 0, conflicts: 0, lastSyncAt: null }))
+    };
+    const hybrid = new HybridMemoryProvider({ local: provider({ forget: localForget }), remote: provider(), sync });
+
+    await expect(hybrid.forget('memory-1')).resolves.toBe(true);
+    expect(sync.forgetLocal).toHaveBeenCalledWith('memory-1');
+    expect(localForget).not.toHaveBeenCalled();
   });
 });
 

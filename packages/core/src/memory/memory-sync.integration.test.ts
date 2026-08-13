@@ -65,4 +65,36 @@ describe('MemorySyncService', () => {
     await expect(sync.pending()).resolves.toHaveLength(1);
     await expect(sync.state(created.record.id)).resolves.toMatchObject({ sync_state: 'pending_push' });
   });
+
+  it('does not rewrite an unchanged catalog entry on every fallback pull', async () => {
+    let catalogCalls = 0;
+    const mcp: McpPlatform = {
+      connect: async (config) => ({ serverId: config.id, state: 'ready' as const, toolCount: 1 }),
+      disconnect: async () => undefined,
+      listTools: async () => [{ name: 'memory.list', inputSchema: { type: 'object' } }],
+      callTool: async (_serverId, name) => {
+        expect(name).toBe('memory.list');
+        catalogCalls += 1;
+        return {
+          structuredContent: {
+            entries: [{ id: 'catalog-1', sourceId: 'catalog-1', kind: 'event', content: '目录中的稳定记忆', normalized: '目录中的稳定记忆', importance: 0.7, confidence: 0.8, updatedAt: '2026-08-13T00:00:00.000Z' }]
+          }
+        };
+      },
+      close: async () => undefined
+    };
+    const db = new NodeLocalDatabase();
+    openDatabases.push(db);
+    await migrateDatabase(db);
+    const now = () => new Date('2026-08-14T00:00:00.000Z');
+    const local = new MemoryRepo(db, now);
+    const remote = new OmbreMcpMemoryProvider({ mcp, getConfig: async () => ({ id: 'ombre', url: 'https://memory.invalid/mcp', transport: 'streamable-http' }) });
+    const sync = new MemorySyncRepository(db, now);
+    const service = new MemorySyncService({ local, sync, remote, now });
+
+    await expect(service.syncOnce()).resolves.toMatchObject({ pulled: 1 });
+    await expect(service.syncOnce()).resolves.toMatchObject({ pulled: 0 });
+    expect(catalogCalls).toBe(2);
+    await expect(local.findBySourceId('catalog-1')).resolves.toMatchObject({ content: '目录中的稳定记忆' });
+  });
 });

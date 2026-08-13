@@ -59,6 +59,38 @@ export class MemorySyncService implements MemorySyncCoordinator {
     });
   }
 
+  async forgetLocal(id: string): Promise<boolean> {
+    const row = await this.options.local.get(id);
+    if (!row || row.active !== 1) return false;
+    const state = await this.options.sync.state(id);
+    const sourceId = state?.remote_source_id ?? row.source_id ?? id;
+    const sourceHash = state ? null : row.source_hash ?? null;
+    const now = (this.options.now ?? (() => new Date()))();
+    return (await this.options.sync.forgetLocal([{
+      localMemoryId: id,
+      sourceId,
+      sourceHash,
+      remoteRevision: state?.remote_revision,
+      expiresAt: new Date(now.getTime() + TOMBSTONE_TTL_MS).toISOString()
+    }])) === 1;
+  }
+
+  async clearLocal(): Promise<number> {
+    const rows = await this.options.local.activeRows();
+    const now = (this.options.now ?? (() => new Date()))();
+    const inputs = await Promise.all(rows.map(async (row) => {
+      const state = await this.options.sync.state(row.id);
+      return {
+        localMemoryId: row.id,
+        sourceId: state?.remote_source_id ?? row.source_id ?? row.id,
+        sourceHash: state ? null : row.source_hash ?? null,
+        remoteRevision: state?.remote_revision,
+        expiresAt: new Date(now.getTime() + TOMBSTONE_TTL_MS).toISOString()
+      };
+    }));
+    return await this.options.sync.forgetLocal(inputs);
+  }
+
   async syncOnce(signal?: AbortSignal): Promise<MemorySyncResult> {
     if (this.running) return await this.running;
     this.running = this.run(signal).finally(() => { this.running = null; });
@@ -100,7 +132,7 @@ export class MemorySyncService implements MemorySyncCoordinator {
         if (await this.options.sync.tombstone(entry.sourceId ?? entry.id)) continue;
         const applied = await this.applyRemote(entry);
         if (applied === 'conflict') conflicts += 1;
-        else pulled += 1;
+        else if (applied === 'applied') pulled += 1;
       }
       await this.options.sync.setCursor('ombre', page.nextCursor);
     } catch (error) {
@@ -134,7 +166,7 @@ export class MemorySyncService implements MemorySyncCoordinator {
     });
   }
 
-  private async applyRemote(entry: MemoryEntry): Promise<'applied' | 'conflict'> {
+  private async applyRemote(entry: MemoryEntry): Promise<'applied' | 'unchanged' | 'conflict'> {
     const sourceId = entry.sourceId ?? entry.id;
     const state = await this.options.sync.stateByRemoteId(sourceId);
     const local = state ? await this.options.local.get(state.local_memory_id) : await this.options.local.findBySourceId(sourceId);
@@ -142,6 +174,7 @@ export class MemorySyncService implements MemorySyncCoordinator {
       await this.options.sync.setState({ localMemoryId: local.id, remoteSourceId: sourceId, remoteRevision: entry.remoteRevision, state: 'conflict', error: 'local and Ombre changed after the last sync' });
       return 'conflict';
     }
+    if (local && isUnchangedRemote(local, state?.remote_revision ?? null, entry)) return 'unchanged';
     const result = await this.options.local.upsertMirrored({
       kind: entry.kind,
       content: entry.content,
@@ -184,6 +217,18 @@ export class MemorySyncService implements MemorySyncCoordinator {
       return 'skipped';
     }
   }
+}
+
+function isUnchangedRemote(local: MemoryRow, syncedRevision: string | null, entry: MemoryEntry): boolean {
+  const remoteRevision = entry.remoteRevision == null ? null : String(entry.remoteRevision);
+  if (syncedRevision && remoteRevision && syncedRevision === remoteRevision) return true;
+  if (entry.sourceHash && local.source_hash === entry.sourceHash) return true;
+  return local.source === 'ombre'
+    && local.content === entry.content
+    && local.normalized === entry.normalized
+    && local.importance === entry.importance
+    && local.confidence === entry.confidence
+    && local.updated_at === entry.updatedAt;
 }
 
 function toEntry(row: MemoryRow): MemoryEntry {

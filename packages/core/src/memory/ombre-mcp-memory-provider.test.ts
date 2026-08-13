@@ -60,6 +60,26 @@ describe('OmbreMcpMemoryProvider', () => {
     await expect(provider.health()).resolves.toMatchObject({ state: 'unavailable', provider: 'ombre-mcp' });
     expect(remote.connect).not.toHaveBeenCalled();
   });
+
+  it('reconnects after a transport failure instead of reusing a dead session', async () => {
+    let calls = 0;
+    const remote = mcp(vi.fn(async () => {
+      calls += 1;
+      if (calls === 2) throw new Error('socket closed');
+      return { structuredContent: { entries: [{ id: `r${calls}`, content: `远端记忆 ${calls}` }] } };
+    }));
+    const provider = new OmbreMcpMemoryProvider({
+      mcp: remote,
+      getConfig: async () => ({ id: 'ombre', url: 'https://memory.invalid/mcp', transport: 'streamable-http' })
+    });
+
+    await expect(provider.recall({ query: '第一次' })).resolves.toMatchObject({ entries: [{ id: 'r1' }] });
+    await expect(provider.recall({ query: '断线' })).rejects.toThrow('socket closed');
+    await expect(provider.recall({ query: '恢复' })).resolves.toMatchObject({ entries: [{ id: 'r3' }] });
+    expect(remote.connect).toHaveBeenCalledTimes(2);
+    expect(remote.listTools).toHaveBeenCalledTimes(2);
+    expect(remote.disconnect).toHaveBeenCalledOnce();
+  });
 });
 
 describe('HybridMemoryProvider Ombre priority and fallback', () => {

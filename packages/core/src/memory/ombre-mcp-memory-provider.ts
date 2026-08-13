@@ -158,30 +158,52 @@ export class OmbreMcpMemoryProvider implements MemoryProvider, OmbreMemorySyncPo
     await this.ensureReady(signal);
     const name = this.resolveTool(operation);
     if (!name) throw new Error(`Ombre MCP tool for ${operation} is unavailable`);
-    const result = await callWithTimeout(
-      (callSignal) => this.options.mcp.callTool(this.serverId, name, arguments_, callSignal),
-      signal,
-      this.timeoutMs
-    );
-    if (result.isError === true) throw new Error(`Ombre MCP ${name} returned an error`);
-    return result;
+    try {
+      const result = await callWithTimeout(
+        (callSignal) => this.options.mcp.callTool(this.serverId, name, arguments_, callSignal),
+        signal,
+        this.timeoutMs
+      );
+      if (result.isError === true) throw new Error(`Ombre MCP ${name} returned an error`);
+      return result;
+    } catch (error) {
+      // Discovery only proves that the connection was alive at that moment.
+      // A transport failure must make the next operation rediscover the session.
+      await this.invalidateConnection();
+      throw error;
+    }
+  }
+
+  private async invalidateConnection(forceDisconnect = false): Promise<void> {
+    const shouldDisconnect = forceDisconnect || this.connectedConfigKey !== null || this.availableTools.size > 0;
+    this.availableTools = new Set<string>();
+    this.connectedConfigKey = null;
+    if (shouldDisconnect) await this.options.mcp.disconnect(this.serverId).catch(() => undefined);
   }
 
   private async ensureReady(signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) throw signal.reason ?? new Error('Ombre MCP request aborted');
-    const config = await this.options.getConfig();
-    if (!config || config.enabled === false || !config.url) throw new Error('Ombre MCP is not configured');
-    const key = `${config.url}|${config.transport}|${config.secretKey ?? ''}`;
-    if (this.connectedConfigKey === key) return;
-    const state = await callWithTimeout(
-      (callSignal) => { void callSignal; return this.options.mcp.connect({ ...config, id: this.serverId }); },
-      signal,
-      Math.max(this.timeoutMs, config.connectTimeoutMs ?? this.timeoutMs)
-    );
-    if (state.state !== 'ready') throw new Error(state.detail ?? `Ombre MCP connection is ${state.state}`);
-    const tools = await callWithTimeout((callSignal) => this.options.mcp.listTools(this.serverId, callSignal), signal, this.timeoutMs);
-    this.availableTools = new Set(tools.map((tool) => tool.name));
-    this.connectedConfigKey = key;
+    let connected = false;
+    try {
+      const config = await this.options.getConfig();
+      if (!config || config.enabled === false || !config.url) throw new Error('Ombre MCP is not configured');
+      const key = `${config.url}|${config.transport}|${config.secretKey ?? ''}`;
+      if (this.connectedConfigKey === key) return;
+      await this.invalidateConnection();
+      const state = await callWithTimeout(
+        (callSignal) => { void callSignal; return this.options.mcp.connect({ ...config, id: this.serverId }); },
+        signal,
+        Math.max(this.timeoutMs, config.connectTimeoutMs ?? this.timeoutMs)
+      );
+      if (state.state !== 'ready') throw new Error(state.detail ?? `Ombre MCP connection is ${state.state}`);
+      connected = true;
+      const tools = await callWithTimeout((callSignal) => this.options.mcp.listTools(this.serverId, callSignal), signal, this.timeoutMs);
+      this.availableTools = new Set(tools.map((tool) => tool.name));
+      this.connectedConfigKey = key;
+    } catch (error) {
+      await this.invalidateConnection(connected);
+      throw error;
+    }
   }
 
   private resolveTool(operation: OmbreMemoryOperation): string | null {
