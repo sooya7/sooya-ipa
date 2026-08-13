@@ -32,6 +32,7 @@ export interface LocalDatabase {
   transaction<T = unknown[]>(operations: DbOperation[]): Promise<T>;
   integrityCheck(): Promise<DatabaseIntegrityResult>;
   backup(target: string): Promise<void>;
+  restore?(target: string): Promise<void>;
 }
 
 export interface DatabaseRunResult {

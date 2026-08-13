@@ -129,7 +129,8 @@ export class MemoryRepo {
       );
       const existingByNormalized = new Map(existingRows.map((row) => [row.normalized, row.id]));
       for (const [index, candidate] of candidates.entries()) {
-        const existingId = existingByNormalized.get(normalizeds[index]!);
+        const normalized = normalizeds[index]!;
+        const existingId = existingByNormalized.get(normalized);
         if (existingId) {
           merged += 1;
           ops.push(runOperation(
@@ -145,6 +146,7 @@ export class MemoryRepo {
              VALUES(?,?,?,?,?,?,?,?,NULL,0,1,'local',?)`,
             [id, candidate.kind, candidate.content, normalizeds[index]!, candidate.importance ?? 0.5, candidate.confidence ?? 0.6, ts, ts, candidate.sourceHash ?? null]
           ));
+          existingByNormalized.set(normalized, id);
         }
       }
     }
@@ -166,13 +168,45 @@ export class MemoryRepo {
     if (!normalized) return [];
     const match = normalized.replace(/["'*^()]/gu, ' ').split(/\s+/u).filter(Boolean).map((term) => `"${term}"`).join(' OR ');
     try {
-      return await this.db.query(
+      const rows = await this.db.query<{ id: string; content: string }>(
         `SELECT m.id, m.content FROM memories_fts f JOIN memories m ON m.rowid = f.rowid
          WHERE memories_fts MATCH ? ORDER BY f.rowid DESC LIMIT ?`,
         [match, limit]
       );
+      if (rows.length) await this.db.run(`UPDATE memories SET hits=hits+1 WHERE id IN (${placeholders(rows.length)})`, rows.map((row) => row.id));
+      return rows;
     } catch {
       return [];
     }
+  }
+
+  async list(options: { limit?: number; offset?: number; kind?: MemoryKind } = {}): Promise<MemoryRow[]> {
+    const limit = Math.max(1, Math.min(500, Math.trunc(options.limit ?? 100)));
+    const offset = Math.max(0, Math.trunc(options.offset ?? 0));
+    return options.kind
+      ? await this.db.query<MemoryRow>('SELECT * FROM memories WHERE active=1 AND kind=? ORDER BY updated_at DESC LIMIT ? OFFSET ?', [options.kind, limit, offset])
+      : await this.db.query<MemoryRow>('SELECT * FROM memories WHERE active=1 ORDER BY updated_at DESC LIMIT ? OFFSET ?', [limit, offset]);
+  }
+
+  async update(id: string, patch: { content?: string; importance?: number; confidence?: number }): Promise<MemoryRow | null> {
+    const current = await this.get(id);
+    if (!current || current.active !== 1) return null;
+    const content = patch.content?.trim() || current.content;
+    const normalized = normalizeMemoryText(content);
+    await this.db.run('UPDATE memories SET content=?,normalized=?,importance=?,confidence=?,updated_at=? WHERE id=? AND active=1', [content, normalized, patch.importance ?? current.importance, patch.confidence ?? current.confidence, nowIso(this.now), id]);
+    return await this.get(id) ?? null;
+  }
+
+  async forget(id: string): Promise<boolean> {
+    return (await this.db.run('UPDATE memories SET active=0,updated_at=? WHERE id=? AND active=1', [nowIso(this.now), id])).changes > 0;
+  }
+
+  async maintain(): Promise<{ removed: number; reembedded: number }> {
+    const removed = (await this.db.run('UPDATE memories SET active=0,updated_at=? WHERE active=1 AND expires_at IS NOT NULL AND expires_at<=?', [nowIso(this.now), nowIso(this.now)])).changes;
+    return { removed, reembedded: 0 };
+  }
+
+  async setEmbedding(id: string, embedding: Uint8Array, dimensions: number, model: string): Promise<void> {
+    await this.db.run('UPDATE memories SET embedding=?,embedding_dim=?,embedding_model=?,updated_at=? WHERE id=?', [embedding, dimensions, model, nowIso(this.now), id]);
   }
 }

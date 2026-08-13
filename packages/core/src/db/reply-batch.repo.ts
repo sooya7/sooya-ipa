@@ -67,4 +67,22 @@ export class ReplyBatchRepo {
       "SELECT * FROM reply_batches WHERE status IN ('collecting','queued','running') ORDER BY opened_at DESC LIMIT 1"
     );
   }
+
+  async messageIds(batchId: string): Promise<string[]> {
+    const rows = await this.db.query<{ message_id: string }>('SELECT message_id FROM reply_batch_messages WHERE batch_id = ? ORDER BY position ASC', [batchId]);
+    return rows.map((row) => row.message_id);
+  }
+
+  async markRunning(batchId: string): Promise<ReplyBatchRow | undefined> {
+    await this.db.run("UPDATE reply_batches SET status='running',started_at=COALESCE(started_at,?),attempts=attempts+1 WHERE id=? AND status IN ('collecting','queued','running')", [nowIso(this.now), batchId]);
+    return await this.get(batchId);
+  }
+
+  async complete(batchId: string, assistantMessageId: string): Promise<void> {
+    await this.db.run("UPDATE reply_batches SET status='completed',assistant_message_id=?,completed_at=?,last_error=NULL WHERE id=?", [assistantMessageId, nowIso(this.now), batchId]);
+  }
+
+  async fail(batchId: string, error: string): Promise<void> {
+    await this.db.run("UPDATE reply_batches SET status='failed',completed_at=?,last_error=? WHERE id=?", [nowIso(this.now), error.slice(0, 2000), batchId]);
+  }
 }

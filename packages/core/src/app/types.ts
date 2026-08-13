@@ -176,6 +176,12 @@ export interface UploadInputFile {
   field: 'image' | 'file';
 }
 
+export interface LocalAdminRequestOptions {
+  method?: string;
+  body?: unknown;
+  signal?: AbortSignal;
+}
+
 export interface LocalCoreApi {
   bootstrap(): Promise<BootstrapInfo>;
   messages(options?: { limit?: number; before?: number; since?: number }): Promise<MessagePage>;
@@ -192,5 +198,6 @@ export interface LocalCoreApi {
   life(): Promise<LifeState>;
   presence(): Promise<WorldPresence>;
   capabilities(): Promise<{ capabilities: Record<string, { configured: boolean; ok: boolean; detail?: string }>; stickers: { available: number; total: number } }>;
+  adminRequest<T = unknown>(path: string, options?: LocalAdminRequestOptions): Promise<T>;
   subscribe(listener: LocalEventListener): () => void;
 }

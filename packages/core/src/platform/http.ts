@@ -6,6 +6,10 @@ export interface HttpRequest {
   url: string;
   method?: HttpMethod;
   headers?: Readonly<Record<string, string>>;
+  /** Native transports resolve this reference inside Keychain; the secret never crosses into JS. */
+  secretRef?: string;
+  secretHeader?: string;
+  secretPrefix?: string;
   body?: string | BinaryData;
   signal?: AbortSignal;
   timeoutMs?: number;
