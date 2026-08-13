@@ -1,0 +1,43 @@
+{
+  "name": "@sooya/core",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./src/tools/index.ts",
+      "import": "./src/tools/index.ts"
+    },
+    "./tools": {
+      "types": "./src/tools/index.ts",
+      "import": "./src/tools/index.ts"
+    },
+    "./providers": {
+      "types": "./src/providers/types.ts",
+      "import": "./src/providers/types.ts"
+    },
+    "./platform": {
+      "types": "./src/platform/index.ts",
+      "import": "./src/platform/index.ts"
+    },
+    "./util/tool-history": {
+      "types": "./src/util/tool-history.ts",
+      "import": "./src/util/tool-history.ts"
+    },
+    "./app": {
+      "types": "./src/app/index.ts",
+      "import": "./src/app/index.ts"
+    }
+  },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "better-sqlite3": "^12.11.1",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.10"
+  }
+}
