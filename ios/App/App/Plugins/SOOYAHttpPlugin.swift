@@ -201,6 +201,9 @@ struct SOOYAHTTPRequest {
     let url: URL
     var method: String = "GET"
     var headers: [String: String] = [:]
+    var secretRef: String? = nil
+    var secretHeader: String = "Authorization"
+    var secretPrefix: String = "Bearer "
     var body: Data? = nil
     var timeout: TimeInterval = 30
 }
@@ -253,6 +256,10 @@ final class SOOYAHTTPTransport: NSObject, URLSessionDataDelegate, URLSessionTask
     private var operations: [Int: Operation] = [:]
     private var taskByID: [String: URLSessionDataTask] = [:]
     private var session: URLSession!
+    private lazy var secretStore: SOOYAKeychainStore = {
+        let group = (try? SOOYAKeychainAccessGroupResolver().resolve()) ?? "TEAMID.com.sooya.app"
+        return SOOYAKeychainStore(identity: SOOYAKeychainIdentity(accessGroup: group))
+    }()
 
     init(configuration: URLSessionConfiguration = .ephemeral,
          policy: SOOYAHTTPPolicy,
@@ -306,6 +313,12 @@ final class SOOYAHTTPTransport: NSObject, URLSessionDataDelegate, URLSessionTask
         request.httpMethod = method
         request.httpBody = input.body
         for (name, value) in input.headers { request.setValue(value, forHTTPHeaderField: name) }
+        if let secretRef = input.secretRef {
+            guard let secret = try secretStore.read(key: secretRef), !secret.isEmpty else {
+                throw SOOYAHTTPError.transportFailed("secret reference unavailable")
+            }
+            request.setValue(input.secretPrefix + secret, forHTTPHeaderField: input.secretHeader)
+        }
 
         lock.lock()
         guard taskByID[input.id] == nil else {
@@ -542,6 +555,9 @@ public final class SOOYAHttpPlugin: CAPPlugin, CAPBridgedPlugin {
             url: url,
             method: call.getString("method") ?? "GET",
             headers: headers,
+            secretRef: call.getString("secretRef"),
+            secretHeader: call.getString("secretHeader") ?? "Authorization",
+            secretPrefix: call.getString("secretPrefix") ?? "Bearer ",
             body: body,
             timeout: Double(call.getInt("timeoutMs") ?? 30_000) / 1_000
         )

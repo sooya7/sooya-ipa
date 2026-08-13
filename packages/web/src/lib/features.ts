@@ -1,6 +1,7 @@
 import { ApiError } from './api.js';
 import { getAdminToken, invalidateAdminSession } from './admin.js';
 import { credentialFreeMediaPath } from './authenticatedMedia.js';
+import { currentSooyaClient } from './sooyaClient.js';
 
 export interface FeatureMedia {
   id: string;
@@ -129,6 +130,11 @@ export interface LifePanelData {
 }
 
 async function request<T>(path: string, options: { method?: string; body?: unknown; raw?: boolean } = {}): Promise<T> {
+  const local = currentSooyaClient();
+  const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
+  if (local?.adminRequest && !options.raw && !isFormData) {
+    return await local.adminRequest<T>(path, { method: options.method, body: options.body });
+  }
   const headers = new Headers();
   const token = getAdminToken();
   if (token) headers.set('x-admin-token', token);

@@ -4,6 +4,7 @@ import { mediaThumbnailPath } from '../lib/authenticatedMedia.js';
 import { useAuthenticatedMedia } from '../lib/useAuthenticatedMedia.js';
 import { weatherConditionLabel } from '../lib/worldDisplay.js';
 import { AppLink } from './AppLink.js';
+import { currentSooyaClient } from '../lib/sooyaClient.js';
 
 const MOMENT_IMAGE_CSS_WIDTH = 560;
 
@@ -53,7 +54,10 @@ export default function MomentsPage() {
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
     try {
-      const [nextConversation, nextMoments] = await Promise.all([api.conversation(), api.moments(60)]);
+      const local = currentSooyaClient();
+      const [nextConversation, nextMoments] = local
+        ? await Promise.all([local.bootstrap().then((value) => value.conversation), local.moments(60)])
+        : await Promise.all([api.conversation(), api.moments(60)]);
       setConversation(nextConversation);
       setMoments(nextMoments.moments);
       setError(null);
@@ -74,7 +78,8 @@ export default function MomentsPage() {
     const liked = !moment.liked;
     setMoments((rows) => rows.map((row) => row.id === moment.id ? { ...row, liked } : row));
     try {
-      const result = await api.likeMoment(moment.id, liked);
+      const local = currentSooyaClient();
+      const result = local ? await local.likeMoment(moment.id, liked) : await api.likeMoment(moment.id, liked);
       setMoments((rows) => rows.map((row) => row.id === moment.id ? result.moment : row));
     } catch (cause) {
       setMoments((rows) => rows.map((row) => row.id === moment.id ? { ...row, liked: moment.liked } : row));

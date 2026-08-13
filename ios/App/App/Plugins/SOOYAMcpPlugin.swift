@@ -36,6 +36,20 @@ final class SOOYANullMcpTokenResolver: SOOYAMcpTokenResolving {
     func token(for reference: String, serverID: String, kind: SOOYAMcpAuthKind) throws -> String? { nil }
 }
 
+/// MCP authentication follows the same opaque-reference rule as provider
+/// HTTP: JavaScript stores only the reference and native resolves the secret
+/// immediately before the request leaves the device.
+final class SOOYAKeychainMcpTokenResolver: SOOYAMcpTokenResolving {
+    private lazy var store: SOOYAKeychainStore = {
+        let group = (try? SOOYAKeychainAccessGroupResolver().resolve()) ?? "TEAMID.com.sooya.app"
+        return SOOYAKeychainStore(identity: SOOYAKeychainIdentity(accessGroup: group))
+    }()
+
+    func token(for reference: String, serverID: String, kind: SOOYAMcpAuthKind) throws -> String? {
+        try store.read(key: reference)
+    }
+}
+
 enum SOOYAMcpTransportMode: String, Equatable {
     case streamableHTTP
     case legacySSE
@@ -431,7 +445,7 @@ public final class SOOYAMcpPlugin: CAPPlugin, CAPBridgedPlugin {
     ]
 
     static weak var tokenResolver: SOOYAMcpTokenResolving?
-    private lazy var client = SOOYAMcpClient(tokenResolver: Self.tokenResolver ?? SOOYANullMcpTokenResolver())
+    private lazy var client = SOOYAMcpClient(tokenResolver: Self.tokenResolver ?? SOOYAKeychainMcpTokenResolver())
 
     @objc public func connect(_ call: CAPPluginCall) {
         do {

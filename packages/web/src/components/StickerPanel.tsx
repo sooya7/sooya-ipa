@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api.js';
+import { currentSooyaClient } from '../lib/sooyaClient.js';
 import { mediaThumbnailPath } from '../lib/authenticatedMedia.js';
 import type { StickerInfo } from '../lib/types.js';
 import { AuthenticatedImage } from './AuthenticatedMedia.js';
@@ -43,7 +44,9 @@ export function StickerPanel({ stickers, onSelect, onNotice }: Props) {
     let cancelled = false;
     setLoading(true);
     setNextCursor(null);
-    void api.stickerSearch({ scope, q: query, limit: 60 }).then((result) => {
+    const local = currentSooyaClient();
+    const request = local ? local.stickerSearch({ scope, q: query, limit: 60 }) : api.stickerSearch({ scope, q: query, limit: 60 });
+    void request.then((result) => {
       if (!cancelled) {
         setRemote(result.stickers);
         setNextCursor(result.nextCursor);
@@ -63,7 +66,8 @@ export function StickerPanel({ stickers, onSelect, onNotice }: Props) {
     if (!nextCursor || loading) return;
     setLoading(true);
     try {
-      const result = await api.stickerSearch({ scope, q: query, limit: 60, cursor: nextCursor });
+      const local = currentSooyaClient();
+      const result = local ? await local.stickerSearch({ scope, q: query, limit: 60, cursor: nextCursor }) : await api.stickerSearch({ scope, q: query, limit: 60, cursor: nextCursor });
       setRemote((previous) => [...(previous ?? stickers), ...result.stickers]);
       setNextCursor(result.nextCursor);
     } catch (error) {

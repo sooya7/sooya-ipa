@@ -18,7 +18,8 @@
     "test": "npm run test -w @sooya/core && npm run test -w @sooya/web && npm run test -w @sooya/migration-tools",
     "ios:add": "cap add ios",
     "ios:sync": "npm run build && cap sync ios",
-    "ios:open": "cap open ios"
+    "ios:open": "cap open ios",
+    "check:freeze": "node scripts/freeze-guard.mjs"
   },
   "dependencies": {
     "@capacitor/app": "8.1.1",
@@ -26,9 +27,12 @@
     "@capacitor/core": "8.5.0",
     "@capacitor/haptics": "8.0.2",
     "@capacitor/keyboard": "8.0.5",
+    "@capacitor/local-notifications": "^8.2.1",
+    "@capacitor/push-notifications": "^8.1.2",
     "@capacitor/share": "8.0.1",
     "@capacitor/splash-screen": "8.0.2",
     "@capacitor/status-bar": "8.0.3",
+    "@capgo/capacitor-updater": "^8.51.4",
     "nanoid": "3.3.18"
   },
   "devDependencies": {

@@ -21,5 +21,6 @@ export class LocalSooyaClient implements SooyaClient {
   life: SooyaClient['life'] = () => this.core.life();
   presence: SooyaClient['presence'] = () => this.core.presence();
   capabilities: SooyaClient['capabilities'] = () => this.core.capabilities();
+  adminRequest: NonNullable<SooyaClient['adminRequest']> = (path, options) => this.core.adminRequest(path, options);
   subscribe(listener: LocalEventListener): () => void { return this.core.subscribe(listener); }
 }

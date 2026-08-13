@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
+import { currentSooyaClient } from '../lib/sooyaClient.js';
 import { clearComposerDraft, readComposerDraft, writeComposerDraft } from '../lib/composerDraft.js';
 import type { ChatMessage, MediaRef, StickerInfo } from '../lib/types.js';
 import { AuthenticatedImage } from './AuthenticatedMedia.js';
@@ -64,7 +65,10 @@ export function Composer({ disabled, disabledLabel, conversationId = 'main', rep
     let cancelled = false;
     void Promise.all(draft.readyAttachmentIds.map(async (id) => {
       try {
-        const result = await api.mediaMeta(id);
+        const local = currentSooyaClient();
+        const result = local?.adminRequest
+          ? await local.adminRequest<{ media: MediaRef; exists: boolean }>(`/api/admin/media/${encodeURIComponent(id)}`)
+          : await api.mediaMeta(id);
         return result.exists ? result.media : null;
       } catch { return null; }
     })).then((media) => {
@@ -99,7 +103,8 @@ export function Composer({ disabled, disabledLabel, conversationId = 'main', rep
     controllersRef.current.set(task.key, controller);
     updateAttachment(task.key, { status: 'uploading', progress: 0, error: undefined });
     try {
-      const result = await api.upload([{ file: task.localFile, field: task.kind, name: task.name }], { signal: controller.signal });
+      const local = currentSooyaClient();
+      const result = local ? await local.upload([{ file: task.localFile, field: task.kind, name: task.name }], { signal: controller.signal }) : await api.upload([{ file: task.localFile, field: task.kind, name: task.name }], { signal: controller.signal });
       const media = result.media.find((item) => item.kind === 'image' || item.kind === 'sticker' || item.kind === 'file');
       if (!media) throw new Error(result.failed[0]?.error ?? '文件上传失败');
       if (cancelledKeysRef.current.has(task.key)) return;

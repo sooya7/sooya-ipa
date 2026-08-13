@@ -18,7 +18,8 @@
     "types": ["vite/client"],
     "paths": {
       "@sooya/core/app": ["../core/src/app/index.ts"],
-      "@sooya/core/platform": ["../core/src/platform/index.ts"]
+      "@sooya/core/platform": ["../core/src/platform/index.ts"],
+      "@sooya/core/tools": ["../core/src/tools/index.ts"]
     }
   },
   "include": ["src", "vite.config.ts"]

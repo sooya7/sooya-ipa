@@ -3,8 +3,15 @@ import { LocalCore } from '@sooya/core/app';
 import type { LocalDatabase, DatabaseValue, DatabaseIntegrityResult, RunResult } from '@sooya/core/platform';
 import type { SecretsPlatform } from '@sooya/core/platform';
 import type { MediaPlatform, MediaRecord, MediaSaveRequest } from '@sooya/core/platform';
+import type { HttpPlatform, HttpRequest, HttpResponse, HttpResponseHead } from '@sooya/core/platform';
+import type { McpConnectionState, McpPlatform, McpServerConfig, McpTool } from '@sooya/core/platform';
+import type { McpToolCallResult } from '@sooya/core/tools';
+import { ToolCallRuntime, ToolPolicy, ToolRegistry } from '@sooya/core/tools';
+import { migrateDatabase } from '@sooya/core/app';
 import { installSooyaClient } from '../lib/sooyaClient.js';
 import { LocalSooyaClient } from './LocalSooyaClient.js';
+import { probeNotificationCapabilities } from './notificationCapabilities.js';
+import { startOtaUpdater } from './otaUpdater.js';
 
 /**
  * Native bootstrap: wires the Capacitor Swift plugins into LocalCore and
@@ -44,7 +51,8 @@ export class CapacitorDatabase implements LocalDatabase {
   async integrityCheck(): Promise<DatabaseIntegrityResult> {
     return await this.plugin.call<DatabaseIntegrityResult>('integrity', {});
   }
-  async backup(target: string): Promise<void> { await this.plugin.call('backup', { target }); }
+  async backup(name: string): Promise<void> { await this.plugin.call('backup', { name }); }
+  async restore(name: string): Promise<void> { await this.plugin.call('restore', { name }); }
 }
 
 /** SecretsPlatform over SOOYASecretsPlugin (Keychain, no raw get for JS). */
@@ -83,13 +91,74 @@ export class CapacitorMedia implements MediaPlatform {
   }
 }
 
+/** Native HTTP adapter. Secret references are forwarded as opaque names; the
+ * Swift bridge resolves the value from Keychain immediately before sending. */
+export class CapacitorHttp implements HttpPlatform {
+  private readonly plugin = nativePlugin('SOOYAHttp');
+
+  async request(request: HttpRequest): Promise<HttpResponse> {
+    const body = request.body === undefined ? {} : request.body instanceof Uint8Array || request.body instanceof ArrayBuffer
+      ? { bodyBase64: bytesToBase64(request.body instanceof Uint8Array ? request.body : new Uint8Array(request.body)) }
+      : { bodyText: request.body };
+    const result = await this.plugin.call<{ status: number; headers: Record<string, string>; dataBase64: string }>('request', {
+      id: `http_${crypto.randomUUID()}`,
+      url: request.url,
+      method: request.method ?? 'GET',
+      headers: request.headers ?? {},
+      timeoutMs: request.timeoutMs ?? 30_000,
+      ...body,
+      ...(request.secretRef ? { secretRef: request.secretRef, secretHeader: request.secretHeader, secretPrefix: request.secretPrefix } : {})
+    });
+    return { status: result.status, headers: result.headers ?? {}, body: base64ToBytes(result.dataBase64) };
+  }
+
+  async stream(request: HttpRequest, onChunk: (chunk: Uint8Array) => void): Promise<HttpResponseHead> {
+    const response = await this.request(request);
+    if (response.body.length) onChunk(response.body);
+    return { status: response.status, headers: response.headers };
+  }
+}
+
+export class CapacitorMcp implements McpPlatform {
+  private readonly plugin = nativePlugin('SOOYAMcp');
+
+  async connect(config: McpServerConfig): Promise<McpConnectionState> {
+    const result = await this.plugin.call<{ serverId: string; mode?: string }>('connect', {
+      serverId: config.id, url: config.url, transport: config.transport, timeoutMs: config.connectTimeoutMs ?? 30_000,
+      authType: config.secretKey ? 'bearer' : 'none', ...(config.secretKey ? { tokenRef: config.secretKey } : {})
+    });
+    return { serverId: result.serverId ?? config.id, state: 'ready', toolCount: 0, detail: result.mode };
+  }
+
+  async disconnect(serverId: string): Promise<void> { await this.plugin.call('disconnect', { serverId }); }
+
+  async listTools(serverId: string): Promise<McpTool[]> {
+    const result = await this.plugin.call<{ tools: Array<Record<string, unknown>> }>('listTools', { serverId });
+    return (result.tools ?? []).flatMap((tool) => typeof tool.name === 'string' ? [{ name: tool.name, description: typeof tool.description === 'string' ? tool.description : undefined, inputSchema: isRecordValue(tool.inputSchema) ? tool.inputSchema : { type: 'object' }, annotations: isRecordValue(tool.annotations) ? tool.annotations : undefined }] : []);
+  }
+
+  async callTool(serverId: string, name: string, arguments_: Record<string, unknown>, signal?: AbortSignal): Promise<McpToolCallResult> {
+    if (signal?.aborted) throw signal.reason ?? new Error('MCP call aborted');
+    const result = await this.plugin.call<McpToolCallResult>('callTool', { serverId, name, arguments: arguments_ });
+    return result;
+  }
+
+  async close(): Promise<void> { /* Individual servers are closed by admin/remove or app teardown. */ }
+}
+
 /** Idempotent native bootstrap. Returns true when LocalCore was installed. */
 export async function installNativeLocalCore(): Promise<boolean> {
   if (!Capacitor.isNativePlatform()) return false;
   const db = new CapacitorDatabase();
   await db.open();
-  const core = new LocalCore({ db, secrets: new CapacitorSecrets(), mediaStore: new CapacitorMedia() });
+  await migrateDatabase(db);
+  const registry = new ToolRegistry();
+  const policy = new ToolPolicy(registry);
+  const runtime = new ToolCallRuntime({ registry, policy });
+  const core = new LocalCore({ db, secrets: new CapacitorSecrets(), mediaStore: new CapacitorMedia(), http: new CapacitorHttp(), mcp: new CapacitorMcp(), toolRegistry: registry, toolPolicy: policy, toolRuntime: runtime });
   installSooyaClient(new LocalSooyaClient(core));
+  void probeNotificationCapabilities(core);
+  void startOtaUpdater(core);
   void wireNativeLifecycle(core);
   return true;
 }
@@ -134,4 +203,8 @@ function base64ToBytes(base64: string): Uint8Array {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
   return bytes;
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
