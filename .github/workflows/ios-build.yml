@@ -31,11 +31,11 @@ jobs:
       - name: Build unsigned IPA
         run: |
           xcodebuild \
-            -workspace ios/App/App.xcworkspace \
-            -scheme App \
+            -project ios/App/App.xcodeproj \
+            -target App \
             -configuration Release \
             -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
@@ -43,7 +43,7 @@ jobs:
       - name: Package IPA
         run: |
           mkdir -p Payload
-          cp -R "build/Release-iphoneos/App.app" Payload/
+          cp -R "build/Build/Products/Release-iphoneos/App.app" Payload/
           zip -qry SOOYA-unsigned.ipa Payload
           rm -rf Payload
       - uses: actions/upload-artifact@v4
