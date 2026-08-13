@@ -48,7 +48,7 @@ export default function MomentsPage() {
   const [moments, setMoments] = useState<Moment[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const avatarPath = conversation?.persona.avatar ? mediaThumbnailPath(conversation.persona.avatar, 96) : null;
+  const avatarPath = conversation?.persona?.avatar ? mediaThumbnailPath(conversation.persona.avatar, 96) : null;
   const avatar = useAuthenticatedMedia(avatarPath, 'user', 'image');
 
   const load = useCallback(async (quiet = false) => {
@@ -56,7 +56,7 @@ export default function MomentsPage() {
     try {
       const local = currentSooyaClient();
       const [nextConversation, nextMoments] = local
-        ? await Promise.all([local.bootstrap().then((value) => value.conversation), local.moments(60)])
+        ? await Promise.all([local.bootstrap().then((value) => value?.conversation ?? null), local.moments(60)])
         : await Promise.all([api.conversation(), api.moments(60)]);
       setConversation(nextConversation);
       setMoments(nextMoments.moments);
@@ -87,7 +87,7 @@ export default function MomentsPage() {
     }
   };
 
-  const personaName = conversation?.persona.name ?? 'SOOYA';
+  const personaName = conversation?.persona?.name ?? 'SOOYA';
   const personaAvatar = avatar.url ?? '/avatars/sooya.svg';
 
   return (
