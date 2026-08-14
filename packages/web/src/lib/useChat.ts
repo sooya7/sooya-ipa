@@ -218,6 +218,35 @@ export function useChat(client: SooyaClient | null = currentSooyaClient()) {
           case 'reply.sticker.selecting': updateActivity({ thinking: true, label: '正在挑表情' }); break;
           case 'reply.image.generating': updateActivity({ thinking: true, label: '正在生成图片' }); break;
           case 'reply.audio.generating': updateActivity({ thinking: true, label: '正在生成语音' }); break;
+          // Native multimedia reply orchestration (local ReplyCoordinator
+          // emits these while appendRequestedMedia generates image/sticker/
+          // voice parts). Reflect the in-flight state and reconcile the full
+          // message once a part lands, since the message object arrives with
+          // the part only through a later message.received/resync.
+          case 'reply.media.created': {
+            const messageId = String(data.messageId ?? '');
+            const type = String(data.type ?? '');
+            if (type === 'image') updateActivity({ thinking: true, label: '图片生成好了' });
+            else if (type === 'sticker') updateActivity({ thinking: true, label: '表情已选好' });
+            else if (type === 'audio') updateActivity({ thinking: true, label: '语音生成好了' });
+            if (messageId) void resync();
+            break;
+          }
+          case 'reply.media.failed': {
+            const messageId = String(data.messageId ?? '');
+            const type = String(data.type ?? '');
+            const detail = String(data.error ?? '');
+            if (type === 'image') updateActivity({ thinking: false, label: null });
+            else if (type === 'sticker') updateActivity({ thinking: false, label: null });
+            else if (type === 'audio') updateActivity({ thinking: false, label: null });
+            if (messageId) void resync();
+            // Keep the failure visible without a full modal: reuse the reply
+            // failure card surface when the batch is known.
+            const batchId = String(data.batchId ?? '');
+            const revision = Number(data.revision ?? 0);
+            if (batchId) setReplyFailures((previous) => ({ ...previous, [`${batchId}:${revision}`]: { batchId, revision, code: 'media_failed', retryable: true, message: detail || '多媒体生成失败。', partial: false } }));
+            break;
+          }
           case 'reply.text.done':
           case 'reply.content.done': updateActivity({ thinking: true, label: '正在整理' }); break;
           case 'voice.published':

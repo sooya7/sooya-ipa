@@ -42,6 +42,8 @@ export class ChatStream {
     'reply.audio.generating',
     'reply.content.done',
     'reply.media.saved',
+    'reply.media.created',
+    'reply.media.failed',
     'reply.completed',
     'reply.failed',
     'reply.batch.collecting',
