@@ -52,6 +52,7 @@ final class SOOYASecretsPluginTests: XCTestCase {
         XCTAssertEqual(client.addCalls[0][kSecAttrAccount as String] as? String, "fixed-probe")
         XCTAssertNil(client.addCalls[0][kSecAttrAccessGroup as String])
         XCTAssertNil(client.copyCalls[0][kSecReturnData as String])
+        XCTAssertEqual(client.copyCalls[0][kSecReturnAttributes as String] as? Bool, true)
     }
 
     func testAccessGroupResolverRejectsAGroupForAnotherBundle() {

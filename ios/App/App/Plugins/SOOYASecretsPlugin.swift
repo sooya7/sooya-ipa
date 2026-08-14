@@ -108,7 +108,8 @@ final class SOOYAKeychainAccessGroupResolver {
             kSecClass as String: kSecClassGenericPassword as String,
             kSecAttrService as String: Self.probeService,
             kSecAttrAccount as String: account,
-            kSecMatchLimit as String: kSecMatchLimitOne as String
+            kSecMatchLimit as String: kSecMatchLimitOne as String,
+            kSecReturnAttributes as String: true
         ])
         guard copyResult.status == errSecSuccess,
               let group = copyResult.value?[kSecAttrAccessGroup as String] as? String else {
