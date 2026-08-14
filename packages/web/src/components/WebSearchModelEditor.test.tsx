@@ -77,6 +77,20 @@ describe('WebSearchModelEditor', () => {
     expect(onSaved).toHaveBeenCalled();
   });
 
+  it('renders an editable empty form instead of a placeholder when no config exists', async () => {
+    await act(async () => root!.render(<WebSearchModelEditor config={null} responsesAvailable onSaved={vi.fn()} onNotice={vi.fn()} />));
+
+    expect(container!.querySelector('[data-testid="admin-web-search-editor"]')).not.toBeNull();
+    const toggle = container!.querySelector('[aria-label="启用联网搜索"]') as HTMLInputElement;
+    expect(toggle).not.toBeNull();
+    expect(toggle.checked).toBe(false);
+    expect(container!.textContent).not.toContain('尚未配置联网搜索');
+    // Save button is present but disabled until a provider is picked.
+    const save = container!.querySelector('[data-testid="save-web-search"]') as HTMLButtonElement;
+    expect(save).not.toBeNull();
+    expect(save.disabled).toBe(true);
+  });
+
   it('tests a saved provider and shows the real result count', async () => {
     await act(async () => root!.render(<WebSearchModelEditor config={config} responsesAvailable onSaved={vi.fn()} onNotice={vi.fn()} />));
     await act(async () => (container!.querySelector('[aria-label="测试豆包"]') as HTMLButtonElement).click());

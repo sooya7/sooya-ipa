@@ -32,7 +32,9 @@ export function WebSearchModelEditor({
   onSaved: (models: AdminModels) => void;
   onNotice: (message: string) => void;
 }) {
-  const unavailable = !config;
+  // No config yet (fresh install): render the empty form instead of a
+  // placeholder — otherwise a first-time user could never save a config
+  // (no row exists -> backend returns no webSearch -> form hidden -> deadlock).
   const [draft, setDraft] = useState<AdminWebSearchConfig>(config ?? EMPTY_WEB_SEARCH);
   const [doubaoKey, setDoubaoKey] = useState('');
   const [tavilyKey, setTavilyKey] = useState('');
@@ -44,16 +46,6 @@ export function WebSearchModelEditor({
   const [testResult, setTestResult] = useState('');
 
   useEffect(() => setDraft(config ?? EMPTY_WEB_SEARCH), [config]);
-
-  if (unavailable) {
-    return (
-      <section className="admin-web-search-editor" data-testid="admin-web-search-editor">
-        <div className="admin-inline-error admin-form-wide" role="status">
-          尚未配置联网搜索。保存配置后即可在聊天中使用联网搜索（当前后端未返回 webSearch 配置）。
-        </div>
-      </section>
-    );
-  }
 
   const update = (patch: Partial<AdminWebSearchConfig>) => setDraft((current) => ({ ...current, ...patch }));
   const toggleProvider = (provider: AdminWebSearchProvider, enabled: boolean) => {
