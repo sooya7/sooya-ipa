@@ -3,10 +3,13 @@ import type { MessageRepo } from '../db/message.repo.js';
 import type { ReplyBatchRepo } from '../db/reply-batch.repo.js';
 import type { ChatChunk, ChatContentPart, ChatProvider, ChatRequest, ChatTurn } from '../providers/types.js';
 import type { ToolCallRuntime } from '../tools/tool-runtime.js';
+import type { ConfiguredWebSearch, WebSearchResult } from '../providers/web-search.js';
+import { formatWebSearchContext, webSearchPartMeta } from '../providers/web-search.js';
 import type { ChatMessage } from './types.js';
 import type { ContextBuilder } from './context-builder.js';
 import { currentReplyFeatureRuntime, type ReplyFeatureRuntime } from './reply-feature-runtime.js';
 import { parseUserDirectives, StreamingDirectiveFilter, stripModelDirectives, type ModelDirectives, type UserDirectives } from './directives.js';
+import { decideWebSearch } from './web-search-policy.js';
 
 /** Maximum number of image/sticker binaries read into the model context per reply. */
 const MAX_CONTEXT_IMAGES = 4;
@@ -23,6 +26,9 @@ export interface ReplyCoordinatorOptions {
   memory: MemoryProvider;
   provider?: ChatProvider | null;
   providerFactory?: () => Promise<ChatProvider | null>;
+  /** Resolves the on-device web-search runtime; searched (and injected into
+   * the system prompt) only when decideWebSearch() offers it. */
+  webSearch?: (() => Promise<ConfiguredWebSearch | null>) | null;
   toolRuntime?: ToolCallRuntime;
   contextBuilder?: ContextBuilder;
   /** Injected multimedia feature runtime; falls back to the global install. */
@@ -84,6 +90,36 @@ export class ReplyCoordinator {
       const recent = await this.options.messages.recent(32);
       const context = this.options.contextBuilder ? await this.options.contextBuilder.build({ recent, latestUser }) : { system: await this.systemPrompt(latestUser), turns: await this.buildTurns(recent, latestUser) };
       const request: ChatRequest = { system: appendDirectiveProtocol(context.system), messages: context.turns, maxTokens: 2048, temperature: 0.7, signal: controller.signal };
+      // Web search decision + injection: only when the user asks for current
+      // information. Failures degrade the prompt honestly instead of failing
+      // the reply (same contract as the server's replier).
+      let webSearchResult: WebSearchResult | undefined;
+      const userText = textOf(latestUser);
+      const searchDecision = decideWebSearch(userText);
+      if (searchDecision.offer && this.options.webSearch && !controller.signal.aborted) {
+        try {
+          const runtime = await this.options.webSearch();
+          if (runtime) {
+            for (const provider of runtime.providers) {
+              if (!provider.configured || controller.signal.aborted) continue;
+              try {
+                const result = await provider.search({
+                  query: userText.slice(0, 200),
+                  maxResults: runtime.maxResults,
+                  ...(searchDecision.freshness ? { freshness: searchDecision.freshness } : {}),
+                  signal: controller.signal
+                });
+                if (result.citations.length > 0) { webSearchResult = result; break; }
+              } catch { /* try the next provider */ }
+            }
+          }
+        } catch { /* search infra failure is non-fatal */ }
+        if (webSearchResult) {
+          request.system = `${request.system}\n\n${formatWebSearchContext(webSearchResult)}\n回答涉及上述材料的事实时使用 [1] 这样的编号标注来源；不要声称读取了未提供的网页正文。`;
+        } else if (!controller.signal.aborted) {
+          request.system = `${request.system}\n\n联网搜索当前不可用。不要声称已经核实实时信息；请诚实说明无法可靠确认，并继续完成不依赖实时事实的部分。`;
+        }
+      }
       const finalRequest = this.options.toolRuntime ? await this.options.toolRuntime.prepare(provider, request, { phase: 'reply', batchId, revision, signal: controller.signal }) : request;
       if (controller.signal.aborted) throw controller.signal.reason ?? new SupersededReplyError('reply aborted');
 
@@ -127,7 +163,7 @@ export class ReplyCoordinator {
       await this.options.messages.updatePart(partId, { text: visibleText });
       const mediaCount = await this.appendRequestedMedia(assistantId, semanticText, directives, controller.signal);
       if (!semanticText.trim() && mediaCount === 0) throw new Error('provider returned an empty reply');
-      await this.options.messages.updateMeta(assistantId, { batchId, revision, partial: false, model: result.model, finishReason: result.finishReason ?? null, usage: result.usage ?? null, directives, mediaCount, ...(result.webSearch ? { webSearch: result.webSearch } : {}) });
+      await this.options.messages.updateMeta(assistantId, { batchId, revision, partial: false, model: result.model, finishReason: result.finishReason ?? null, usage: result.usage ?? null, directives, mediaCount, ...(webSearchResult ? webSearchPartMeta(webSearchResult) : {}), ...(result.webSearch ? { webSearch: result.webSearch } : {}) });
       await this.options.messages.setStatus(assistantId, 'sent');
       const assistant = await this.options.messages.get(assistantId); if (!assistant) throw new Error('assistant message was not persisted');
       if (!await this.options.batches.complete(batchId, assistant.id, revision)) throw new SupersededReplyError('reply completion lost its revision fence');
