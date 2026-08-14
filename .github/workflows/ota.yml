@@ -38,29 +38,24 @@ jobs:
           BUNDLE_TAG: ota-bundle-${{ github.sha }}
           OTA_PRIVATE_KEY: ${{ secrets.OTA_PRIVATE_KEY }}
         run: |
+          set -euo pipefail
           test -n "${OTA_PRIVATE_KEY:-}" || { echo 'OTA_PRIVATE_KEY is required'; exit 1; }
           bundle_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${BUNDLE_TAG}/bundle.zip"
+          # Compatibility gates come from the source of truth (Swift
+          # SOOYAReleaseConfig + core migrations) so a native/schema/capability
+          # change cannot silently desync the OTA gate.
+          node scripts/ota-gates.mjs --env > build-gates.env
+          # shellcheck disable=SC1091
+          source build-gates.env
+          read -r -a capability_args <<< "$OTA_CAPABILITIES"
           node scripts/build-ota.mjs \
             --bundle packages/web/dist \
             --out build/ota \
             --release-id "$RELEASE_ID" \
             --bundle-url "$bundle_url" \
-            --native-min 10 --native-max 10 \
-            --schema-min 46 --schema-max 46 \
-            --bridge-capability database.sqlite \
-            --bridge-capability keychain.secrets \
-            --bridge-capability http.native \
-            --bridge-capability http.stream \
-            --bridge-capability http.websocket \
-            --bridge-capability mcp.native \
-            --bridge-capability mcp.transport \
-            --bridge-capability media.sandbox \
-            --bridge-capability archive.zip \
-            --bridge-capability oauth.system \
-            --bridge-capability notifications.local \
-            --bridge-capability notifications.push-client \
-            --bridge-capability ota.updater \
-            --bridge-capability ota.signature.ed25519
+            --native-min "$NATIVE_MIN" --native-max "$NATIVE_MAX" \
+            --schema-min "$SCHEMA_MIN" --schema-max "$SCHEMA_MAX" \
+            $(printf -- '--bridge-capability %s ' "${capability_args[@]}")
           (cd build/ota && zip -qry ../bundle.zip bundle)
           node --input-type=module -e "import { createHash } from 'node:crypto'; import { readFile, writeFile } from 'node:fs/promises'; const file = await readFile('build/bundle.zip'); const manifestPath = 'build/ota/ota-manifest.json'; const manifest = JSON.parse(await readFile(manifestPath, 'utf8')); manifest.bundle.zipSha256 = createHash('sha256').update(file).digest('hex'); await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n');"
           node --input-type=module -e "import { verifyOtaPackage } from './packages/migration-tools/src/ota.mjs'; await verifyOtaPackage('build/ota', { requireSignature: true });"
