@@ -21,7 +21,22 @@ jobs:
           node-version: 22.14.0
           cache: npm
       - name: Apply guarded contract repairs
-        run: python3 scripts/repair-native-contracts.py
+        run: |
+          python3 scripts/repair-native-contracts.py
+          python3 - <<'PY'
+          from pathlib import Path
+          for name, class_name in [
+              ('packages/web/src/local/nativeDatabaseContract.test.ts', 'CapacitorDatabase'),
+              ('packages/web/src/local/nativeMediaContract.test.ts', 'CapacitorMedia'),
+          ]:
+              path = Path(name)
+              text = path.read_text()
+              text = text.replace(
+                  f"Object.create({class_name}.prototype) as {class_name} & {{ plugin: unknown }}",
+                  f"Object.create({class_name}.prototype) as unknown as {class_name}",
+              )
+              path.write_text(text)
+          PY
       - name: Verify TypeScript contracts before committing
         run: |
           npm ci
