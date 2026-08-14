@@ -91,6 +91,7 @@ test('pending and last-good metadata bind to a verified OTA manifest', async () 
 
   await markOtaLastGood({ stateDir, packageDir: outputDir, recordedAt: '2026-08-13T00:02:00.000Z' });
   state = await verifyOtaState({ stateDir, packageDir: outputDir });
+  assert.equal(state.pending.releaseId, undefined);
   assert.equal(state.pending, null);
   assert.equal(state.lastGood.releaseId, 'release-fixture-0003');
   await fsp.writeFile(path.join(stateDir, 'last-good.json'), JSON.stringify({ ...state.lastGood, manifestSha256: '0'.repeat(64) }));
@@ -112,4 +113,33 @@ test('signs and verifies the canonical OTA manifest payload', async () => {
   manifest.releaseId = 'tampered-release';
   await fsp.writeFile(manifestPath, JSON.stringify(manifest));
   await assert.rejects(verifyOtaPackage(outputDir, { requireSignature: true }), /checksum|signature/i);
+});
+
+test('signed OTA pins an external HTTPS bundle URL while allowing a separately verified zip checksum', async () => {
+  const { bundleDir, outputDir } = await fixture();
+  const keys = crypto.generateKeyPairSync('ed25519');
+  const privateKey = keys.privateKey.export({ format: 'pem', type: 'pkcs8' });
+  const bundleUrl = 'https://github.com/sooya7/sooya-ipa/releases/download/ota-bundle-fixture/bundle.zip';
+  await buildOtaPackage({
+    bundleDir,
+    outputDir,
+    releaseId: 'release-fixture-public-url',
+    createdAt: '2026-08-14T00:00:00.000Z',
+    bundleUrl,
+    native: { min: 10, max: 10 },
+    schema: { min: 46, max: 46 },
+    bridgeCapabilities: ['ota.updater'],
+    signingPrivateKey: privateKey
+  });
+
+  const manifestPath = path.join(outputDir, 'ota-manifest.json');
+  const manifest = JSON.parse(await fsp.readFile(manifestPath, 'utf8'));
+  assert.equal(manifest.bundleUrl, bundleUrl);
+  manifest.bundle.zipSha256 = 'a'.repeat(64);
+  await fsp.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  assert.equal((await verifyOtaPackage(outputDir, { requireSignature: true })).bundleUrl, bundleUrl);
+
+  manifest.bundleUrl = 'https://example.invalid/replaced.zip';
+  await fsp.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  await assert.rejects(verifyOtaPackage(outputDir, { requireSignature: true }), /signature/i);
 });
