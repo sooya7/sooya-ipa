@@ -4,6 +4,8 @@ import type { MediaPlatform } from '../platform/media.js';
 import type { HttpPlatform } from '../platform/http.js';
 import { ConfigRepository, JobRepo, LifeCityRepo, LifeClockRepo, LifeRepo, LifeV2Repo, LocationRepo, MediaRepo, MemoryRepo, MessageRepo, MetricsRepo, MomentRepo, ReplyBatchRepo, SettingsRepo, StickerRepo, SummaryRepo, ThoughtRepo, VoiceRepo, WeatherRepo, type MediaRow, type Sticker } from '../db/index.js';
 import type { ChatProvider } from '../providers/types.js';
+import { createWebSearch } from '../providers/web-search.js';
+import { OpenMeteoWeatherProvider } from '../providers/weather-provider.js';
 import type { MemoryProvider } from '../memory/types.js';
 import { LocalMemoryProvider } from '../memory/local-memory-provider.js';
 import { SqliteLocalMemoryStore } from '../memory/local-store.js';
@@ -20,6 +22,8 @@ import type { ToolCallRuntime } from '../tools/tool-runtime.js';
 import { ReplyCoordinator } from './reply-coordinator.js';
 import { ContextBuilder } from './context-builder.js';
 import { SummaryBuilder } from './summary-builder.js';
+import { StickerAnalyzer } from './sticker-analyzer.js';
+import { extractText } from '../util/text-extractor.js';
 import { LocalLifeCatchUp } from '../life/catch-up-service.js';
 import { MomentComposer } from '../moments/composer.js';
 import { LATEST_SCHEMA_VERSION } from '../db/migrations.js';
@@ -282,7 +286,13 @@ export class LocalCore implements LocalCoreApi {
   }
 
   async messages(options: { limit?: number; before?: number; since?: number } = {}): Promise<MessagePage> {
-    const page = await this.messagesRepo.page(options.limit ?? 50, options.before ?? null);
+    // Catch-up path: the web layer walks `since` + `nextSince` cursors to drain
+    // a backlog page by page. Ignoring `since` here returns the newest page
+    // repeatedly, which stalls the cursor and skips the backlogged messages.
+    const limit = options.limit ?? 50;
+    const page = options.since !== undefined && options.since > 0
+      ? await this.messagesRepo.pageSince(options.since, limit)
+      : { ...(await this.messagesRepo.page(limit, options.before ?? null)), nextSince: undefined };
     const lastMessageSeq = (await this.options.db.query<{ m: number | null }>("SELECT MAX(seq) m FROM messages WHERE conversation_id = 'main'"))[0]?.m ?? 0;
     const oldestSeq = (await this.options.db.query<{ m: number | null }>("SELECT MIN(seq) m FROM messages WHERE conversation_id = 'main'"))[0]?.m ?? null;
     return { ...page, lastEventSeq: this.events.lastSequence, lastMessageSeq, oldestSeq };
@@ -380,6 +390,7 @@ export class LocalCore implements LocalCoreApi {
           sha256: await sha256Hex(file.bytes),
           origin: 'upload'
         });
+        if (saved.kind === 'file') void this.extractMediaText(row.id).catch(() => undefined);
         media.push(toMediaRef(row));
       } catch (error) {
         failed.push({ filename: file.name, error: error instanceof Error ? error.message : String(error), code: 'save-failed' });
@@ -472,6 +483,70 @@ export class LocalCore implements LocalCoreApi {
     };
   }
 
+  /** Runs one sticker through the vision analyzer; failure stays recorded on the sticker. */
+  private async analyzeSticker(stickerId: string): Promise<void> {
+    if (!this.options.mediaStore) return;
+    const analyzer = new StickerAnalyzer(this.stickersRepo, this.options.mediaStore, () => this.visionProvider());
+    await analyzer.analyze(stickerId);
+  }
+
+  private async visionProvider(): Promise<ChatProvider | null> {
+    return this.options.chatProvider ?? await this.options.chatProviderFactory?.() ?? null;
+  }
+
+  /** Fetches current weather for the active location through open-meteo and persists it. */
+  private async refreshWeather(): Promise<{ ok: boolean; snapshot: Record<string, unknown> | null; error: string | null }> {
+    if (!this.options.http) return { ok: false, snapshot: null, error: '本地 HTTP 传输不可用' };
+    try {
+      const locationState = await this.locationsRepo.currentState();
+      const location = locationState ? await this.locationsRepo.get(locationState.location_id) : undefined;
+      if (!location?.name) return { ok: false, snapshot: null, error: '没有可用的当前位置' };
+      const provider = new OpenMeteoWeatherProvider(this.options.http);
+      const snapshot = await provider.current({ city: location.name, country: '中国' });
+      await this.weatherRepo.save({
+        location_key: snapshot.locationKey,
+        observed_at: snapshot.observedAt,
+        condition: snapshot.condition,
+        temperature_c: snapshot.temperatureC ?? null,
+        feels_like_c: snapshot.feelsLikeC ?? null,
+        humidity: snapshot.humidity ?? null,
+        precipitation_mm: snapshot.precipitationMm ?? null,
+        wind_kph: snapshot.windKph ?? null,
+        visibility_km: snapshot.visibilityKm ?? null,
+        pressure_hpa: snapshot.pressureHpa ?? null,
+        provider: snapshot.provider
+      });
+      this.events.emit('weather.updated', { locationKey: snapshot.locationKey, observedAt: snapshot.observedAt });
+      const latest = await this.weatherRepo.latest(snapshot.locationKey);
+      return { ok: true, snapshot: latest ? toAdminWeather(latest) : null, error: null };
+    } catch (error) {
+      return { ok: false, snapshot: null, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /** Extracts text from an uploaded file and records it in media_text. */
+  private async extractMediaText(mediaId: string): Promise<void> {
+    if (!this.options.mediaStore) return;
+    const row = await this.mediaRepo.get(mediaId);
+    if (!row) return;
+    const read = await this.options.mediaStore.read(mediaId).catch(() => null);
+    if (!read) {
+      await this.mediaRepo.setExtractedText(mediaId, { status: 'failed', error: 'media_unavailable' });
+      return;
+    }
+    const name = (() => { try { const meta = JSON.parse(row.meta_json) as { name?: unknown }; return typeof meta.name === 'string' ? meta.name : undefined; } catch { return undefined; } })();
+    const result = extractText(read.data, row.mime, name);
+    if (result.status === 'ready') {
+      await this.mediaRepo.setExtractedText(mediaId, { status: 'ready', text: result.text, metadata: result.metadata });
+      this.events.emit('media.updated', { mediaId, textStatus: 'ready' });
+    } else if (result.status === 'unsupported') {
+      await this.mediaRepo.setExtractedText(mediaId, { status: 'unsupported', metadata: result.metadata });
+    } else {
+      await this.mediaRepo.setExtractedText(mediaId, { status: 'failed', error: result.error, metadata: result.metadata });
+      this.events.emit('media.updated', { mediaId, textStatus: 'failed' });
+    }
+  }
+
   /** Admin UI bridge for native mode. It intentionally accepts route-shaped
    * paths so existing panels can be reused without a localhost server. */
   async adminRequest<T = unknown>(path: string, options: LocalAdminRequestOptions = {}): Promise<T> {
@@ -537,7 +612,19 @@ export class LocalCore implements LocalCoreApi {
       if (modelAction[2] === 'discover') return { models: configured?.model ? [configured.model] : [], source: 'local-config' } as T;
       return { ok: Boolean(configured?.enabled && configured.secretRef), provider: configured?.provider ?? 'none', model: configured?.model ?? '', detail: configured?.secretRef ? '已绑定本地密钥引用' : '尚未配置本地密钥引用', latencyMs: 0 } as T;
     }
-    if (route === '/api/admin/models/web-search/test' && method === 'POST') return { ok: false, provider: body.provider ?? 'unknown', latencyMs: 0, resultCount: 0, detail: '本地版本未启用业务 Web Search' } as T;
+    if (route === '/api/admin/models/web-search/test' && method === 'POST') {
+      const runtime = await createWebSearch(this.options.http!, this.configRepo);
+      if (!runtime || runtime.providers.length === 0) return { ok: false, provider: body.provider ?? 'unknown', latencyMs: 0, resultCount: 0, detail: '未配置联网搜索（webSearch provider 未启用或无密钥引用）' } as T;
+      const started = Date.now();
+      try {
+        const provider = runtime.providers.find((item) => item.name === body.provider) ?? runtime.providers[0]!;
+        const query = typeof body.query === 'string' && body.query.trim() ? body.query.trim().slice(0, 200) : '今日新闻';
+        const result = await provider.search({ query, maxResults: runtime.maxResults, signal: undefined });
+        return { ok: true, provider: provider.name, latencyMs: Date.now() - started, resultCount: result.citations.length, citations: result.citations.slice(0, 5), detail: `${result.citations.length} 条结果` } as T;
+      } catch (error) {
+        return { ok: false, provider: body.provider ?? 'unknown', latencyMs: Date.now() - started, resultCount: 0, detail: error instanceof Error ? error.message : String(error) } as T;
+      }
+    }
     const applyPreset = route.match(/^\/api\/admin\/model-presets\/([^/]+)\/apply$/u)?.[1];
     if (applyPreset && method === 'POST') {
       const presets = await this.settingsRepo.get<Array<Record<string, unknown>>>('modelPresets', []);
@@ -681,8 +768,17 @@ export class LocalCore implements LocalCoreApi {
     }
     if (stickerId && method === 'DELETE') return { deleted: await this.stickersRepo.delete(decodeURIComponent(stickerId)) } as T;
     const stickerAction = route.match(/^\/api\/admin\/stickers\/([^/]+)\/analyze$/u)?.[1];
-    if (stickerAction && method === 'POST') return { queued: false, jobId: '', stickerId: decodeURIComponent(stickerAction) } as T;
-    if (route === '/api/admin/stickers/analyze-batch' && method === 'POST') return { queued: 0, skipped: await this.stickersRepo.count(false) } as T;
+    if (stickerAction && method === 'POST') {
+      const stickerId = decodeURIComponent(stickerAction);
+      void this.analyzeSticker(stickerId).catch(() => undefined);
+      return { queued: true, jobId: '', stickerId } as T;
+    }
+    if (route === '/api/admin/stickers/analyze-batch' && method === 'POST') {
+      const pending = await this.stickersRepo.list({ status: 'pending', limit: 500 });
+      const queued = pending.length;
+      for (const sticker of pending) void this.analyzeSticker(sticker.id).catch(() => undefined);
+      return { queued, skipped: 0 } as T;
+    }
     const localMediaData = route.match(/^\/api\/admin\/media\/([^/]+)\/data$/u)?.[1];
     if (localMediaData && method === 'GET') {
       if (!this.options.mediaStore) throw new Error('native media storage is unavailable');
@@ -806,7 +902,10 @@ export class LocalCore implements LocalCoreApi {
       return { enabled: Boolean(snapshot), provider: { name: snapshot?.provider ?? null, configured: Boolean(snapshot), active: Boolean(snapshot) }, currentSource: snapshot?.provider ?? null, lastSnapshot: snapshot ? toAdminWeather(snapshot) : null, cacheAgeSec: snapshot ? Math.max(0, Math.floor((Date.now() - Date.parse(snapshot.observed_at)) / 1000)) : null, daylight: null, forecast: null } as T;
     }
     if (route === '/api/admin/weather/forecast') return { forecast: null } as T;
-    if (route === '/api/admin/weather/refresh' && method === 'POST') return { ok: true, snapshot: null, presence: await this.presence() } as T;
+    if (route === '/api/admin/weather/refresh' && method === 'POST') {
+      const refreshed = await this.refreshWeather();
+      return { ok: refreshed.ok, snapshot: refreshed.snapshot ?? null, error: refreshed.error ?? null, presence: await this.presence() } as T;
+    }
     if (route.startsWith('/api/admin/metrics')) return { aggregates: [], distributions: [] } as T;
     return {} as T;
   }
