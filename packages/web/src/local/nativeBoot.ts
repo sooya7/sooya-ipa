@@ -1,5 +1,5 @@
 import { Capacitor } from '@capacitor/core';
-import { LocalCore, rollbackBuiltinStickerImport, seedBuiltinStickersOnce } from '@sooya/core/app';
+import { LocalCore, rollbackBuiltinStickerImport, seedBuiltinStickersOnce, seedServerPersonaOnce } from '@sooya/core/app';
 import type { LocalDatabase, DatabaseValue, DatabaseIntegrityResult, DatabaseBackupResult, RunResult } from '@sooya/core/platform';
 import type { SecretsPlatform } from '@sooya/core/platform';
 import type { MediaPlatform, MediaRecord, MediaSaveRequest } from '@sooya/core/platform';
@@ -258,6 +258,7 @@ export async function installNativeLocalCore(): Promise<boolean> {
   const mediaStore = new BuiltinStickerMedia(new CapacitorMedia());
   nativeBuiltinMedia = mediaStore;
   const core = new LocalCore({ db, secrets: new CapacitorSecrets(), mediaStore, http: new CapacitorHttp(), mcp: new CapacitorMcp(), toolRegistry: registry, toolPolicy: policy, toolRuntime: runtime });
+  await seedServerPersonaOnce(core.settingsRepo);
   installSooyaClient(new LocalSooyaClient(core, (id) => mediaStore.assetUrl(id)));
   void probeNotificationCapabilities(core);
   nativeOtaCore = core;
