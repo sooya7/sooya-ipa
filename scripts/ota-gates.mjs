@@ -61,7 +61,8 @@ if (process.argv.includes('--env')) {
   console.log(`BRIDGE_VERSION=${gates.bridgeVersion}`);
   console.log(`SCHEMA_MIN=${gates.schemaMin}`);
   console.log(`SCHEMA_MAX=${gates.schemaMax}`);
-  console.log(`OTA_CAPABILITIES=${gates.bridgeCapabilities.join(' ')}`);
+  // Quoted so `source` keeps the space-separated list in one variable.
+  console.log(`OTA_CAPABILITIES="${gates.bridgeCapabilities.join(' ')}"`);
 } else {
   console.log(JSON.stringify(gates, null, 2));
 }
