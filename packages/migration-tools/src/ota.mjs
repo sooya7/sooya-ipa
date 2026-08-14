@@ -21,6 +21,19 @@ export const OTA_FORMAT = 'sooya-ota/v1';
 export const OTA_STATE_FORMAT = 'sooya-ota-state/v1';
 const MANIFEST_NAME = 'ota-manifest.json';
 
+/** Shared capability validation; exported so the OTA gate derivation script
+ * (scripts/ota-gates.mjs) enforces the same rules as the build path. */
+export function validateCapabilities(value) {
+  if (!Array.isArray(value)) throw new Error('bridge capabilities must be an array');
+  const unique = new Set();
+  for (const item of value) {
+    if (typeof item !== 'string' || !/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$/u.test(item)) throw new Error(`invalid bridge capability: ${item}`);
+    if (unique.has(item)) throw new Error(`duplicate bridge capability: ${item}`);
+    unique.add(item);
+  }
+  return [...unique].sort((left, right) => left.localeCompare(right, 'en'));
+}
+
 export async function buildOtaPackage(options) {
   const bundleDir = path.resolve(required(options?.bundleDir, 'bundleDir'));
   const outputDir = path.resolve(required(options.outputDir, 'outputDir'));
@@ -96,7 +109,16 @@ export async function verifyOtaPackage(packageDir, options = {}) {
   return { ...manifest, manifestSha256: sha256Value(text), packageDir: root };
 }
 
-/** Canonical payload shared by Node release tooling and the web updater. */
+/** Canonical payload shared by Node release tooling and the web updater.
+ *
+ * IMPORTANT: bridgeCapabilities MUST be sorted with the default code-unit
+ * comparator (Array.prototype.sort). The web updater
+ * (packages/web/src/local/otaUpdater.ts) rebuilds this payload with
+ * `[...caps].sort()` — any other ordering (e.g. localeCompare) produces a
+ * different payload byte string and breaks Ed25519 verification on device.
+ * Cross-verified by test('OTA capability ordering is canonical') in
+ * packages/migration-tools/test/ota.test.mjs.
+ */
 export function otaSigningPayload(manifest) {
   const compatibility = manifest.compatibility;
   return [
@@ -110,7 +132,7 @@ export function otaSigningPayload(manifest) {
     String(compatibility.native.max),
     String(compatibility.schema.min),
     String(compatibility.schema.max),
-    [...compatibility.bridgeCapabilities].sort((a, b) => a.localeCompare(b, 'en')).join(','),
+    [...compatibility.bridgeCapabilities].sort().join(','),
     manifest.bundleUrl ?? ''
   ].join('\n');
 }
@@ -255,17 +277,6 @@ function validateGate(value, label) {
     throw new Error(`invalid ${label} compatibility gate`);
   }
   return { min: value.min, max: value.max };
-}
-
-function validateCapabilities(value) {
-  if (!Array.isArray(value)) throw new Error('bridge capabilities must be an array');
-  const unique = new Set();
-  for (const item of value) {
-    if (typeof item !== 'string' || !/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$/u.test(item)) throw new Error(`invalid bridge capability: ${item}`);
-    if (unique.has(item)) throw new Error(`duplicate bridge capability: ${item}`);
-    unique.add(item);
-  }
-  return [...unique].sort((left, right) => left.localeCompare(right, 'en'));
 }
 
 async function absent(target, label) {

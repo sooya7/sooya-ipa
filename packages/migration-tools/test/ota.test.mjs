@@ -9,6 +9,7 @@ import {
   buildOtaPackage,
   markOtaLastGood,
   markOtaPending,
+  otaSigningPayload,
   verifyOtaPackage,
   verifyOtaState
 } from '../src/ota.mjs';
@@ -141,4 +142,35 @@ test('signed OTA pins an external HTTPS bundle URL while allowing a separately v
   manifest.bundleUrl = 'https://example.invalid/replaced.zip';
   await fsp.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   await assert.rejects(verifyOtaPackage(outputDir, { requireSignature: true }), /signature/i);
+});
+
+// Cross-verification with the web updater's signingPayload
+// (packages/web/src/local/otaUpdater.ts). The web side sorts capabilities with
+// the default code-unit comparator; the Node side must produce byte-identical
+// payloads or on-device Ed25519 verification fails.
+test('OTA capability ordering is canonical across Node and web', () => {
+  const manifest = {
+    format: 'sooya-ota/v1',
+    releaseId: 'ota-cross-0001',
+    createdAt: '2026-08-14T00:00:00.000Z',
+    bundle: { sha256: 'a'.repeat(64), bytes: 100, fileCount: 2 },
+    compatibility: {
+      native: { min: 10, max: 10 },
+      schema: { min: 46, max: 46 },
+      bridgeCapabilities: [
+        // Deliberately order these so localeCompare('en') and the default
+        // code-unit sort disagree ('.' / '-' / '_' sort differently).
+        'push.local', 'db_blob', 'db-blob', 'db.blob', 'http.websocket', 'ota.updater'
+      ]
+    },
+    bundleUrl: 'https://github.com/sooya7/sooya-ipa/releases/download/x/bundle.zip'
+  };
+  const nodePayload = otaSigningPayload(manifest);
+  const webSort = [...manifest.compatibility.bridgeCapabilities].sort().join(',');
+  assert.equal(nodePayload.split('\n')[10], webSort, 'Node and web capability ordering must match');
+  assert.notEqual(
+    [...manifest.compatibility.bridgeCapabilities].sort((a, b) => a.localeCompare(b, 'en')).join(','),
+    webSort,
+    'test fixture must actually discriminate localeCompare from code-unit sort'
+  );
 });
