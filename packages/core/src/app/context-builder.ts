@@ -66,14 +66,16 @@ export class ContextBuilder {
 
     const persona = objectValue(settings.persona);
     const assistantName = stringValue(persona.name) ?? stringValue(settings.assistantName) ?? 'SOOYA';
+    const personaPrompt = longStringValue(persona.systemPrompt);
     const relationship = stringValue(settings.relationship) ?? stringValue(persona.relationship);
     const tone = stringValue(settings.tone) ?? stringValue(persona.tone);
     const userProfile = objectValue(settings.userProfile);
     const userName = stringValue(userProfile.name) ?? stringValue(settings.userName);
 
     const sections = [
-      `你是${assistantName}，运行在用户的 iPhone 本地。`,
-      '回答自然、简洁、真诚；不要声称自己访问了不存在的服务器服务。',
+      personaPrompt ?? `你是${assistantName}，运行在用户的 iPhone 本地。`,
+      '## 本地运行环境',
+      '你当前运行在用户的 iPhone 本地。不要声称访问了不存在的服务器服务；只有真实可用的本地能力、Provider 或工具才能被当作已执行。',
       '除非用户明确要求，不要主动发送消息、推送通知或制造任务。',
       `当前本地时间：${this.now().toISOString()}`,
       relationship ? `你们的关系设定：${relationship}` : '',
@@ -90,7 +92,7 @@ export class ContextBuilder {
     ].filter(Boolean);
 
     return {
-      system: sections.join('\n'),
+      system: sections.join('\n\n'),
       turns,
       summaryCount: summaries.length,
       memoryCount: memories.length
@@ -113,4 +115,8 @@ function objectValue(value: unknown): Record<string, unknown> {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim().slice(0, 300) : undefined;
+}
+
+function longStringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim().slice(0, 64_000) : undefined;
 }
