@@ -2,17 +2,15 @@ import Foundation
 import Capacitor
 import Security
 
-/// Fixed Keychain namespace for SOOYA secrets. The service name and bundle
-/// id are part of the product contract: changing them breaks existing
-/// installs (overwrite install must keep secrets).
+/// Stable Keychain namespace for SOOYA secrets. The service name is part of
+/// the product contract so overwrite installs signed by the same identity can
+/// continue to find existing secrets.
 struct SOOYAKeychainIdentity {
     static let service = "com.sooya.app.secrets.v1"
     let service: String
-    let accessGroup: String
 
-    init(service: String = SOOYAKeychainIdentity.service, accessGroup: String) {
+    init(service: String = SOOYAKeychainIdentity.service) {
         self.service = service
-        self.accessGroup = accessGroup
     }
 }
 
@@ -21,8 +19,8 @@ struct SOOYAKeychainResult {
     let value: [String: Any]?
 }
 
-/// Thin seam over the Security framework so tests can record every call and
-/// stub OSStatus responses without touching a real keychain.
+/// Thin seam over Security.framework so tests can record calls and stub
+/// OSStatus responses without touching a real device Keychain.
 protocol SOOYAKeychainClient {
     func add(_ attributes: [String: Any]) -> SOOYAKeychainResult
     func copyMatching(_ query: [String: Any]) -> SOOYAKeychainResult
@@ -39,16 +37,15 @@ final class SOOYASystemKeychainClient: SOOYAKeychainClient {
     func copyMatching(_ query: [String: Any]) -> SOOYAKeychainResult {
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        let value = (result as? [String: Any])
-        return SOOYAKeychainResult(status: status, value: value)
+        return SOOYAKeychainResult(status: status, value: result as? [String: Any])
     }
 
     func update(_ query: [String: Any], attributes: [String: Any]) -> OSStatus {
-        return SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
     }
 
     func delete(_ query: [String: Any]) -> OSStatus {
-        return SecItemDelete(query as CFDictionary)
+        SecItemDelete(query as CFDictionary)
     }
 }
 
@@ -56,7 +53,6 @@ enum SOOYAKeychainError: Error, LocalizedError {
     case emptyKey
     case newlineInKey
     case emptyValue
-    case unresolvedAccessGroup
     case keychainFailed(OSStatus)
 
     var errorDescription: String? {
@@ -64,73 +60,26 @@ enum SOOYAKeychainError: Error, LocalizedError {
         case .emptyKey: return "A key is required"
         case .newlineInKey: return "Keys cannot contain newlines"
         case .emptyValue: return "A value is required"
-        case .unresolvedAccessGroup: return "Keychain access group could not be resolved"
-        // Deliberately generic: never render the OSStatus description with
-        // caller-controlled data, and never include the key or secret value.
         case .keychainFailed: return "Keychain operation failed"
         }
     }
 }
 
-/// Resolves the signed default access group for this bundle by writing a
-/// throwaway probe item (without an explicit group), reading back the group
-/// the system assigned, validating it, and removing the probe.
-final class SOOYAKeychainAccessGroupResolver {
-    static let probeService = "com.sooya.app.secrets.access-group-probe.v1"
-    static let requiredBundleIdentifier = "com.sooya.app"
-
-    private let client: SOOYAKeychainClient
-    private let makeProbeAccount: () -> String
-
-    init(client: SOOYAKeychainClient = SOOYASystemKeychainClient(), makeProbeAccount: @escaping () -> String = { UUID().uuidString }) {
-        self.client = client
-        self.makeProbeAccount = makeProbeAccount
-    }
-
-    func resolve() throws -> String {
-        let account = makeProbeAccount()
-        let addResult = client.add([
-            kSecClass as String: kSecClassGenericPassword as String,
-            kSecAttrService as String: Self.probeService,
-            kSecAttrAccount as String: account
-        ])
-        guard addResult.status == errSecSuccess else {
-            throw SOOYAKeychainError.keychainFailed(addResult.status)
-        }
-        defer { _ = client.delete([
-            kSecClass as String: kSecClassGenericPassword as String,
-            kSecAttrService as String: Self.probeService,
-            kSecAttrAccount as String: account
-        ]) }
-
-        // Read the item attributes back WITHOUT requesting the secret data.
-        let copyResult = client.copyMatching([
-            kSecClass as String: kSecClassGenericPassword as String,
-            kSecAttrService as String: Self.probeService,
-            kSecAttrAccount as String: account,
-            kSecMatchLimit as String: kSecMatchLimitOne as String,
-            kSecReturnAttributes as String: true
-        ])
-        guard copyResult.status == errSecSuccess,
-              let group = copyResult.value?[kSecAttrAccessGroup as String] as? String else {
-            throw SOOYAKeychainError.unresolvedAccessGroup
-        }
-        // Accept "<TeamID>.com.sooya.app"; reject groups bound to any other
-        // bundle identifier.
-        guard group.hasSuffix(".\(Self.requiredBundleIdentifier)") else {
-            throw SOOYAKeychainError.unresolvedAccessGroup
-        }
-        return group
-    }
-}
-
-/// Generic-password secret store. Secrets are device-only, survive until the
-/// first unlock after reboot, and are never readable through the bridge.
+/// Generic-password secret store.
+///
+/// Production queries intentionally omit kSecAttrAccessGroup. SOOYA ships as
+/// an unsigned IPA and is re-signed by the user, so hard-coding or probing a
+/// Team-ID-derived access group is brittle. Omitting the attribute lets iOS
+/// use the default Keychain access group granted by the app's actual signing
+/// identity.
 final class SOOYAKeychainStore {
     private let client: SOOYAKeychainClient
     private let identity: SOOYAKeychainIdentity
 
-    init(client: SOOYAKeychainClient = SOOYASystemKeychainClient(), identity: SOOYAKeychainIdentity) {
+    init(
+        client: SOOYAKeychainClient = SOOYASystemKeychainClient(),
+        identity: SOOYAKeychainIdentity = SOOYAKeychainIdentity()
+    ) {
         self.client = client
         self.identity = identity
     }
@@ -140,7 +89,6 @@ final class SOOYAKeychainStore {
         let result = client.copyMatching([
             kSecClass as String: kSecClassGenericPassword as String,
             kSecAttrService as String: identity.service,
-            kSecAttrAccessGroup as String: identity.accessGroup,
             kSecAttrAccount as String: key,
             kSecMatchLimit as String: kSecMatchLimitOne as String
         ])
@@ -151,60 +99,62 @@ final class SOOYAKeychainStore {
         }
     }
 
-    /// Internal-only resolver used by the native HTTP transport. This method
-    /// is deliberately not exposed as a Capacitor plugin method, so API keys
-    /// never cross into JavaScript or the web bundle.
+    /// Internal-only resolver used by native HTTP/MCP transports. This method
+    /// is deliberately not exposed as a Capacitor plugin method, so provider
+    /// keys and tokens never cross into JavaScript.
     func read(key: String) throws -> String? {
         try validateKey(key)
         let result = client.copyMatching([
             kSecClass as String: kSecClassGenericPassword as String,
             kSecAttrService as String: identity.service,
-            kSecAttrAccessGroup as String: identity.accessGroup,
             kSecAttrAccount as String: key,
             kSecMatchLimit as String: kSecMatchLimitOne as String,
-            // Returning attributes together with the value makes Security
-            // return a dictionary containing kSecValueData on device.
             kSecReturnData as String: true,
             kSecReturnAttributes as String: true
         ])
         switch result.status {
-        case errSecItemNotFound: return nil
+        case errSecItemNotFound:
+            return nil
         case errSecSuccess:
-            guard let data = result.value?[kSecValueData as String] as? Data else { throw SOOYAKeychainError.keychainFailed(result.status) }
+            guard let data = result.value?[kSecValueData as String] as? Data else {
+                throw SOOYAKeychainError.keychainFailed(result.status)
+            }
             return String(data: data, encoding: .utf8)
-        default: throw SOOYAKeychainError.keychainFailed(result.status)
+        default:
+            throw SOOYAKeychainError.keychainFailed(result.status)
         }
     }
 
     func set(key: String, value: String) throws {
         try validateKey(key)
         guard !value.isEmpty else { throw SOOYAKeychainError.emptyValue }
+
         let attributes: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword as String,
             kSecAttrService as String: identity.service,
-            kSecAttrAccessGroup as String: identity.accessGroup,
             kSecAttrAccount as String: key,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String,
             kSecValueData as String: Data(value.utf8)
         ]
         let result = client.add(attributes)
+
         switch result.status {
         case errSecSuccess:
             return
         case errSecDuplicateItem:
-            // Atomic value-only update: never re-fetches or echoes the secret.
             let updateStatus = client.update(
                 [
                     kSecClass as String: kSecClassGenericPassword as String,
                     kSecAttrService as String: identity.service,
-                    kSecAttrAccessGroup as String: identity.accessGroup,
                     kSecAttrAccount as String: key
                 ],
                 attributes: [
                     kSecValueData as String: Data(value.utf8)
                 ]
             )
-            guard updateStatus == errSecSuccess else { throw SOOYAKeychainError.keychainFailed(updateStatus) }
+            guard updateStatus == errSecSuccess else {
+                throw SOOYAKeychainError.keychainFailed(updateStatus)
+            }
         default:
             throw SOOYAKeychainError.keychainFailed(result.status)
         }
@@ -215,10 +165,8 @@ final class SOOYAKeychainStore {
         let status = client.delete([
             kSecClass as String: kSecClassGenericPassword as String,
             kSecAttrService as String: identity.service,
-            kSecAttrAccessGroup as String: identity.accessGroup,
             kSecAttrAccount as String: key
         ])
-        // Idempotent: deleting a missing item is not an error.
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw SOOYAKeychainError.keychainFailed(status)
         }
@@ -237,15 +185,9 @@ public final class SOOYASecretsPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "has", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "set", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "delete", returnType: CAPPluginReturnPromise)
-        // Deliberately no "get": secrets must never cross into JS.
     ]
 
-    private lazy var storeResult: Result<SOOYAKeychainStore, Error> = Result {
-        let group = try SOOYAKeychainAccessGroupResolver().resolve()
-        return SOOYAKeychainStore(identity: SOOYAKeychainIdentity(accessGroup: group))
-    }
-
-    private func requireStore() throws -> SOOYAKeychainStore { try storeResult.get() }
+    private lazy var store = SOOYAKeychainStore()
 
     @objc public func has(_ call: CAPPluginCall) {
         guard let key = call.getString("key") else {
@@ -253,7 +195,7 @@ public final class SOOYASecretsPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         do {
-            call.resolve(["present": try requireStore().has(key: key)])
+            call.resolve(["present": try store.has(key: key)])
         } catch {
             call.reject((error as? LocalizedError)?.errorDescription ?? "Keychain operation failed")
         }
@@ -265,7 +207,7 @@ public final class SOOYASecretsPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         do {
-            try requireStore().set(key: key, value: value)
+            try store.set(key: key, value: value)
             call.resolve()
         } catch {
             call.reject((error as? LocalizedError)?.errorDescription ?? "Keychain operation failed")
@@ -278,7 +220,7 @@ public final class SOOYASecretsPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         do {
-            try requireStore().delete(key: key)
+            try store.delete(key: key)
             call.resolve()
         } catch {
             call.reject((error as? LocalizedError)?.errorDescription ?? "Keychain operation failed")
