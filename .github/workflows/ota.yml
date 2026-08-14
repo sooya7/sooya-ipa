@@ -100,9 +100,9 @@ jobs:
           base="${OTA_PUBLISH_URL%/}"
           auth=(-H "Authorization: Bearer ${OTA_PUBLISH_TOKEN}")
           upload_tag="ota-upload-${GITHUB_SHA}"
-          gh release delete "${upload_tag}" --cleanup-tag --yes >/dev/null 2>&1 || true
-          trap 'gh release delete "${upload_tag}" --cleanup-tag --yes >/dev/null 2>&1 || true' EXIT
-          gh release create "${upload_tag}" build/bundle.zip --title "Temporary OTA upload ${GITHUB_SHA}" --notes "Temporary transport asset; removed after verified server pull." --prerelease --latest=false
+          gh release delete "${upload_tag}" --repo "${GITHUB_REPOSITORY}" --cleanup-tag --yes >/dev/null 2>&1 || true
+          trap 'gh release delete "${upload_tag}" --repo "${GITHUB_REPOSITORY}" --cleanup-tag --yes >/dev/null 2>&1 || true' EXIT
+          gh release create "${upload_tag}" build/bundle.zip --repo "${GITHUB_REPOSITORY}" --title "Temporary OTA upload ${GITHUB_SHA}" --notes "Temporary transport asset; removed after verified server pull." --prerelease --latest=false
           bytes="$(stat -c %s build/bundle.zip)"
           sha256="$(sha256sum build/bundle.zip | cut -d ' ' -f 1)"
           asset_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${upload_tag}" --jq '.assets[] | select(.name == "bundle.zip") | .id')"
