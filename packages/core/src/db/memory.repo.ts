@@ -109,6 +109,20 @@ export class MemoryRepo {
   }
 
   async upsert(input: UpsertMemoryInput): Promise<{ record: MemoryRow; merged: boolean }> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await this.upsertOnce(input);
+      } catch (error) {
+        if (attempt === 1 || !isUniqueConstraint(error)) throw error;
+        // A concurrent commit won the race for the same normalized text;
+        // retry once so this call merges into the existing row instead of
+        // failing on the unique index.
+      }
+    }
+    throw new Error('memory upsert failed after retry');
+  }
+
+  private async upsertOnce(input: UpsertMemoryInput): Promise<{ record: MemoryRow; merged: boolean }> {
     const normalized = normalizeMemoryText(input.content);
     const existing = await queryOne<MemoryRow>(this.db, 'SELECT * FROM memories WHERE normalized = ? AND active = 1', [normalized]);
     const ts = nowIso(this.now);
@@ -142,6 +156,21 @@ export class MemoryRepo {
    * receipt without the memories (or the reverse).
    */
   async commit(input: MemoryCommitInput, candidates: MemoryCommitCandidate[]): Promise<MemoryCommitResult> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await this.commitOnce(input, candidates);
+      } catch (error) {
+        if (attempt === 1 || !isUniqueConstraint(error)) throw error;
+        // Two concurrent commits raced on the same normalized text; the other
+        // one inserted first and our whole transaction (including the receipt)
+        // rolled back on the unique index. Retry once: the dedupe SELECT now
+        // sees the winning row, so this attempt merges and writes a receipt.
+      }
+    }
+    throw new Error('memory commit failed after retry');
+  }
+
+  private async commitOnce(input: MemoryCommitInput, candidates: MemoryCommitCandidate[]): Promise<MemoryCommitResult> {
     const ts = nowIso(this.now);
     let inserted = 0;
     let merged = 0;
@@ -285,12 +314,37 @@ export class MemoryRepo {
     if (!current || current.active !== 1) return null;
     const content = patch.content?.trim() || current.content;
     const normalized = normalizeMemoryText(content);
+    if (normalized !== current.normalized) {
+      // Renaming to a normalized text another active memory already owns would
+      // trip the unique index; merge into the existing row instead of failing.
+      const other = await queryOne<MemoryRow>(this.db, 'SELECT * FROM memories WHERE normalized = ? AND active = 1 AND id <> ?', [normalized, id]);
+      if (other) {
+        await this.db.run(
+          `UPDATE memories SET importance = MAX(importance, ?), confidence = MIN(1, MAX(confidence, ?)), updated_at = ? WHERE id = ?`,
+          [patch.importance ?? current.importance, patch.confidence ?? current.confidence, nowIso(this.now), other.id]
+        );
+        await this.forget(id);
+        return await this.get(other.id) ?? null;
+      }
+    }
     await this.db.run('UPDATE memories SET content=?,normalized=?,importance=?,confidence=?,updated_at=? WHERE id=? AND active=1', [content, normalized, patch.importance ?? current.importance, patch.confidence ?? current.confidence, nowIso(this.now), id]);
     return await this.get(id) ?? null;
   }
 
   /** Upserts an Ombre mirror without creating a local-to-remote sync loop. */
   async upsertMirrored(input: MirroredMemoryInput): Promise<{ record: MemoryRow; merged: boolean }> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await this.upsertMirroredOnce(input);
+      } catch (error) {
+        if (attempt === 1 || !isUniqueConstraint(error)) throw error;
+        // Concurrent mirror raced on the same source identity; retry once.
+      }
+    }
+    throw new Error('memory mirror upsert failed after retry');
+  }
+
+  private async upsertMirroredOnce(input: MirroredMemoryInput): Promise<{ record: MemoryRow; merged: boolean }> {
     const normalized = normalizeMemoryText(input.content);
     const bySource = await queryOne<MemoryRow>(this.db, 'SELECT * FROM memories WHERE active=1 AND source=? AND source_id=? LIMIT 1', ['ombre', input.sourceId]);
     const byHash = input.sourceHash
@@ -300,11 +354,23 @@ export class MemoryRepo {
     const existing = bySource ?? byHash ?? byNormalized;
     const timestamp = input.updatedAt ?? nowIso(this.now);
     if (existing) {
-      await this.db.run(
-        `UPDATE memories SET kind=?,content=?,normalized=?,importance=?,confidence=?,updated_at=?,
-         source='ombre',source_id=?,source_hash=?,active=1 WHERE id=?`,
-        [input.kind, input.content, normalized, input.importance, input.confidence, timestamp, input.sourceId, input.sourceHash ?? null, existing.id]
-      );
+      // Only adopt the ombre identity when the match is by source or hash.
+      // A normalized-only match is some unrelated local memory that happens to
+      // share the same text: merge content/importance/confidence but preserve
+      // its source so the bidirectional sync identity is not corrupted.
+      const adoptOmbreIdentity = bySource !== undefined || byHash !== undefined;
+      if (adoptOmbreIdentity) {
+        await this.db.run(
+          `UPDATE memories SET kind=?,content=?,normalized=?,importance=?,confidence=?,updated_at=?,
+           source='ombre',source_id=?,source_hash=?,active=1 WHERE id=?`,
+          [input.kind, input.content, normalized, input.importance, input.confidence, timestamp, input.sourceId, input.sourceHash ?? null, existing.id]
+        );
+      } else {
+        await this.db.run(
+          `UPDATE memories SET kind=?,content=?,normalized=?,importance=?,confidence=?,updated_at=?,active=1 WHERE id=?`,
+          [input.kind, input.content, normalized, input.importance, input.confidence, timestamp, existing.id]
+        );
+      }
       return { record: (await this.get(existing.id))!, merged: true };
     }
     const id = newId('mem');
@@ -359,4 +425,10 @@ function encodeFloat32(values: number[]): Uint8Array {
   const output = new Float32Array(values.length);
   output.set(values.map((value) => Number.isFinite(value) ? value : 0));
   return new Uint8Array(output.buffer);
+}
+
+function isUniqueConstraint(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message ?? String(error);
+  return /UNIQUE constraint failed|SQLITE_CONSTRAINT|constraint failed/iu.test(message);
 }
