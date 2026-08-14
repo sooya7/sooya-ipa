@@ -3,10 +3,7 @@ import XCTest
 @testable import App
 
 final class SOOYASecretsPluginTests: XCTestCase {
-    private let identity = SOOYAKeychainIdentity(
-        service: "com.sooya.app.secrets.v1",
-        accessGroup: "TEAMID.com.sooya.app"
-    )
+    private let identity = SOOYAKeychainIdentity(service: "com.sooya.app.secrets.v1")
 
     func testPluginPublishesHasSetDeleteButNoRawSecretGetter() {
         let plugin = SOOYASecretsPlugin()
@@ -18,59 +15,21 @@ final class SOOYASecretsPluginTests: XCTestCase {
 
     func testStableKeychainNamespaceDoesNotDrift() {
         XCTAssertEqual(SOOYAKeychainIdentity.service, "com.sooya.app.secrets.v1")
-        XCTAssertEqual(
-            SOOYAKeychainAccessGroupResolver.probeService,
-            "com.sooya.app.secrets.access-group-probe.v1"
-        )
-        XCTAssertEqual(SOOYAKeychainAccessGroupResolver.requiredBundleIdentifier, "com.sooya.app")
     }
 
-    func testAccessGroupResolverDiscoversTheSignedDefaultGroupAndRemovesItsProbe() throws {
+    func testProductionQueriesUseTheSigningIdentityDefaultAccessGroup() throws {
         let client = RecordingKeychainClient()
+        client.copyResults = [.init(status: errSecItemNotFound)]
         client.addResults = [.init(status: errSecSuccess)]
-        client.copyResults = [
-            .init(
-                status: errSecSuccess,
-                value: [kSecAttrAccessGroup as String: "TEAMID.com.sooya.app"]
-            )
-        ]
-        let resolver = SOOYAKeychainAccessGroupResolver(
-            client: client,
-            makeProbeAccount: { "fixed-probe" }
-        )
+        let store = SOOYAKeychainStore(client: client, identity: identity)
 
-        let accessGroup = try resolver.resolve()
+        _ = try store.has(key: "provider.openai")
+        try store.set(key: "provider.openai", value: "secret")
+        try store.delete(key: "provider.openai")
 
-        XCTAssertEqual(accessGroup, "TEAMID.com.sooya.app")
-        XCTAssertEqual(client.addCalls.count, 1)
-        XCTAssertEqual(client.copyCalls.count, 1)
-        XCTAssertEqual(client.deleteCalls.count, 1)
-        XCTAssertEqual(
-            client.addCalls[0][kSecAttrService as String] as? String,
-            SOOYAKeychainAccessGroupResolver.probeService
-        )
-        XCTAssertEqual(client.addCalls[0][kSecAttrAccount as String] as? String, "fixed-probe")
+        XCTAssertNil(client.copyCalls[0][kSecAttrAccessGroup as String])
         XCTAssertNil(client.addCalls[0][kSecAttrAccessGroup as String])
-        XCTAssertNil(client.copyCalls[0][kSecReturnData as String])
-        XCTAssertEqual(client.copyCalls[0][kSecReturnAttributes as String] as? Bool, true)
-    }
-
-    func testAccessGroupResolverRejectsAGroupForAnotherBundle() {
-        let client = RecordingKeychainClient()
-        client.addResults = [.init(status: errSecSuccess)]
-        client.copyResults = [
-            .init(
-                status: errSecSuccess,
-                value: [kSecAttrAccessGroup as String: "TEAMID.com.other.app"]
-            )
-        ]
-        let resolver = SOOYAKeychainAccessGroupResolver(
-            client: client,
-            makeProbeAccount: { "fixed-probe" }
-        )
-
-        XCTAssertThrowsError(try resolver.resolve())
-        XCTAssertEqual(client.deleteCalls.count, 1)
+        XCTAssertNil(client.deleteCalls[0][kSecAttrAccessGroup as String])
     }
 
     func testHasChecksOnlyExistenceAndNeverRequestsSecretData() throws {
@@ -84,7 +43,7 @@ final class SOOYASecretsPluginTests: XCTestCase {
         let query = client.copyCalls[0]
         XCTAssertEqual(query[kSecClass as String] as? String, kSecClassGenericPassword as String)
         XCTAssertEqual(query[kSecAttrService as String] as? String, identity.service)
-        XCTAssertEqual(query[kSecAttrAccessGroup as String] as? String, identity.accessGroup)
+        XCTAssertNil(query[kSecAttrAccessGroup as String])
         XCTAssertEqual(query[kSecAttrAccount as String] as? String, "provider.openai")
         XCTAssertEqual(query[kSecMatchLimit as String] as? String, kSecMatchLimitOne as String)
         XCTAssertNil(query[kSecReturnData as String])
@@ -110,7 +69,7 @@ final class SOOYASecretsPluginTests: XCTestCase {
         XCTAssertEqual(client.updateCalls.count, 0)
         let attributes = client.addCalls[0]
         XCTAssertEqual(attributes[kSecAttrService as String] as? String, identity.service)
-        XCTAssertEqual(attributes[kSecAttrAccessGroup as String] as? String, identity.accessGroup)
+        XCTAssertNil(attributes[kSecAttrAccessGroup as String])
         XCTAssertEqual(attributes[kSecAttrAccount as String] as? String, "provider.openai")
         XCTAssertEqual(
             attributes[kSecAttrAccessible as String] as? String,
@@ -133,7 +92,7 @@ final class SOOYASecretsPluginTests: XCTestCase {
         XCTAssertEqual(client.updateCalls.count, 1)
         let update = client.updateCalls[0]
         XCTAssertEqual(update.query[kSecAttrService as String] as? String, identity.service)
-        XCTAssertEqual(update.query[kSecAttrAccessGroup as String] as? String, identity.accessGroup)
+        XCTAssertNil(update.query[kSecAttrAccessGroup as String])
         XCTAssertEqual(update.query[kSecAttrAccount as String] as? String, "provider.openai")
         XCTAssertNil(update.query[kSecValueData as String])
         XCTAssertEqual(
