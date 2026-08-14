@@ -42,6 +42,7 @@ enum SOOYAMediaID {
 
 struct SOOYAMediaMetadata: Codable, Equatable {
     let id: String
+    var kind: String? = nil
     let mimeType: String
     let bytes: Int
     let originalName: String?
@@ -96,14 +97,15 @@ final class SOOYAMediaStore {
     func save(data: Data,
               mimeType: String,
               originalName: String? = nil,
-              sourceID: String? = nil) throws -> SOOYAMediaMetadata {
+              sourceID: String? = nil,
+              kind: String? = nil) throws -> SOOYAMediaMetadata {
         guard data.count <= maxBytes else { throw SOOYAMediaError.tooLarge }
         let normalizedMime = try normalizeMime(mimeType)
         if let sourceID, !SOOYAMediaID.isValid(sourceID) { throw SOOYAMediaError.invalidID }
         let safeName = sanitizeName(originalName)
         let id = SOOYAMediaID.make()
         let details = mediaDetails(data: data, mimeType: normalizedMime)
-        let metadata = SOOYAMediaMetadata(
+        var metadata = SOOYAMediaMetadata(
             id: id,
             mimeType: normalizedMime,
             bytes: data.count,
@@ -114,6 +116,7 @@ final class SOOYAMediaStore {
             durationSeconds: nil,
             sourceID: sourceID
         )
+        metadata.kind = kind
 
         lock.lock(); defer { lock.unlock() }
         let object = try objectURL(id)
@@ -372,7 +375,7 @@ public final class SOOYAMediaPlugin: CAPPlugin, CAPBridgedPlugin {
                 guard let base64 = call.getString("dataBase64"), let data = Data(base64Encoded: base64), let mime = call.getString("mimeType") else {
                     throw SOOYAMediaError.invalidSource
                 }
-                call.resolve(self.encode(try self.store.save(data: data, mimeType: mime, originalName: call.getString("name"))))
+                call.resolve(self.encode(try self.store.save(data: data, mimeType: mime, originalName: call.getString("name"), kind: call.getString("kind"))))
             } catch { self.reject(call, error) }
         }
     }
@@ -432,6 +435,7 @@ public final class SOOYAMediaPlugin: CAPPlugin, CAPBridgedPlugin {
     private func encode(_ value: SOOYAMediaMetadata) -> PluginCallResultData {
         [
             "id": value.id,
+            "kind": value.kind.map { $0 as Any } ?? NSNull(),
             "mimeType": value.mimeType,
             "bytes": value.bytes,
             "originalName": value.originalName.map { $0 as Any } ?? NSNull(),

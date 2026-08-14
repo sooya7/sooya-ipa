@@ -1,8 +1,8 @@
 import Foundation
 
 enum SOOYAReleaseConfig {
-    static let nativeBaseVersion = 6
-    static let bridgeVersion = 3
+    static let nativeBaseVersion = 7
+    static let bridgeVersion = 4
     static let otaPublicKeyBase64 = "8Xv0j12IoENRjTFUnRbX08ZGi+Kqxv+N0FpqEsztKsk="
     static let capabilities = [
         "database.sqlite", "keychain.secrets", "http.native", "http.stream",

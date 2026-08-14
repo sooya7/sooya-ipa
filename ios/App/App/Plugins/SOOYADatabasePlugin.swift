@@ -71,10 +71,24 @@ enum SOOYASQLValue: Equatable {
             return
         }
         if let value = bridgeValue as? [String: Any],
+           value["type"] as? String == "int64",
+           let encoded = value["value"] as? String,
+           let integer = Int64(encoded) {
+            self = .integer(integer)
+            return
+        }
+        if let value = bridgeValue as? [String: Any],
            value["type"] as? String == "blob",
            let encoded = value["base64"] as? String,
            let data = Data(base64Encoded: encoded) {
             self = .blob(data)
+            return
+        }
+        if let value = bridgeValue as? NSDictionary,
+           value["type"] as? String == "int64",
+           let encoded = value["value"] as? String,
+           let integer = Int64(encoded) {
+            self = .integer(integer)
             return
         }
         if let value = bridgeValue as? NSDictionary,
@@ -92,6 +106,9 @@ enum SOOYASQLValue: Equatable {
         case .null:
             return NSNull()
         case let .integer(value):
+            if value > 9_007_199_254_740_991 || value < -9_007_199_254_740_991 {
+                return ["type": "int64", "value": String(value)]
+            }
             return NSNumber(value: value)
         case let .real(value):
             return NSNumber(value: value)
@@ -104,10 +121,12 @@ enum SOOYASQLValue: Equatable {
 }
 
 struct SOOYASQLStatement {
+    let type: String
     let sql: String
     let values: [SOOYASQLValue]
 
-    init(sql: String, values: [SOOYASQLValue] = []) {
+    init(type: String = "run", sql: String, values: [SOOYASQLValue] = []) {
+        self.type = type
         self.sql = sql
         self.values = values
     }
@@ -139,7 +158,7 @@ enum SOOYATransactionMode: String {
 }
 
 struct SOOYATransactionResult {
-    let results: [SOOYARunResult]
+    let results: [Any]
     let totalChanges: Int64
 }
 
@@ -409,12 +428,28 @@ final class SOOYADatabaseStore {
             try executeTransactionControlLocked(connection, sql: mode.beginSQL)
 
             do {
-                var results: [SOOYARunResult] = []
+                var results: [Any] = []
                 results.reserveCapacity(statements.count)
                 for statement in statements {
-                    results.append(
-                        try runLocked(connection, sql: statement.sql, values: statement.values)
-                    )
+                    switch statement.type {
+                    case "execute":
+                        try validateSQL(statement.sql)
+                        let beforeStatement = Int64(sqlite3_total_changes(connection))
+                        let code = sqlite3_exec(connection, statement.sql, nil, nil, nil)
+                        guard code == SQLITE_OK else {
+                            throw sqliteError(connection, operation: "execute", fallbackCode: code)
+                        }
+                        results.append([
+                            "changes": Int64(sqlite3_changes(connection)),
+                            "totalChanges": Int64(sqlite3_total_changes(connection)) - beforeStatement
+                        ])
+                    case "run":
+                        results.append(try runLocked(connection, sql: statement.sql, values: statement.values).bridgeObject)
+                    case "query":
+                        results.append(try queryLocked(connection, sql: statement.sql, values: statement.values, requireReadOnly: true).bridgeObject)
+                    default:
+                        throw SOOYADatabaseError.invalidRequest
+                    }
                 }
                 try executeTransactionControlLocked(connection, sql: "COMMIT")
                 return SOOYATransactionResult(
@@ -1104,7 +1139,8 @@ public final class SOOYADatabasePlugin: CAPPlugin, CAPBridgedPlugin {
                     throw SOOYADatabaseError.invalidRequest
                 }
                 let rawValues = object["values"] as? JSArray
-                return SOOYASQLStatement(sql: sql, values: try self.values(from: rawValues))
+                let type = object["type"] as? String ?? "run"
+                return SOOYASQLStatement(type: type, sql: sql, values: try self.values(from: rawValues))
             }
             let modeValue = call.getString("mode", SOOYATransactionMode.immediate.rawValue)
             guard let mode = SOOYATransactionMode(rawValue: modeValue.lowercased()) else {
@@ -1186,7 +1222,7 @@ private extension SOOYAQueryResult {
 
 private extension SOOYATransactionResult {
     var bridgeObject: [String: Any] {
-        ["results": results.map(\.bridgeObject), "totalChanges": totalChanges]
+        ["results": results, "totalChanges": totalChanges]
     }
 }
 

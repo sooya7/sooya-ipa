@@ -25,9 +25,11 @@ interface NativePluginCall {
 }
 
 type TransactionOperation = { type: 'execute' | 'run' | 'query'; sql: string; values?: DatabaseValue[] };
+type NativeDatabaseValue = string | number | boolean | null | { type: 'blob'; base64: string } | { type: 'int64'; value: string };
+type NativeTransactionStatement = { type: TransactionOperation['type']; sql: string; values: NativeDatabaseValue[] };
 
-export function databaseTransactionCallOptions(operations: TransactionOperation[]): { statements: TransactionOperation[] } {
-  return { statements: operations.map((op) => ({ ...op, values: normalizeValues(op.values ?? []) })) };
+export function databaseTransactionCallOptions(operations: TransactionOperation[]): { statements: NativeTransactionStatement[] } {
+  return { statements: operations.map((op) => ({ type: op.type, sql: op.sql, values: normalizeValues(op.values ?? []) })) };
 }
 
 function nativePlugin(name: string): NativePluginCall {
@@ -51,16 +53,31 @@ export class CapacitorDatabase implements LocalDatabase {
   async close(): Promise<void> { await this.plugin.call('close', {}); }
   async execute(sql: string): Promise<void> { await this.plugin.call('execute', { sql }); }
   async run(sql: string, values: DatabaseValue[] = []): Promise<RunResult> {
-    return await this.plugin.call<RunResult>('run', { sql, values: normalizeValues(values) });
+    const result = await this.plugin.call<{ changes?: number; lastInsertRowId?: unknown }>('run', { sql, values: normalizeValues(values) });
+    const lastInsertRowid = decodeNativeDatabaseValue(result.lastInsertRowId);
+    return {
+      changes: typeof result.changes === 'number' ? result.changes : 0,
+      ...(typeof lastInsertRowid === 'number' || typeof lastInsertRowid === 'bigint' ? { lastInsertRowid } : {})
+    };
   }
   async query<T = Record<string, unknown>>(sql: string, values: DatabaseValue[] = []): Promise<T[]> {
-    return await this.plugin.call<T[]>('query', { sql, values: normalizeValues(values) });
+    const result = await this.plugin.call<{ rows?: unknown[] }>('query', { sql, values: normalizeValues(values) });
+    if (!Array.isArray(result.rows)) throw new Error('native database query returned an invalid row envelope');
+    return result.rows.map((row) => decodeNativeDatabaseRow<T>(row));
   }
   async transaction<T = unknown[]>(operations: TransactionOperation[]): Promise<T> {
-    return await this.plugin.call<T>('transaction', databaseTransactionCallOptions(operations));
+    const result = await this.plugin.call<{ results?: unknown[] }>('transaction', databaseTransactionCallOptions(operations));
+    if (!Array.isArray(result.results)) throw new Error('native database transaction returned an invalid result envelope');
+    return result.results.map(decodeNativeTransactionResult) as T;
   }
   async integrityCheck(): Promise<DatabaseIntegrityResult> {
-    return await this.plugin.call<DatabaseIntegrityResult>('integrity', {});
+    const result = await this.plugin.call<{ ok?: boolean; messages?: unknown[]; foreignKeyViolations?: number }>('integrity', {});
+    const count = Number.isSafeInteger(result.foreignKeyViolations) && (result.foreignKeyViolations ?? 0) > 0 ? result.foreignKeyViolations! : 0;
+    return {
+      ok: result.ok === true,
+      integrity: Array.isArray(result.messages) ? result.messages.filter((value): value is string => typeof value === 'string') : [],
+      foreignKeys: Array.from({ length: count }, () => ({}))
+    };
   }
   async backup(name: string): Promise<DatabaseBackupResult> { return await this.plugin.call<DatabaseBackupResult>('backup', { name }); }
   async restore(name: string): Promise<void> { await this.plugin.call('restore', { name }); }
@@ -84,21 +101,26 @@ export class CapacitorMedia implements MediaPlatform {
 
   async save(request: MediaSaveRequest): Promise<MediaRecord> {
     const bytes = request.data instanceof Uint8Array ? request.data : new Uint8Array(request.data);
-    const result = await this.plugin.call<{ id: string; kind: MediaRecord['kind']; mime: string; bytes: number; sha256?: string }>('save', {
+    const result = await this.plugin.call<Record<string, unknown>>('save', {
       kind: request.kind,
-      mime: request.mime ?? 'application/octet-stream',
+      mimeType: request.mime ?? 'application/octet-stream',
       name: request.name ?? null,
       dataBase64: bytesToBase64(bytes)
     });
-    return { id: result.id, kind: result.kind, mime: result.mime, bytes: result.bytes, name: request.name };
+    return nativeMediaRecord(result, request.kind, request.name);
   }
   async read(id: string): Promise<{ record: MediaRecord; data: Uint8Array } | null> {
-    const result = await this.plugin.call<{ record: MediaRecord; dataBase64: string } | null>('read', { id });
-    if (!result) return null;
-    return { record: result.record, data: base64ToBytes(result.dataBase64) };
+    try {
+      const result = await this.plugin.call<{ metadata?: Record<string, unknown>; dataBase64?: string }>('read', { id });
+      if (!isRecordValue(result.metadata) || typeof result.dataBase64 !== 'string') throw new Error('native media read returned an invalid payload');
+      return { record: nativeMediaRecord(result.metadata), data: base64ToBytes(result.dataBase64) };
+    } catch (error) {
+      if (error instanceof Error && /media not found/iu.test(error.message)) return null;
+      throw error;
+    }
   }
   async remove(id: string): Promise<boolean> {
-    return await this.plugin.call<{ removed: boolean }>('delete', { id }).then((r) => r.removed);
+    return await this.plugin.call<{ deleted?: boolean }>('delete', { id }).then((r) => r.deleted === true);
   }
 }
 
@@ -239,23 +261,29 @@ export async function installNativeLocalCore(): Promise<boolean> {
   installSooyaClient(new LocalSooyaClient(core, (id) => mediaStore.assetUrl(id)));
   void probeNotificationCapabilities(core);
   nativeOtaCore = core;
-  nativeOtaUpdater = await prepareOtaUpdater(core, await getNativeReleaseInfo());
-  void wireNativeLifecycle(core);
+  void wireNativeLifecycle(core).catch((error) => console.warn('Native lifecycle wiring is unavailable', error));
+  try {
+    nativeOtaUpdater = await prepareOtaUpdater(core, await getNativeReleaseInfo());
+  } catch (error) {
+    nativeOtaUpdater = null;
+    console.warn('OTA updater is unavailable; LocalCore will continue without OTA', error);
+  }
   return true;
 }
 
 /** Called by the mounted React shell; safe to call repeatedly under StrictMode. */
 export async function notifyNativeAppReady(): Promise<void> {
-  if (!nativeOtaUpdater || !nativeOtaCore) return;
+  if (!nativeOtaCore || !nativeBuiltinMedia) return;
   nativeOtaReady ??= (async () => {
-    const updater = nativeOtaUpdater!;
+    const updater = nativeOtaUpdater;
     await afterAppReady(
       () => seedBuiltinStickersOnce(nativeOtaCore!.database, 'server-2026-08-14', BUILTIN_STICKERS),
       (ids) => nativeBuiltinMedia!.activate(ids),
-      () => updater.notifyReady(),
+      () => updater ? updater.notifyReady() : Promise.resolve(),
       (result) => rollbackBuiltinStickerImport(nativeOtaCore!.database, result)
     );
     window.dispatchEvent(new Event('sooya:stickers-ready'));
+    if (!updater) return;
     const manifestUrl = await nativeOtaCore!.configRepo.getPreference('ota.manifestUrl', '').catch(() => '');
     if (manifestUrl) void updater.checkAndApply(manifestUrl);
   })();
@@ -284,8 +312,56 @@ async function wireNativeLifecycle(core: LocalCore): Promise<void> {
   });
 }
 
-function normalizeValues(values: DatabaseValue[]): DatabaseValue[] {
-  return values.map((value) => (value instanceof Uint8Array ? value : value));
+function normalizeValues(values: DatabaseValue[]): NativeDatabaseValue[] {
+  return values.map((value): NativeDatabaseValue => {
+    if (value instanceof Uint8Array) return { type: 'blob', base64: bytesToBase64(value) };
+    if (value instanceof ArrayBuffer) return { type: 'blob', base64: bytesToBase64(new Uint8Array(value)) };
+    if (typeof value === 'bigint') return { type: 'int64', value: value.toString() };
+    return value;
+  });
+}
+
+function decodeNativeDatabaseValue(value: unknown): unknown {
+  if (!isRecordValue(value) || typeof value.type !== 'string') return value;
+  if (value.type === 'blob' && typeof value.base64 === 'string') return base64ToBytes(value.base64);
+  if (value.type === 'int64' && typeof value.value === 'string' && /^-?\d+$/u.test(value.value)) return BigInt(value.value);
+  return value;
+}
+
+function decodeNativeDatabaseRow<T>(value: unknown): T {
+  if (!isRecordValue(value)) throw new Error('native database query returned a non-object row');
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, decodeNativeDatabaseValue(item)])) as T;
+}
+
+function decodeNativeTransactionResult(value: unknown): unknown {
+  if (!isRecordValue(value)) return value;
+  if (Array.isArray(value.rows)) return value.rows.map((row) => decodeNativeDatabaseRow<Record<string, unknown>>(row));
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, decodeNativeDatabaseValue(item)]));
+}
+
+function nativeMediaRecord(value: Record<string, unknown>, fallbackKind?: MediaRecord['kind'], fallbackName?: string): MediaRecord {
+  const id = typeof value.id === 'string' ? value.id : '';
+  const mime = typeof value.mimeType === 'string' ? value.mimeType : 'application/octet-stream';
+  const bytes = typeof value.bytes === 'number' ? value.bytes : 0;
+  if (!id) throw new Error('native media metadata is missing id');
+  const rawKind = typeof value.kind === 'string' ? value.kind : undefined;
+  const kind: MediaRecord['kind'] = rawKind === 'image' || rawKind === 'audio' || rawKind === 'sticker' || rawKind === 'file'
+    ? rawKind
+    : fallbackKind ?? inferMediaKind(mime);
+  const name = typeof value.originalName === 'string' ? value.originalName : fallbackName;
+  return {
+    id, kind, mime, bytes,
+    ...(name ? { name } : {}),
+    ...(typeof value.width === 'number' ? { width: value.width } : {}),
+    ...(typeof value.height === 'number' ? { height: value.height } : {}),
+    ...(typeof value.durationSeconds === 'number' ? { durationSec: value.durationSeconds } : {})
+  };
+}
+
+function inferMediaKind(mime: string): MediaRecord['kind'] {
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('audio/')) return 'audio';
+  return 'file';
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
