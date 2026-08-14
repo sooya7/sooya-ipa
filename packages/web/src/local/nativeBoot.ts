@@ -12,7 +12,7 @@ import { migrateDatabase } from '@sooya/core/app';
 import { installSooyaClient } from '../lib/sooyaClient.js';
 import { LocalSooyaClient } from './LocalSooyaClient.js';
 import { probeNotificationCapabilities } from './notificationCapabilities.js';
-import { prepareOtaUpdater, type LocalOtaUpdater, type NativeReleaseInfo } from './otaUpdater.js';
+import { DEFAULT_OTA_MANIFEST_URL, prepareOtaUpdater, type LocalOtaUpdater, type NativeReleaseInfo } from './otaUpdater.js';
 import { BUILTIN_STICKERS, BuiltinStickerMedia, afterAppReady } from './builtinStickers.js';
 
 interface NativePluginCall { call<T = Record<string, unknown>>(method: string, options: Record<string, unknown>): Promise<T>; }
@@ -209,7 +209,7 @@ export async function notifyNativeAppReady(): Promise<void> {
     );
     window.dispatchEvent(new Event('sooya:stickers-ready'));
     if (!updater) return;
-    const manifestUrl = await nativeOtaCore!.configRepo.getPreference('ota.manifestUrl', '').catch(() => '');
+    const manifestUrl = await nativeOtaCore!.configRepo.getPreference('ota.manifestUrl', DEFAULT_OTA_MANIFEST_URL).catch(() => DEFAULT_OTA_MANIFEST_URL);
     if (manifestUrl) void updater.checkAndApply(manifestUrl);
   })();
   await nativeOtaReady;

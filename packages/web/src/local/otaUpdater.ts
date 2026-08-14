@@ -21,6 +21,8 @@ interface OtaStateRow {
   blocked_web_version?: string | null;
 }
 
+export const DEFAULT_OTA_MANIFEST_URL = 'https://sooya.icu/ota/stable.json';
+
 interface UpdaterPlugin {
   notifyAppReady?: () => Promise<void>;
   download?: (input: { url: string; version: string; sessionKey?: string; checksum?: string }) => Promise<{ id: string }>;
@@ -110,7 +112,7 @@ export class LocalOtaUpdater {
 export async function startOtaUpdater(core: LocalCore, releaseInfo: NativeReleaseInfo): Promise<LocalOtaUpdater> {
   const updater = await prepareOtaUpdater(core, releaseInfo);
   await updater.notifyReady();
-  const manifestUrl = await core.configRepo.getPreference('ota.manifestUrl', '');
+  const manifestUrl = await core.configRepo.getPreference('ota.manifestUrl', DEFAULT_OTA_MANIFEST_URL);
   if (manifestUrl) void updater.checkAndApply(manifestUrl);
   return updater;
 }
