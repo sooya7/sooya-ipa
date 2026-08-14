@@ -3,15 +3,11 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 describe('SOOYA native keychain contract', () => {
-  it('requests attributes, but never secret data, when discovering the signed access group', () => {
+  it('uses the signing identity default access group instead of probing or pinning one', () => {
     const swift = readFileSync(path.resolve('../../ios/App/App/Plugins/SOOYASecretsPlugin.swift'), 'utf8');
-    const start = swift.indexOf('final class SOOYAKeychainAccessGroupResolver');
-    const end = swift.indexOf('final class SOOYAKeychainStore');
-    expect(start).toBeGreaterThanOrEqual(0);
-    expect(end).toBeGreaterThan(start);
-
-    const resolver = swift.slice(start, end);
-    expect(resolver).toContain('kSecReturnAttributes as String: true');
-    expect(resolver).not.toContain('kSecReturnData as String: true');
+    expect(swift).not.toContain('SOOYAKeychainAccessGroupResolver');
+    expect(swift).not.toContain('identity.accessGroup');
+    expect(swift).not.toContain('kSecAttrAccessGroup as String: identity');
+    expect(swift).toContain('static let service = "com.sooya.app.secrets.v1"');
   });
 });
