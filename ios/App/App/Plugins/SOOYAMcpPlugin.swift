@@ -40,13 +40,10 @@ final class SOOYANullMcpTokenResolver: SOOYAMcpTokenResolving {
 /// HTTP: JavaScript stores only the reference and native resolves the secret
 /// immediately before the request leaves the device.
 final class SOOYAKeychainMcpTokenResolver: SOOYAMcpTokenResolving {
-    private lazy var storeResult: Result<SOOYAKeychainStore, Error> = Result {
-        let group = try SOOYAKeychainAccessGroupResolver().resolve()
-        return SOOYAKeychainStore(identity: SOOYAKeychainIdentity(accessGroup: group))
-    }
+    private lazy var store = SOOYAKeychainStore()
 
     func token(for reference: String, serverID: String, kind: SOOYAMcpAuthKind) throws -> String? {
-        try storeResult.get().read(key: reference)
+        try store.read(key: reference)
     }
 }
 

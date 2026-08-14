@@ -256,10 +256,7 @@ final class SOOYAHTTPTransport: NSObject, URLSessionDataDelegate, URLSessionTask
     private var operations: [Int: Operation] = [:]
     private var taskByID: [String: URLSessionDataTask] = [:]
     private var session: URLSession!
-    private lazy var secretStoreResult: Result<SOOYAKeychainStore, Error> = Result {
-        let group = try SOOYAKeychainAccessGroupResolver().resolve()
-        return SOOYAKeychainStore(identity: SOOYAKeychainIdentity(accessGroup: group))
-    }
+    private lazy var secretStore = SOOYAKeychainStore()
 
     init(configuration: URLSessionConfiguration = .ephemeral,
          policy: SOOYAHTTPPolicy,
@@ -314,7 +311,7 @@ final class SOOYAHTTPTransport: NSObject, URLSessionDataDelegate, URLSessionTask
         request.httpBody = input.body
         for (name, value) in input.headers { request.setValue(value, forHTTPHeaderField: name) }
         if let secretRef = input.secretRef {
-            guard let secret = try secretStoreResult.get().read(key: secretRef), !secret.isEmpty else {
+            guard let secret = try secretStore.read(key: secretRef), !secret.isEmpty else {
                 throw SOOYAHTTPError.transportFailed("secret reference unavailable")
             }
             request.setValue(input.secretPrefix + secret, forHTTPHeaderField: input.secretHeader)
