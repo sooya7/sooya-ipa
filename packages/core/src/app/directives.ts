@@ -22,6 +22,8 @@ const NO_VOICE_PATTERNS = [/不要(?:发)?语音/u, /别发语音/u, /不用语�
 const IMAGE_PATTERNS = [
   /(?:生成|画|做|来|给我).{0,6}(?:一)?(?:张|幅|个)?(?:图片?|画|插画|海报)/u,
   /生成图/u, /画(?:一)?(?:张|幅)/u, /自拍/u, /拍(?:一)?(?:张|个)(?:照|相|自拍)?/u,
+  // "画一只猫 / 画个狗 / 画条龙" — object-pattern requests without 张/幅.
+  /画(?:一)?(?:只|个|条|头|匹|朵|棵|座|艘|辆|位|张|幅|份|篇)(?:.{0,12})?/u,
   /(?:发|来|给|要|想)(?:一)?(?:张|个|幅)(?:照片|相片|照)/u,
   /(?:发|来|给|要|想)(?:一)?(?:张|个|幅)?(?:照片|相片)/u,
   /(?:看看|看下|看一?下).{0,6}(?:照片|相片|自拍)/u,
@@ -54,14 +56,23 @@ export function parseUserDirectives(text: string): UserDirectives {
   if (has(IMAGE_PATTERNS)) {
     directives.wantImage = true;
     directives.selfieIntent = has(SELFIE_PATTERNS) || undefined;
+    let extracted: string | undefined;
     for (const pattern of IMAGE_PROMPT_EXTRACT) {
       const match = pattern.exec(value);
       if (match?.[1]?.trim() && match[1].trim().length >= 2) {
-        directives.imagePrompt = match[1].trim().replace(/[。.!！~]+$/u, '');
+        extracted = match[1].trim().replace(/[。.!！~]+$/u, '');
         break;
       }
     }
-    directives.imagePrompt ||= value;
+    if (extracted) directives.imagePrompt = extracted;
+    // A selfie request without a describable prompt ("拍一张你的自拍") still
+    // needs an actionable default so the image provider is not fed the whole
+    // user sentence.
+    else if (directives.selfieIntent) directives.imagePrompt = '自拍';
+    // Other image intent without an extractable prompt ("给我看看你的照片")
+    // keeps wantImage only: the reply model is expected to fill in a concrete
+    // [[image:...]] prompt. Do not degrade to the raw user sentence, which
+    // makes the generated image prompt unstable.
   }
   return directives;
 }
