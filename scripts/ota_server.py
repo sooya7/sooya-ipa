@@ -12,6 +12,7 @@ import shutil
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+from urllib.request import Request, urlopen
 
 ROOT = Path(os.environ.get('SOOYA_OTA_ROOT', '/opt/sooya-ota/public')).resolve()
 TOKEN_PATH = Path(os.environ.get('SOOYA_OTA_TOKEN_FILE', '/opt/sooya-ota/private/publish-token'))
@@ -20,6 +21,7 @@ MAX_CHUNK = 2 * 1024 * 1024
 MAX_PARTS = 100
 RELEASE_ID = re.compile(r'^ota-[0-9a-f]{40}$')
 CHUNK_NAME = re.compile(r'^[0-9]{5}\.part$')
+PULL_URL = re.compile(r'^https://api\.github\.com/repos/sooya7/sooya-ipa/releases/assets/[1-9][0-9]*$')
 
 
 def publish_token() -> str:
@@ -68,8 +70,42 @@ def resolve_assemble_release(raw_path: str) -> str | None:
     return None
 
 
+def resolve_pull_release(raw_path: str) -> str | None:
+    parts = request_path(raw_path).split('/')
+    if len(parts) == 3 and parts[0] == 'uploads' and parts[2] == 'pull' and RELEASE_ID.fullmatch(parts[1]):
+        return parts[1]
+    return None
+
+
+def download_release_asset(url: str, target: Path, github_token: str) -> tuple[int, str]:
+    request = Request(url, headers={
+        'User-Agent': 'SOOYA-OTA/1.2',
+        'Accept': 'application/octet-stream',
+        'Authorization': f'Bearer {github_token}',
+        'X-GitHub-Api-Version': '2022-11-28',
+    })
+    digest = hashlib.sha256()
+    written = 0
+    with urlopen(request, timeout=120) as response, target.open('wb') as output:
+        declared = response.headers.get('Content-Length')
+        if declared is not None and int(declared) > MAX_UPLOAD:
+            raise ValueError('release asset exceeds upload limit')
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > MAX_UPLOAD:
+                raise ValueError('release asset exceeds upload limit')
+            output.write(chunk)
+            digest.update(chunk)
+        output.flush()
+        os.fsync(output.fileno())
+    return written, digest.hexdigest()
+
+
 class OtaHandler(BaseHTTPRequestHandler):
-    server_version = 'SOOYA-OTA/1.1'
+    server_version = 'SOOYA-OTA/1.2'
 
     def log_message(self, fmt: str, *args: object) -> None:
         super().log_message('%s', fmt % args)
@@ -190,6 +226,8 @@ class OtaHandler(BaseHTTPRequestHandler):
             self.send_error(401)
             return
         release_id = resolve_assemble_release(self.path)
+        pull_release_id = resolve_pull_release(self.path)
+        release_id = release_id or pull_release_id
         if release_id is None:
             self.send_error(404)
             return
@@ -198,12 +236,10 @@ class OtaHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = json.loads(self.read_body(length))
-            parts = int(payload['parts'])
             expected_bytes = int(payload['bytes'])
             expected_sha = str(payload['sha256'])
-            if not 1 <= parts <= MAX_PARTS or not 0 < expected_bytes <= MAX_UPLOAD or re.fullmatch(r'[0-9a-f]{64}', expected_sha) is None:
+            if not 0 < expected_bytes <= MAX_UPLOAD or re.fullmatch(r'[0-9a-f]{64}', expected_sha) is None:
                 raise ValueError('invalid assembly payload')
-            chunk_dir = ROOT / 'uploads' / release_id / 'chunks'
             target = ROOT / 'bundles' / release_id / 'bundle.zip'
             if target.is_file() and target.stat().st_size == expected_bytes:
                 with target.open('rb') as existing:
@@ -214,27 +250,39 @@ class OtaHandler(BaseHTTPRequestHandler):
                     return
             target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_name(f'.{target.name}.{os.getpid()}.{secrets.token_hex(8)}.incoming')
-            digest = hashlib.sha256()
-            written = 0
-            with temporary.open('wb') as output:
-                for index in range(parts):
-                    part = chunk_dir / f'{index:05}.part'
-                    if not part.is_file():
-                        raise ValueError(f'missing chunk {index}')
-                    data = part.read_bytes()
-                    if not data or len(data) > MAX_CHUNK:
-                        raise ValueError(f'invalid chunk {index}')
-                    output.write(data)
-                    digest.update(data)
-                    written += len(data)
-                output.flush()
-                os.fsync(output.fileno())
-            if written != expected_bytes or digest.hexdigest() != expected_sha:
+            if pull_release_id:
+                url = str(payload['url'])
+                github_token = str(payload['githubToken'])
+                if PULL_URL.fullmatch(url) is None or not github_token:
+                    raise ValueError('release asset URL is not allowed')
+                written, actual_sha = download_release_asset(url, temporary, github_token)
+            else:
+                parts = int(payload['parts'])
+                if not 1 <= parts <= MAX_PARTS:
+                    raise ValueError('invalid part count')
+                chunk_dir = ROOT / 'uploads' / release_id / 'chunks'
+                digest = hashlib.sha256()
+                written = 0
+                with temporary.open('wb') as output:
+                    for index in range(parts):
+                        part = chunk_dir / f'{index:05}.part'
+                        if not part.is_file():
+                            raise ValueError(f'missing chunk {index}')
+                        data = part.read_bytes()
+                        if not data or len(data) > MAX_CHUNK:
+                            raise ValueError(f'invalid chunk {index}')
+                        output.write(data)
+                        digest.update(data)
+                        written += len(data)
+                    output.flush()
+                    os.fsync(output.fileno())
+                actual_sha = digest.hexdigest()
+            if written != expected_bytes or actual_sha != expected_sha:
                 raise ValueError('assembled bundle checksum mismatch')
             os.chmod(temporary, 0o644)
             os.replace(temporary, target)
             self.fsync_parent(target)
-            shutil.rmtree(ROOT / 'uploads' / release_id)
+            shutil.rmtree(ROOT / 'uploads' / release_id, ignore_errors=True)
         except Exception:
             try:
                 temporary.unlink(missing_ok=True)
