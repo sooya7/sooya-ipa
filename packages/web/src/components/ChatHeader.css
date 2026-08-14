@@ -9,8 +9,8 @@
 @media (max-width: 560px) {
   .chat-topbar {
     height: auto;
-    min-height: calc(var(--topbar-h) + env(safe-area-inset-top));
-    padding: calc(env(safe-area-inset-top) + 6px) 10px 6px;
+    min-height: calc(var(--topbar-h) + var(--sooya-safe-top));
+    padding: calc(var(--sooya-safe-top) + 6px) 10px 6px;
     grid-template-columns: minmax(0, 1fr) minmax(0, max-content);
     grid-template-areas:
       'identity actions'

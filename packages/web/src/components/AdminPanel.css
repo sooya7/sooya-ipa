@@ -1296,8 +1296,8 @@
     align-items: center;
     justify-content: space-between;
     gap: 10px;
-    min-height: calc(54px + env(safe-area-inset-top));
-    padding: env(safe-area-inset-top) 12px 0;
+    min-height: calc(54px + var(--sooya-safe-top));
+    padding: var(--sooya-safe-top) 12px 0;
     background: var(--surface-glass);
     border-bottom: 1px solid var(--admin-line);
     backdrop-filter: blur(16px);

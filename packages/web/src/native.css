@@ -1,14 +1,21 @@
-/* Capacitor's iOS WebView already lays the web content out below the status bar.
- * env(safe-area-inset-top) therefore double-counts the top inset in the installed
- * IPA and leaves a large empty band above chat/admin headers. Keep bottom insets
- * unchanged because they still protect the home indicator/composer. */
+/* Native top safe-area: the installed WebView does NOT reliably lay content
+ * out below the status bar / Dynamic Island on iPhone, so the old approach of
+ * forcing --sooya-safe-top: 0px made headers collide with the system UI.
+ *
+ * One variable rules everywhere: every fixed top element reads
+ * --sooya-safe-top (defined in styles.css as env(safe-area-inset-top)).
+ * Here we only guarantee a conservative portrait fallback when the WebView
+ * reports no inset at all (missing viewport-fit=cover), and zero it out in
+ * landscape where the notch moves to the side. Bottom insets stay untouched:
+ * they still protect the home indicator / composer. */
+
 html.sooya-native {
-  --sooya-safe-top: 0px;
+  --sooya-native-top-fallback: 47px;
+  --sooya-safe-top: max(env(safe-area-inset-top, 0px), var(--sooya-native-top-fallback));
 }
 
-@media (max-width: 760px) {
-  html.sooya-native .admin-mobile-header {
-    min-height: 54px;
-    padding-top: 0;
+@media (orientation: landscape) {
+  html.sooya-native {
+    --sooya-native-top-fallback: 0px;
   }
 }

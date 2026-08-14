@@ -55,7 +55,7 @@
 .image-viewer-actions {
   position: fixed;
   z-index: 4;
-  top: calc(12px + env(safe-area-inset-top));
+  top: calc(12px + var(--sooya-safe-top));
   right: 14px;
   display: flex;
   align-items: center;
@@ -109,7 +109,7 @@
 .image-viewer-count {
   position: fixed;
   z-index: 3;
-  top: calc(20px + env(safe-area-inset-top));
+  top: calc(20px + var(--sooya-safe-top));
   left: 50%;
   transform: translateX(-50%);
   color: #fff;
@@ -122,7 +122,7 @@
 .image-viewer-hint {
   position: fixed;
   z-index: 3;
-  bottom: calc(18px + env(safe-area-inset-bottom));
+  bottom: calc(18px + var(--sooya-safe-bottom));
   left: 50%;
   transform: translateX(-50%);
   color: rgba(255, 255, 255, 0.8);
@@ -132,7 +132,7 @@
 
 .gallery-page {
   min-height: 100dvh;
-  padding: calc(18px + env(safe-area-inset-top)) 18px calc(28px + env(safe-area-inset-bottom));
+  padding: calc(18px + var(--sooya-safe-top)) 18px calc(28px + var(--sooya-safe-bottom));
   background:
     radial-gradient(circle at 14% -10%, var(--bg-glow), transparent 32rem),
     var(--bg);
