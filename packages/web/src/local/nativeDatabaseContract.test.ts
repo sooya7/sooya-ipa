@@ -25,6 +25,14 @@ describe('SOOYADatabase bridge contract', () => {
     expect(swift).toContain('sqlite3_exec(connection, statement.sql');
   });
 
+  it('keeps public queries read-only while allowing the trusted journal-mode inspection', () => {
+    const swift = readFileSync(path.resolve('../../ios/App/App/Plugins/SOOYADatabasePlugin.swift'), 'utf8');
+    expect(swift).toContain('return try queryLocked(connection, sql: sql, values: values, requireReadOnly: true)');
+    expect(swift).toContain('journalMode: try journalModeLocked(connection)');
+    expect(swift).toContain('sql: "PRAGMA journal_mode"');
+    expect(swift).toContain('requireReadOnly: false');
+  });
+
   it('query envelope and row values are normalized by the web adapter', async () => {
     const database = Object.create(CapacitorDatabase.prototype) as unknown as CapacitorDatabase;
     Object.defineProperty(database, 'plugin', { value: {

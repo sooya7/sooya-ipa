@@ -869,7 +869,7 @@ final class SOOYADatabaseStore {
             pageSize: pageSize,
             pageCount: pageCount,
             userVersion: try scalarIntegerLocked(connection, sql: "PRAGMA user_version"),
-            journalMode: try scalarTextLocked(connection, sql: "PRAGMA journal_mode").lowercased(),
+            journalMode: try journalModeLocked(connection),
             foreignKeysEnabled: try scalarIntegerLocked(connection, sql: "PRAGMA foreign_keys") == 1,
             synchronous: synchronousName(
                 try scalarIntegerLocked(connection, sql: "PRAGMA synchronous")
@@ -895,6 +895,23 @@ final class SOOYADatabaseStore {
         case let .real(value): return Int64(value)
         default: throw SOOYADatabaseError.configurationFailed
         }
+    }
+
+    private func journalModeLocked(_ connection: OpaquePointer) throws -> String {
+        // SQLite intentionally reports bare PRAGMA journal_mode as not read-only.
+        // This is a fixed internal literal used only to inspect the mode after we
+        // have explicitly configured WAL above. Never expose this bypass to query().
+        let result = try queryLocked(
+            connection,
+            sql: "PRAGMA journal_mode",
+            values: [],
+            requireReadOnly: false
+        )
+        guard let value = result.rows.first?.values.first,
+              case let .text(text) = value else {
+            throw SOOYADatabaseError.configurationFailed
+        }
+        return text.lowercased()
     }
 
     private func scalarTextLocked(_ connection: OpaquePointer, sql: String) throws -> String {
