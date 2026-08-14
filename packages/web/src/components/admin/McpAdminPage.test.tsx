@@ -160,7 +160,7 @@ describe('McpAdminPage', () => {
 
   it('prompts to add a server instead of dead-ending when the list is empty', async () => {
     adminMocks.mcpOverview.mockResolvedValueOnce({
-      configSource: 'local', globalPolicy: {},
+      configSource: 'local', globalPolicy: { readEnabled: true, writeEnabled: true, maintenanceEnabled: true },
       servers: [], tools: [],
       memory: { backend: 'local', connection: 'disconnected', health: null, lastCommit: null, pending: 0, uncertain: 0, lastDream: null, dashboardUrl: null },
       dashboardUrl: null

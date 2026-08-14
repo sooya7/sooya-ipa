@@ -369,7 +369,7 @@ describe('LocalCore', () => {
     await core.adminRequest('/api/admin/mcp/servers', { method: 'PUT', body: { id: 'my-mcp', url: 'https://mcp.example.com/mcp', token: 'token-3' } });
     await core.adminRequest('/api/admin/mcp/servers/my-mcp', { method: 'DELETE' });
     await expect(secrets.get('mcp.my-mcp.token')).resolves.toBeNull();
-    expect((await db.query('SELECT COUNT(*) c FROM mcp_servers WHERE id=?', ['my-mcp']))[0]!.c).toBe(0);
+    expect((await db.query<{ c: number }>('SELECT COUNT(*) c FROM mcp_servers WHERE id=?', ['my-mcp']))[0]!.c).toBe(0);
   });
 
   it('keeps every admin memory active when the clear transaction fails', async () => {
