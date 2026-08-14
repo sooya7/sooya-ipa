@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import AppShell from './AppShell.js';
 import './styles.css';
+import './native.css';
 import './components/AdminPanel.css';
 import './components/life/LifeObservationPanel.css';
 import './components/ScrollableLists.css';
@@ -12,6 +13,8 @@ import { shouldRegisterPwaServiceWorker, isNativeSooya } from './local/nativeRun
 const container = document.getElementById('root');
 if (!container) throw new Error('root container missing');
 const root = createRoot(container);
+const native = isNativeSooya();
+if (native) document.documentElement.classList.add('sooya-native');
 
 // Native (iPhone) must install the in-process LocalCore before React mounts.
 // Rendering the remote adapter after a native bootstrap failure creates a
@@ -39,7 +42,7 @@ const renderNativeStartupError = (error: unknown) => {
   );
 };
 
-if (isNativeSooya()) {
+if (native) {
   // Capacitor 8 requires local custom plugins to be registered in JS before
   // the bridge proxies are consumed by nativeBoot.ts.
   void import('./local/nativePluginRegistry.js')

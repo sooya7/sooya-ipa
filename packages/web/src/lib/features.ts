@@ -167,7 +167,31 @@ function params(input: Record<string, string | number | boolean | undefined>): s
 }
 
 export const featureApi = {
-  uploadAvatar: (slot: 'assistant' | 'user', file: File) => {
+  uploadAvatar: async (slot: 'assistant' | 'user', file: File) => {
+    const local = currentSooyaClient();
+    if (local?.adminRequest) {
+      const uploaded = await local.upload([{ file, field: 'image', name: file.name }]);
+      const media = uploaded.media[0];
+      if (!media) throw new Error(uploaded.failed[0]?.error ?? '头像上传失败');
+      const current = await local.adminRequest<{ persona: { avatar: string; userAvatar: string; [key: string]: unknown } }>('/api/admin/persona');
+      const persona = {
+        ...current.persona,
+        ...(slot === 'assistant' ? { avatar: media.url } : { userAvatar: media.url })
+      };
+      const saved = await local.adminRequest<{ persona: { avatar: string; userAvatar: string; [key: string]: unknown } }>('/api/admin/persona', { method: 'PUT', body: persona });
+      window.dispatchEvent(new CustomEvent('sooya:persona-updated', { detail: saved.persona }));
+      return {
+        persona: saved.persona,
+        media: {
+          ...media,
+          origin: 'upload' as const,
+          exists: true,
+          createdAt: new Date().toISOString(),
+          favorite: false,
+          tags: []
+        }
+      };
+    }
     const form = new FormData();
     form.append('file', file, file.name);
     return request<{ persona: { avatar: string; userAvatar: string }; media: FeatureMedia }>(`/api/admin/persona/avatar/${slot}`, { method: 'POST', body: form });
@@ -219,7 +243,6 @@ export const featureApi = {
   updateLifeSettings: (body: Partial<LifeSettings>) =>
     request<{ settings: LifeSettings }>('/api/admin/life/settings', { method: 'PUT', body }),
   tickLife: () => request<{ changed: boolean; activity: string; snapshot: LifeSnapshot }>('/api/admin/life/tick', { method: 'POST' }),
-
 
   storage: () => request<Record<string, any>>('/api/admin/storage'),
   updateStorage: (body: Record<string, number>) => request<Record<string, any>>('/api/admin/storage/policy', { method: 'PUT', body }),

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { adminApi, getAdminToken, type MetricAggregate } from '../lib/admin.js';
+import { adminApi, type MetricAggregate } from '../lib/admin.js';
 import { AdminState } from './admin/AdminState.js';
 
 /**
@@ -36,7 +36,6 @@ export function MetricsSummary() {
 
   useEffect(() => {
     let alive = true;
-    if (!getAdminToken()) { setError('缺少管理令牌'); return; }
     setError(null);
     setAggregates(null);
     void adminApi.metrics(7).then((body) => { if (alive) setAggregates(body.aggregates); }).catch((err: unknown) => { if (alive) setError(err instanceof Error ? err.message : String(err)); });
@@ -62,7 +61,7 @@ export function MetricsSummary() {
   if (error) return <AdminState kind="error" message={error} onRetry={() => setNonce((n) => n + 1)} />;
   if (!aggregates) return <AdminState kind="loading" />;
   if (aggregates.length === 0) {
-    return <AdminState kind="empty" message="暂无体验数据 — 开启 METRICS_DASHBOARD_ENABLED 后开始记录" />;
+    return <AdminState kind="empty" message="暂无体验数据" />;
   }
 
   return (
@@ -80,4 +79,3 @@ export function MetricsSummary() {
     </section>
   );
 }
-

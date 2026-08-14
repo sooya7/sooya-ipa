@@ -1,0 +1,14 @@
+/* Capacitor's iOS WebView already lays the web content out below the status bar.
+ * env(safe-area-inset-top) therefore double-counts the top inset in the installed
+ * IPA and leaves a large empty band above chat/admin headers. Keep bottom insets
+ * unchanged because they still protect the home indicator/composer. */
+html.sooya-native {
+  --sooya-safe-top: 0px;
+}
+
+@media (max-width: 760px) {
+  html.sooya-native .admin-mobile-header {
+    min-height: 54px;
+    padding-top: 0;
+  }
+}

@@ -12,18 +12,28 @@ const PROVIDERS: Array<{ id: AdminWebSearchProvider; label: string }> = [
   { id: 'responses', label: 'Responses' }
 ];
 
+const EMPTY_WEB_SEARCH = {
+  enabled: false,
+  providers: [],
+  maxResults: 5,
+  timeoutMs: 15000,
+  doubao: { edition: 'custom', baseUrl: '', apiKeyConfigured: false },
+  tavily: { baseUrl: '', apiKeyConfigured: false }
+} as AdminWebSearchConfig;
+
 export function WebSearchModelEditor({
   config,
   responsesAvailable,
   onSaved,
   onNotice
 }: {
-  config: AdminWebSearchConfig;
+  config: AdminWebSearchConfig | null | undefined;
   responsesAvailable: boolean;
   onSaved: (models: AdminModels) => void;
   onNotice: (message: string) => void;
 }) {
-  const [draft, setDraft] = useState<AdminWebSearchConfig>(config);
+  const unavailable = !config;
+  const [draft, setDraft] = useState<AdminWebSearchConfig>(config ?? EMPTY_WEB_SEARCH);
   const [doubaoKey, setDoubaoKey] = useState('');
   const [tavilyKey, setTavilyKey] = useState('');
   const [clearDoubao, setClearDoubao] = useState(false);
@@ -33,7 +43,17 @@ export function WebSearchModelEditor({
   const [testing, setTesting] = useState<AdminWebSearchProvider | null>(null);
   const [testResult, setTestResult] = useState('');
 
-  useEffect(() => setDraft(config), [config]);
+  useEffect(() => setDraft(config ?? EMPTY_WEB_SEARCH), [config]);
+
+  if (unavailable) {
+    return (
+      <section className="admin-web-search-editor" data-testid="admin-web-search-editor">
+        <div className="admin-inline-error admin-form-wide" role="status">
+          本地版联网搜索运行时尚未迁入，当前保持关闭。此页现在会稳定显示，不再白屏。
+        </div>
+      </section>
+    );
+  }
 
   const update = (patch: Partial<AdminWebSearchConfig>) => setDraft((current) => ({ ...current, ...patch }));
   const toggleProvider = (provider: AdminWebSearchProvider, enabled: boolean) => {
@@ -160,4 +180,3 @@ export function WebSearchModelEditor({
     </section>
   );
 }
-
