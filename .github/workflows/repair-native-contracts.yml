@@ -1,0 +1,37 @@
+name: Repair native contracts
+
+on:
+  push:
+    branches: ['fix/native-contract-parity-0814']
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: ${{ !contains(github.event.head_commit.message, '[native-contract-repair]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/native-contract-parity-0814
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+      - name: Apply guarded contract repairs
+        run: python3 scripts/repair-native-contracts.py
+      - name: Verify TypeScript contracts before committing
+        run: |
+          npm ci
+          npm run typecheck
+          npm run test -w @sooya/web
+      - name: Commit repaired bridge
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add packages/web/src/local/nativeBoot.ts packages/web/src/local/nativeDatabaseContract.test.ts packages/web/src/local/nativeMediaContract.test.ts ios/App/App/Plugins/SOOYADatabasePlugin.swift ios/App/App/Plugins/SOOYAMediaPlugin.swift ios/App/App/Plugins/SOOYASecretsPlugin.swift ios/App/App/Plugins/SOOYAHttpPlugin.swift ios/App/App/Plugins/SOOYAMcpPlugin.swift ios/App/App/Plugins/SOOYAReleaseConfig.swift ios/App/App/native-base.version
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix(native): align Capacitor bridge contracts [native-contract-repair]'
+          git push origin HEAD:fix/native-contract-parity-0814
