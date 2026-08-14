@@ -1,0 +1,41 @@
+name: Repair Base 9 keychain access group
+
+on:
+  push:
+    branches: ['fix/base9-keychain-access-group']
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: ${{ !contains(github.event.head_commit.message, '[base9-keychain-repair]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/base9-keychain-access-group
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+      - name: Apply guarded repair
+        run: python3 scripts/repair-base9-keychain-access-group.py
+      - name: Verify source contract
+        run: |
+          grep -n 'kSecReturnAttributes as String: true' ios/App/App/Plugins/SOOYASecretsPlugin.swift
+          grep -n 'nativeBaseVersion = 9' ios/App/App/Plugins/SOOYAReleaseConfig.swift
+          test "$(cat ios/App/App/native-base.version)" = "9"
+          npm ci
+          npm run test -w @sooya/web
+          npm run typecheck
+          npm run build
+      - name: Commit repair
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add ios/App/App/Plugins/SOOYASecretsPlugin.swift ios/App/AppTests/SOOYASecretsPluginTests.swift ios/App/App/Plugins/SOOYAReleaseConfig.swift ios/App/App/native-base.version
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix(native): request keychain attributes when resolving access group [base9-keychain-repair]'
+          git push origin HEAD:fix/base9-keychain-access-group
