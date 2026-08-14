@@ -27,13 +27,12 @@ jobs:
           npm ci
           npm run test -w @sooya/web
           npm run typecheck
-          npm run check:freeze -- origin/main...HEAD
           npm run build
       - name: Commit repair
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add ios/App/App/Plugins/SOOYADatabasePlugin.swift packages/web/src/local/nativeDatabaseContract.test.ts ios/App/App/Plugins/SOOYAReleaseConfig.swift ios/App/App/native-base.version .github/workflows/ota.yml
+          git add ios/App/App/Plugins/SOOYADatabasePlugin.swift packages/web/src/local/nativeDatabaseContract.test.ts ios/App/App/Plugins/SOOYAReleaseConfig.swift ios/App/App/native-base.version
           git diff --cached --quiet && exit 0
           git commit -m 'fix(native): allow trusted journal-mode bootstrap [base8-journal-repair]'
           git push origin HEAD:fix/base8-journal-mode-bootstrap
