@@ -8,6 +8,7 @@ on:
       - 'packages/web/**'
       - 'packages/migration-tools/**'
       - 'scripts/build-ota.mjs'
+      - 'scripts/ota-gates.mjs'
       - 'scripts/ota_server.py'
       - 'scripts/test_ota_server.py'
       - '.github/workflows/ota.yml'
