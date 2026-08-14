@@ -49,7 +49,7 @@ export function WebSearchModelEditor({
     return (
       <section className="admin-web-search-editor" data-testid="admin-web-search-editor">
         <div className="admin-inline-error admin-form-wide" role="status">
-          本地版联网搜索运行时尚未迁入，当前保持关闭。此页现在会稳定显示，不再白屏。
+          尚未配置联网搜索。保存配置后即可在聊天中使用联网搜索（当前后端未返回 webSearch 配置）。
         </div>
       </section>
     );
