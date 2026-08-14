@@ -2,10 +2,11 @@ import type { LocalDatabase } from '../platform/database.js';
 import type { SecretsPlatform } from '../platform/secrets.js';
 import type { MediaPlatform } from '../platform/media.js';
 import type { HttpPlatform } from '../platform/http.js';
-import { ConfigRepository, JobRepo, LifeCityRepo, LifeClockRepo, LifeRepo, LifeV2Repo, LocationRepo, MediaRepo, MemoryRepo, MessageRepo, MetricsRepo, MomentRepo, ReplyBatchRepo, SettingsRepo, StickerRepo, SummaryRepo, ThoughtRepo, VoiceRepo, WeatherRepo, type MediaRow, type Sticker } from '../db/index.js';
+import { ConfigRepository, JobRepo, LifeCityRepo, LifeClockRepo, LifeRepo, LifeV2Repo, LocationRepo, MediaRepo, MemoryRepo, MessageRepo, MetricsRepo, MomentRepo, ReplyBatchRepo, SettingsRepo, StickerRepo, SummaryRepo, ThoughtRepo, VoiceRepo, WeatherRepo, type MediaRow, type ProviderConfig, type Sticker } from '../db/index.js';
 import type { ChatProvider } from '../providers/types.js';
-import { createWebSearch } from '../providers/web-search.js';
-import { OpenMeteoWeatherProvider } from '../providers/weather-provider.js';
+import type { ConfiguredProviders } from '../providers/builtin.js';
+import { createWebSearch, DOUBAO_SEARCH_DEFAULT_URL, TAVILY_SEARCH_DEFAULT_URL } from '../providers/web-search.js';
+import { OpenMeteoWeatherProvider, summarizeForecast, type WeatherForecastSummary } from '../providers/weather-provider.js';
 import type { MemoryProvider } from '../memory/types.js';
 import { LocalMemoryProvider } from '../memory/local-memory-provider.js';
 import { SqliteLocalMemoryStore } from '../memory/local-store.js';
@@ -127,6 +128,11 @@ export class LocalCore implements LocalCoreApi {
   readonly replies: ReplyCoordinator;
   readonly contextBuilder: ContextBuilder;
   readonly summaryBuilder: SummaryBuilder;
+  /** Resolver for providers built from the persisted config (used when no
+   * explicit chatProvider was injected, e.g. native boot). */
+  private readonly configuredProviders?: () => Promise<ConfiguredProviders>;
+  /** In-memory weather forecast cache (per city, 30 min TTL). */
+  private readonly forecastCache = new Map<string, { summary: WeatherForecastSummary; fetchedAt: number }>();
 
   constructor(private readonly options: LocalCoreOptions) {
     const db = options.db;
@@ -154,17 +160,17 @@ export class LocalCore implements LocalCoreApi {
     this.voicesRepo = new VoiceRepo(db, now);
     this.metricsRepo = new MetricsRepo(db, now);
     this.mediaRepo = new MediaRepo(db, now);
-    const configuredProviders = options.http
+    this.configuredProviders = options.http
       ? async () => (await import('../providers/builtin.js')).createConfiguredProviders(options.http!, this.configRepo)
       : undefined;
     const localMemoryProvider = new LocalMemoryProvider({
       store: new SqliteLocalMemoryStore(this.memoryRepo),
       extract: async (input) => await new MemoryExtractor({
-        provider: async () => options.chatProvider ?? await options.chatProviderFactory?.() ?? (await configuredProviders?.())?.chat ?? null
+        provider: async () => options.chatProvider ?? await options.chatProviderFactory?.() ?? (await this.configuredProviders?.())?.chat ?? null
       }).extract(input),
       currentRevision: async (batchId) => await this.batchesRepo.currentRevision(batchId),
-      embeddingProvider: async () => (await configuredProviders?.())?.embedding ?? null,
-      rerankProvider: async () => (await configuredProviders?.())?.rerank ?? null
+      embeddingProvider: async () => (await this.configuredProviders?.())?.embedding ?? null,
+      rerankProvider: async () => (await this.configuredProviders?.())?.rerank ?? null
     });
     if (options.memoryProvider) {
       this.memoryProvider = options.memoryProvider;
@@ -194,7 +200,7 @@ export class LocalCore implements LocalCoreApi {
     this.momentComposer = new MomentComposer({
       life: new LifeV2Repo(db, now),
       moments: this.momentsRepo,
-      provider: async () => options.chatProvider ?? await options.chatProviderFactory?.() ?? (await configuredProviders?.())?.chat ?? null,
+      provider: async () => options.chatProvider ?? await options.chatProviderFactory?.() ?? (await this.configuredProviders?.())?.chat ?? null,
       now
     });
     this.contextBuilder = new ContextBuilder({
@@ -211,7 +217,7 @@ export class LocalCore implements LocalCoreApi {
     this.summaryBuilder = new SummaryBuilder({
       messages: this.messagesRepo,
       summaries: this.summaryRepo,
-      provider: async () => options.chatProvider ?? await options.chatProviderFactory?.() ?? (await configuredProviders?.())?.chat ?? null
+      provider: async () => options.chatProvider ?? await options.chatProviderFactory?.() ?? (await this.configuredProviders?.())?.chat ?? null
     });
     this.events = new LocalEmitter(now);
     this.replies = new ReplyCoordinator({
@@ -220,6 +226,7 @@ export class LocalCore implements LocalCoreApi {
       memory: this.memoryProvider,
       provider: options.chatProvider,
       providerFactory: options.chatProviderFactory ?? (options.http ? async () => (await import('../providers/builtin.js')).createConfiguredProviders(options.http!, this.configRepo).then((providers) => providers.chat) : undefined),
+      webSearch: options.http ? () => createWebSearch(options.http!, this.configRepo) : null,
       toolRuntime: options.toolRuntime,
       contextBuilder: this.contextBuilder,
       now,
@@ -491,7 +498,7 @@ export class LocalCore implements LocalCoreApi {
   }
 
   private async visionProvider(): Promise<ChatProvider | null> {
-    return this.options.chatProvider ?? await this.options.chatProviderFactory?.() ?? null;
+    return this.options.chatProvider ?? await this.options.chatProviderFactory?.() ?? (await this.configuredProviders?.())?.chat ?? null;
   }
 
   /** Fetches current weather for the active location through open-meteo and persists it. */
@@ -521,6 +528,78 @@ export class LocalCore implements LocalCoreApi {
       return { ok: true, snapshot: latest ? toAdminWeather(latest) : null, error: null };
     } catch (error) {
       return { ok: false, snapshot: null, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /** Maps the web panel's WebSearchConfig-shaped payload (nested doubao/
+   * tavily blocks, provider order) onto the local `webSearch` provider row:
+   * primary provider + optional fallback, each with its own Keychain ref.
+   * 'responses' stays in the mirrored settings for UI order but has no
+   * on-device runtime, so it is never selected as primary/fallback. */
+  private async saveWebSearchConfig(raw: Record<string, unknown>): Promise<void> {
+    const enabled = raw.enabled === true;
+    const providers = Array.isArray(raw.providers) ? raw.providers.filter((item): item is string => typeof item === 'string') : [];
+    const doubao = isRecord(raw.doubao) ? raw.doubao : {};
+    const tavily = isRecord(raw.tavily) ? raw.tavily : {};
+    const localOrder = providers.filter((item) => item === 'doubao' || item === 'tavily');
+    const primary = localOrder[0] === 'tavily' ? 'tavily' : 'doubao';
+    const fallback = localOrder[1] === 'tavily' ? 'tavily' : localOrder[1] === 'doubao' ? 'doubao' : null;
+    const primaryCfg = primary === 'tavily' ? tavily : doubao;
+    const secondaryCfg = primary === 'tavily' ? doubao : tavily;
+    const baseUrl = typeof primaryCfg.baseUrl === 'string' && primaryCfg.baseUrl.trim() ? primaryCfg.baseUrl.trim() : primary === 'tavily' ? TAVILY_SEARCH_DEFAULT_URL : DOUBAO_SEARCH_DEFAULT_URL;
+    const submittedKey = typeof primaryCfg.apiKey === 'string' ? primaryCfg.apiKey.trim() : '';
+    const secondaryBaseUrl = typeof secondaryCfg.baseUrl === 'string' && secondaryCfg.baseUrl.trim()
+      ? secondaryCfg.baseUrl.trim()
+      : fallback === 'tavily' ? TAVILY_SEARCH_DEFAULT_URL : fallback === 'doubao' ? DOUBAO_SEARCH_DEFAULT_URL : '';
+    const secondaryKey = fallback ? (typeof secondaryCfg.apiKey === 'string' ? secondaryCfg.apiKey.trim() : '') : '';
+    if (!enabled || !baseUrl) { await this.configRepo.removeProvider('webSearch'); return; }
+    const existing = await this.configRepo.getProvider('webSearch');
+    const secretRef = existing?.secretRef ?? (submittedKey ? 'provider.webSearch.key' : null);
+    const secondarySecretRef = fallback
+      ? (typeof existing?.options.secondarySecretRef === 'string' && existing.options.secondarySecretRef.trim()
+        ? existing.options.secondarySecretRef
+        : secondaryKey ? 'provider.webSearch.fallback.key' : null)
+      : null;
+    if (this.options.secrets) {
+      if (secretRef && submittedKey) await this.options.secrets.set(secretRef, submittedKey);
+      if (secondarySecretRef && secondaryKey) await this.options.secrets.set(secondarySecretRef, secondaryKey);
+    }
+    await this.configRepo.setProvider({
+      capability: 'webSearch',
+      provider: primary,
+      model: '',
+      baseUrl,
+      secretRef,
+      enabled,
+      options: {
+        fallback,
+        maxResults: typeof raw.maxResults === 'number' && Number.isFinite(raw.maxResults) ? Math.max(1, Math.min(20, Math.trunc(raw.maxResults))) : 5,
+        timeoutMs: typeof raw.timeoutMs === 'number' && Number.isFinite(raw.timeoutMs) ? Math.max(1_000, Math.min(120_000, Math.trunc(raw.timeoutMs))) : 15_000,
+        edition: typeof doubao.edition === 'string' ? doubao.edition : 'custom',
+        ...(secondaryBaseUrl ? { secondaryBaseUrl } : {}),
+        ...(secondarySecretRef ? { secondarySecretRef } : {})
+      }
+    });
+  }
+
+  /** Fetches (or returns the cached) weather forecast summary for the active
+   * location through open-meteo; null when unavailable — never throws. */
+  private async forecastSummary(force = false): Promise<WeatherForecastSummary | null> {
+    if (!this.options.http) return null;
+    try {
+      const locationState = await this.locationsRepo.currentState();
+      const location = locationState ? await this.locationsRepo.get(locationState.location_id) : undefined;
+      if (!location?.name) return null;
+      const now = this.options.now?.() ?? new Date();
+      const cached = this.forecastCache.get(location.name);
+      if (!force && cached && now.getTime() - cached.fetchedAt < 30 * 60_000) return cached.summary;
+      const provider = new OpenMeteoWeatherProvider(this.options.http);
+      const forecast = await provider.forecast({ city: location.name, country: '中国' });
+      const summary = summarizeForecast(forecast.periods, forecast.generatedAt, forecast.provider, now);
+      this.forecastCache.set(location.name, { summary, fetchedAt: now.getTime() });
+      return summary;
+    } catch {
+      return null;
     }
   }
 
@@ -575,13 +654,14 @@ export class LocalCore implements LocalCoreApi {
     if (route === '/api/admin/models') {
       if (method === 'PUT' || method === 'PATCH') {
         const input = isRecord(body.models) ? body.models : body;
-        for (const capability of ['chat', 'embedding', 'rerank', 'image', 'tts'] as const) {
+        for (const capability of ['chat', 'embedding', 'rerank', 'image', 'tts', 'webSearch'] as const) {
           const raw = input[capability];
           if (!isRecord(raw)) continue;
+          if (capability === 'webSearch') { await this.saveWebSearchConfig(raw); continue; }
           const provider = typeof raw.provider === 'string' ? normalizeProvider(raw.provider) : '';
           const model = typeof raw.model === 'string' ? raw.model : '';
           const baseUrl = typeof raw.baseUrl === 'string' ? raw.baseUrl : '';
-          if (!provider || !model || !baseUrl) { if (provider === 'none') await this.configRepo.removeProvider(capability); continue; }
+          if (!provider || !baseUrl || !model) { if (provider === 'none') await this.configRepo.removeProvider(capability); continue; }
           const existing = await this.configRepo.getProvider(capability);
           const submittedKey = typeof raw.apiKey === 'string' ? raw.apiKey.trim() : '';
           const secretRef = typeof raw.secretRef === 'string' && raw.secretRef.trim() ? raw.secretRef.trim() : existing?.secretRef ?? (submittedKey ? `provider.${capability}.key` : null);
@@ -591,8 +671,22 @@ export class LocalCore implements LocalCoreApi {
         await this.settingsRepo.set('models', redactModelConfig(input));
       }
       const providers = await this.configRepo.listProviders();
-      const models = Object.fromEntries(providers.map((provider) => [provider.capability, { provider: provider.provider, model: provider.model, baseUrl: provider.baseUrl, secretRef: provider.secretRef, apiKeyConfigured: Boolean(provider.secretRef), apiKeyBound: true, options: provider.options }]));
-      return { models: { ...await this.settingsRepo.get('models', {}), ...models } } as T;
+      const models: Record<string, unknown> = {};
+      for (const provider of providers) {
+        if (provider.capability === 'webSearch') { models.webSearch = toAdminWebSearchConfig(provider); continue; }
+        models[provider.capability] = { provider: provider.provider, model: provider.model, baseUrl: provider.baseUrl, secretRef: provider.secretRef, apiKeyConfigured: Boolean(provider.secretRef), apiKeyBound: true, options: provider.options };
+      }
+      // Preserve panel-provided details the row does not track (e.g. a
+      // 'responses' entry in the provider order) from the mirrored settings.
+      const saved = await this.settingsRepo.get<Record<string, unknown>>('models', {});
+      const savedWebSearch = isRecord(saved.webSearch) ? saved.webSearch : null;
+      const mergedWebSearch = isRecord(models.webSearch) ? models.webSearch : null;
+      if (savedWebSearch && mergedWebSearch) {
+        if (Array.isArray(savedWebSearch.providers) && (savedWebSearch.providers as unknown[]).length > 0) mergedWebSearch.providers = savedWebSearch.providers;
+        if (savedWebSearch.maxResults != null) mergedWebSearch.maxResults = savedWebSearch.maxResults;
+        if (savedWebSearch.timeoutMs != null) mergedWebSearch.timeoutMs = savedWebSearch.timeoutMs;
+      }
+      return { models: { ...saved, ...models } } as T;
     }
     if (route === '/api/admin/model-presets') {
       if (method === 'PUT') await this.settingsRepo.set('modelPresets', body.presets ?? []);
@@ -613,6 +707,9 @@ export class LocalCore implements LocalCoreApi {
       return { ok: Boolean(configured?.enabled && configured.secretRef), provider: configured?.provider ?? 'none', model: configured?.model ?? '', detail: configured?.secretRef ? '已绑定本地密钥引用' : '尚未配置本地密钥引用', latencyMs: 0 } as T;
     }
     if (route === '/api/admin/models/web-search/test' && method === 'POST') {
+      if (body.provider === 'responses') {
+        return { ok: false, provider: 'responses', latencyMs: 0, resultCount: 0, detail: '设备端本地运行时不支持 Responses 原生搜索，请改用豆包或 Tavily' } as T;
+      }
       const runtime = await createWebSearch(this.options.http!, this.configRepo);
       if (!runtime || runtime.providers.length === 0) return { ok: false, provider: body.provider ?? 'unknown', latencyMs: 0, resultCount: 0, detail: '未配置联网搜索（webSearch provider 未启用或无密钥引用）' } as T;
       const started = Date.now();
@@ -899,12 +996,15 @@ export class LocalCore implements LocalCoreApi {
     if (route === '/api/admin/life/cities' && method === 'GET') return { cities: await this.lifeCitiesRepo.list() } as T;
     if (route === '/api/admin/weather/status' && method === 'GET') {
       const snapshot = await this.weatherRepo.latest('active');
-      return { enabled: Boolean(snapshot), provider: { name: snapshot?.provider ?? null, configured: Boolean(snapshot), active: Boolean(snapshot) }, currentSource: snapshot?.provider ?? null, lastSnapshot: snapshot ? toAdminWeather(snapshot) : null, cacheAgeSec: snapshot ? Math.max(0, Math.floor((Date.now() - Date.parse(snapshot.observed_at)) / 1000)) : null, daylight: null, forecast: null } as T;
+      return { enabled: Boolean(snapshot), provider: { name: snapshot?.provider ?? null, configured: Boolean(snapshot), active: Boolean(snapshot) }, currentSource: snapshot?.provider ?? null, lastSnapshot: snapshot ? toAdminWeather(snapshot) : null, cacheAgeSec: snapshot ? Math.max(0, Math.floor((Date.now() - Date.parse(snapshot.observed_at)) / 1000)) : null, daylight: null, forecast: await this.forecastSummary() } as T;
     }
-    if (route === '/api/admin/weather/forecast') return { forecast: null } as T;
+    if (route === '/api/admin/weather/forecast' && method === 'GET') {
+      return { forecast: await this.forecastSummary(), daylight: null } as T;
+    }
     if (route === '/api/admin/weather/refresh' && method === 'POST') {
-      const refreshed = await this.refreshWeather();
-      return { ok: refreshed.ok, snapshot: refreshed.snapshot ?? null, error: refreshed.error ?? null, presence: await this.presence() } as T;
+      const result = await this.refreshWeather();
+      const forecast = await this.forecastSummary(true);
+      return { ok: result.ok, snapshot: result.snapshot, forecast, error: result.error, presence: await this.presence() } as T;
     }
     if (route.startsWith('/api/admin/metrics')) return { aggregates: [], distributions: [] } as T;
     return {} as T;
@@ -1130,8 +1230,40 @@ function redactModelConfig(value: Record<string, unknown>): Record<string, unkno
   return Object.fromEntries(Object.entries(value).map(([key, raw]) => {
     if (!isRecord(raw)) return [key, raw];
     const { apiKey: _apiKey, key: _key, token: _token, ...safe } = raw;
+    // Nested provider blocks (webSearch.doubao/tavily) carry keys too.
+    if (key === 'webSearch' && isRecord(safe)) {
+      return [key, Object.fromEntries(Object.entries(safe).map(([nestedKey, nested]) => {
+        if (!isRecord(nested)) return [nestedKey, nested];
+        const { apiKey: _nestedApiKey, key: _nestedKey, token: _nestedToken, ...nestedSafe } = nested;
+        return [nestedKey, nestedSafe];
+      }))];
+    }
     return [key, safe];
   }));
+}
+
+/** Converts the persisted webSearch provider row back into the panel's nested
+ * WebSearchConfig shape (enabled/providers/maxResults/timeoutMs/doubao/tavily). */
+function toAdminWebSearchConfig(row: ProviderConfig): Record<string, unknown> {
+  const options = row.options;
+  const primary = row.provider === 'tavily' ? 'tavily' : 'doubao';
+  const fallback = options.fallback === 'tavily' ? 'tavily' : options.fallback === 'doubao' ? 'doubao' : null;
+  const secondaryBaseUrl = typeof options.secondaryBaseUrl === 'string' ? options.secondaryBaseUrl : '';
+  const secondarySecretRef = typeof options.secondarySecretRef === 'string' ? options.secondarySecretRef : null;
+  const doubao = primary === 'doubao'
+    ? { edition: options.edition === 'global' ? 'global' : 'custom', baseUrl: row.baseUrl, apiKeyConfigured: Boolean(row.secretRef) }
+    : { edition: options.edition === 'global' ? 'global' : 'custom', baseUrl: secondaryBaseUrl || DOUBAO_SEARCH_DEFAULT_URL, apiKeyConfigured: Boolean(secondarySecretRef) };
+  const tavily = primary === 'tavily'
+    ? { baseUrl: row.baseUrl, apiKeyConfigured: Boolean(row.secretRef) }
+    : { baseUrl: secondaryBaseUrl || TAVILY_SEARCH_DEFAULT_URL, apiKeyConfigured: Boolean(secondarySecretRef) };
+  return {
+    enabled: row.enabled,
+    providers: [primary, ...(fallback ? [fallback] : [])],
+    maxResults: typeof options.maxResults === 'number' ? Math.max(1, Math.min(20, Math.trunc(options.maxResults))) : 5,
+    timeoutMs: typeof options.timeoutMs === 'number' ? Math.max(1_000, Math.min(120_000, Math.trunc(options.timeoutMs))) : 15_000,
+    doubao,
+    tavily
+  };
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {

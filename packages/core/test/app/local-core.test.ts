@@ -2,10 +2,65 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { LocalCore } from '../../src/app/local-core.js';
 import type { MediaPlatform, MediaRecord, MediaSaveRequest } from '../../src/platform/media.js';
 import type { SecretsPlatform } from '../../src/platform/secrets.js';
+import type { HttpPlatform, HttpResponse } from '../../src/platform/http.js';
 import type { McpPlatform } from '../../src/platform/mcp.js';
+import type { ChatProvider } from '../../src/providers/types.js';
+import { createWebSearch } from '../../src/providers/web-search.js';
 import { migrateDatabase } from '../../src/db/migrations.js';
 import { NodeLocalDatabase } from '../db/node-local-database.js';
 import { MessageRepo } from '../../src/db/index.js';
+
+function waitForEvent(core: LocalCore, type: string, timeoutMs = 8000): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { unsubscribe(); reject(new Error(`timeout waiting for ${type}`)); }, timeoutMs);
+    const unsubscribe = core.subscribe((event) => {
+      if (event.type === type) { clearTimeout(timer); unsubscribe(); resolve(event.data); }
+    });
+  });
+}
+
+/** Fake HttpPlatform serving the doubao search endpoint (and inert weather). */
+function searchHttp(recorded: { requests: Array<{ url: string; secretRef: string | null }> }): HttpPlatform {
+  return {
+    async request(input) {
+      recorded.requests.push({ url: String(input.url), secretRef: input.secretRef ?? null });
+      const body = new TextEncoder().encode(JSON.stringify({
+        Result: { WebResults: [{ Title: '新闻一', Url: 'https://news.example/1', Summary: '第一条摘要' }] }
+      }));
+      const response: HttpResponse = { status: 200, headers: { 'content-type': 'application/json' }, body };
+      return response;
+    },
+    async stream() { throw new Error('not used'); }
+  };
+}
+
+function fakeChatProvider(capturedSystems: string[]): ChatProvider {
+  return {
+    name: 'fake-chat',
+    configured: true,
+    supportsTools: false,
+    complete: async () => ({ text: 'ok', model: 'fake' }),
+    stream: async (request, onChunk) => {
+      capturedSystems.push(request.system ?? '');
+      onChunk({ delta: '这是联网回复' });
+      return { text: '这是联网回复', model: 'fake' };
+    },
+    inspectHealth: async () => ({ capability: 'chat', configured: true, ok: true, provider: 'fake', checkedAt: new Date().toISOString() })
+  };
+}
+
+const WEB_SEARCH_PATCH = {
+  enabled: true,
+  providers: ['doubao', 'tavily'],
+  maxResults: 5,
+  timeoutMs: 15000,
+  doubao: { edition: 'custom', baseUrl: 'https://doubao.test', apiKey: 'doubao-key' },
+  tavily: { baseUrl: 'https://tavily.test', apiKey: 'tavily-key' }
+};
+
+async function saveWebSearch(core: LocalCore): Promise<void> {
+  await core.adminRequest('/api/admin/models', { method: 'PUT', body: { webSearch: WEB_SEARCH_PATCH } });
+}
 
 class MemoryMediaStore implements MediaPlatform {
   private next = 1;
@@ -246,5 +301,86 @@ describe('LocalCore', () => {
     db.transaction = originalTransaction;
     await expect(db.query<{ id: string; active: number }>('SELECT id,active FROM memories WHERE id IN (?,?) ORDER BY id', [first.record.id, second.record.id])).resolves.toEqual([first.record.id, second.record.id].sort().map((id) => ({ id, active: 1 })));
     await expect(db.query<{ count: number }>('SELECT COUNT(*) count FROM memory_tombstones')).resolves.toEqual([{ count: 0 }]);
+  });
+});
+
+describe('LocalCore webSearch integration', () => {
+  let db: NodeLocalDatabase;
+  let secrets: MemorySecrets;
+
+  beforeEach(async () => {
+    db = new NodeLocalDatabase();
+    await migrateDatabase(db);
+    secrets = new MemorySecrets();
+  });
+
+  afterEach(async () => await db.close());
+
+  it('round-trips webSearch config through admin models and stores keys in Keychain', async () => {
+    const recorded: { requests: Array<{ url: string; secretRef: string | null }> } = { requests: [] };
+    const http = searchHttp(recorded);
+    const core = new LocalCore({ db, secrets, http });
+    await saveWebSearch(core);
+
+    const read = await core.adminRequest<{ models: Record<string, unknown> }>('/api/admin/models');
+    const web = read.models.webSearch as Record<string, unknown>;
+    expect(web.enabled).toBe(true);
+    expect(web.providers).toEqual(['doubao', 'tavily']);
+    expect((web.doubao as Record<string, unknown>).apiKeyConfigured).toBe(true);
+    expect((web.tavily as Record<string, unknown>).apiKeyConfigured).toBe(true);
+    expect((web.doubao as Record<string, unknown>).apiKey).toBeUndefined();
+    expect(web.maxResults).toBe(5);
+
+    await expect(secrets.get('provider.webSearch.key')).resolves.toBe('doubao-key');
+    await expect(secrets.get('provider.webSearch.fallback.key')).resolves.toBe('tavily-key');
+
+    const runtime = await createWebSearch(http, core.configRepo);
+    expect(runtime).not.toBeNull();
+    expect(runtime!.order).toEqual(['doubao', 'tavily']);
+    expect(runtime!.providers[0]!.configured).toBe(true);
+    expect(runtime!.providers[1]!.configured).toBe(true);
+  });
+
+  it('runs web search during replies and records citations in message meta', async () => {
+    const recorded: { requests: Array<{ url: string; secretRef: string | null }> } = { requests: [] };
+    const capturedSystems: string[] = [];
+    const core = new LocalCore({ db, secrets, http: searchHttp(recorded), chatProvider: fakeChatProvider(capturedSystems), replyDebounceMs: 0 });
+    const completed = waitForEvent(core, 'reply.completed');
+    await saveWebSearch(core);
+    await core.send({ clientMsgId: 'ws-1', content: [{ type: 'text', text: '帮我搜一下最近有什么新闻' }] });
+    await completed;
+
+    expect(capturedSystems.some((system) => system.includes('联网搜索材料'))).toBe(true);
+    expect(recorded.requests.some((request) => request.url.includes('doubao.test'))).toBe(true);
+    const page = await core.messages({ limit: 10 });
+    const assistant = page.messages.find((message) => message.role === 'assistant');
+    expect(assistant?.meta.webSearchUsed).toBe(true);
+    expect(assistant?.meta.webSearchProvider).toBe('doubao');
+    expect(assistant?.meta.webCitations).toEqual([{ title: '新闻一', url: 'https://news.example/1' }]);
+  });
+
+  it('does not search or inject citations for non-search messages', async () => {
+    const recorded: { requests: Array<{ url: string; secretRef: string | null }> } = { requests: [] };
+    const capturedSystems: string[] = [];
+    const core = new LocalCore({ db, secrets, http: searchHttp(recorded), chatProvider: fakeChatProvider(capturedSystems), replyDebounceMs: 0 });
+    const completed = waitForEvent(core, 'reply.completed');
+    await saveWebSearch(core);
+    await core.send({ clientMsgId: 'chat-1', content: [{ type: 'text', text: '想你了' }] });
+    await completed;
+
+    expect(capturedSystems.some((system) => system.includes('联网搜索材料'))).toBe(false);
+    expect(recorded.requests).toHaveLength(0);
+  });
+
+  it('degrades honestly when search is offered but not configured', async () => {
+    const recorded: { requests: Array<{ url: string; secretRef: string | null }> } = { requests: [] };
+    const capturedSystems: string[] = [];
+    const core = new LocalCore({ db, secrets, http: searchHttp(recorded), chatProvider: fakeChatProvider(capturedSystems), replyDebounceMs: 0 });
+    const completed = waitForEvent(core, 'reply.completed');
+    await core.send({ clientMsgId: 'deg-1', content: [{ type: 'text', text: '帮我查一下最新消息' }] });
+    await completed;
+
+    expect(capturedSystems.some((system) => system.includes('联网搜索当前不可用'))).toBe(true);
+    expect(recorded.requests).toHaveLength(0);
   });
 });
