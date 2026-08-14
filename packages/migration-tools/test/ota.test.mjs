@@ -91,7 +91,6 @@ test('pending and last-good metadata bind to a verified OTA manifest', async () 
 
   await markOtaLastGood({ stateDir, packageDir: outputDir, recordedAt: '2026-08-13T00:02:00.000Z' });
   state = await verifyOtaState({ stateDir, packageDir: outputDir });
-  assert.equal(state.pending.releaseId, undefined);
   assert.equal(state.pending, null);
   assert.equal(state.lastGood.releaseId, 'release-fixture-0003');
   await fsp.writeFile(path.join(stateDir, 'last-good.json'), JSON.stringify({ ...state.lastGood, manifestSha256: '0'.repeat(64) }));
