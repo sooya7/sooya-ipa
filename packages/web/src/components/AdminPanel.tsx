@@ -12,6 +12,7 @@ import { LifeObservationPanel } from './life/LifeObservationPanel.js';
 import { WebSearchModelEditor } from './WebSearchModelEditor.js';
 import { McpAdminPage } from './admin/McpAdminPage.js';
 import { ContentManagementPage } from './admin/ContentManagementPage.js';
+import { OtaDiagnosticsCard } from './admin/OtaDiagnosticsCard.js';
 import {
   interfaceOptions,
   MODEL_SLOTS,
@@ -1097,6 +1098,7 @@ function OperationsPanel({ onNotice }: { onNotice: (v: string) => void }) {
 
   return (
     <section className="admin-operations">
+      <OtaDiagnosticsCard onNotice={onNotice} />
       <article className="admin-card" data-testid="admin-error-list">
         <div className="admin-card-subtitle">
           <h2>最近错误</h2>
