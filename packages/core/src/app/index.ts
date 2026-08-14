@@ -13,3 +13,12 @@ export { MomentComposer } from '../moments/composer.js';
 export { SqliteLocalMemoryStore } from '../memory/local-store.js';
 export { rollbackBuiltinStickerImport, seedBuiltinStickersOnce } from './builtin-stickers.js';
 export type { BuiltinStickerImportResult, BuiltinStickerSeed } from './builtin-stickers.js';
+export {
+  DEFAULT_SERVER_IMAGE_PERSONA,
+  DEFAULT_SERVER_PERSONA,
+  SERVER_PERSONA_SEED_VERSION,
+  SERVER_REFERENCE_IMAGES,
+  mergeServerImagePersonaSeed,
+  mergeServerPersonaSeed,
+  seedServerPersonaOnce
+} from './server-persona.js';
