@@ -9,6 +9,8 @@ import { binaryBytes, endpoint, healthStatus, isRecord, requestBytes, requestJso
 
 export interface ConfiguredProviders {
   chat: ChatProvider | null;
+  /** Independent vision slot; falls back to the chat model when unconfigured. */
+  vision: ChatProvider | null;
   embedding: EmbeddingProvider | null;
   rerank: RerankProvider | null;
   image: ImageProvider | null;
@@ -16,11 +18,13 @@ export interface ConfiguredProviders {
 }
 
 export async function createConfiguredProviders(http: HttpPlatform, config: ConfigRepository): Promise<ConfiguredProviders> {
-  const [chat, embedding, rerank, image, tts] = await Promise.all([
-    config.getProvider('chat'), config.getProvider('embedding'), config.getProvider('rerank'), config.getProvider('image'), config.getProvider('tts')
+  const [chat, vision, embedding, rerank, image, tts] = await Promise.all([
+    config.getProvider('chat'), config.getProvider('vision'), config.getProvider('embedding'), config.getProvider('rerank'), config.getProvider('image'), config.getProvider('tts')
   ]);
+  const chatProvider = chat && chat.enabled ? new BuiltinChatProvider(http, chat) : null;
   return {
-    chat: chat && chat.enabled ? new BuiltinChatProvider(http, chat) : null,
+    chat: chatProvider,
+    vision: vision && vision.enabled ? new BuiltinChatProvider(http, vision) : chatProvider,
     embedding: embedding && embedding.enabled ? new BuiltinEmbeddingProvider(http, embedding) : null,
     rerank: rerank && rerank.enabled ? new BuiltinRerankProvider(http, rerank) : null,
     image: image && image.enabled ? new BuiltinImageProvider(http, image) : null,

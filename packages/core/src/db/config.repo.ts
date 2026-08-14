@@ -1,7 +1,7 @@
 import type { LocalDatabase } from '../platform/database.js';
 import { nowIso, queryOne, safeJson } from './database.js';
 
-export type ProviderCapability = 'chat' | 'embedding' | 'rerank' | 'image' | 'tts' | 'webSearch';
+export type ProviderCapability = 'chat' | 'vision' | 'summary' | 'director' | 'embedding' | 'rerank' | 'image' | 'tts' | 'webSearch';
 
 export interface ProviderConfig {
   capability: ProviderCapability;

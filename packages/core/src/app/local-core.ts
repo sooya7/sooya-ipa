@@ -22,6 +22,8 @@ import type { ToolExecutionContext } from '../tools/registry.js';
 import type { ToolCallRuntime } from '../tools/tool-runtime.js';
 import { ReplyCoordinator } from './reply-coordinator.js';
 import { LocalMediaResolver } from './media-resolver.js';
+import { ModelDiscoveryService } from './model-discovery.js';
+import { MODEL_CAPABILITY_SLOTS, MODEL_DEFAULTS, type ModelCapabilitySlot } from './model-defaults.js';
 import { ContextBuilder } from './context-builder.js';
 import { SummaryBuilder } from './summary-builder.js';
 import { StickerAnalyzer } from './sticker-analyzer.js';
@@ -503,7 +505,7 @@ export class LocalCore implements LocalCoreApi {
   }
 
   private async visionProvider(): Promise<ChatProvider | null> {
-    return this.options.chatProvider ?? await this.options.chatProviderFactory?.() ?? (await this.configuredProviders?.())?.chat ?? null;
+    return this.options.chatProvider ?? await this.options.chatProviderFactory?.() ?? (await this.configuredProviders?.())?.vision ?? null;
   }
 
   /** Fetches current weather for the active location through open-meteo and persists it. */
@@ -680,7 +682,7 @@ export class LocalCore implements LocalCoreApi {
     if (route === '/api/admin/models') {
       if (method === 'PUT' || method === 'PATCH') {
         const input = isRecord(body.models) ? body.models : body;
-        for (const capability of ['chat', 'embedding', 'rerank', 'image', 'tts', 'webSearch'] as const) {
+        for (const capability of [...MODEL_CAPABILITY_SLOTS, 'webSearch'] as const) {
           const raw = input[capability];
           if (!isRecord(raw)) continue;
           if (capability === 'webSearch') { await this.saveWebSearchConfig(raw); continue; }
@@ -692,15 +694,31 @@ export class LocalCore implements LocalCoreApi {
           const submittedKey = typeof raw.apiKey === 'string' ? raw.apiKey.trim() : '';
           const secretRef = typeof raw.secretRef === 'string' && raw.secretRef.trim() ? raw.secretRef.trim() : existing?.secretRef ?? (submittedKey ? `provider.${capability}.key` : null);
           if (this.options.secrets && secretRef && submittedKey) await this.options.secrets.set(secretRef, submittedKey);
-          await this.configRepo.setProvider({ capability, provider, model, baseUrl, secretRef, options: isRecord(raw.options) ? raw.options : {} });
+          await this.configRepo.setProvider({ capability, provider, model, baseUrl, secretRef, options: modelOptionsFrom(raw) });
         }
         await this.settingsRepo.set('models', redactModelConfig(input));
       }
       const providers = await this.configRepo.listProviders();
       const models: Record<string, unknown> = {};
+      // Fresh installs get the full default shape for every slot (provider
+      // 'none' = not enabled), so the panel never shows empty inputs.
+      for (const slot of MODEL_CAPABILITY_SLOTS) {
+        models[slot] = { ...MODEL_DEFAULTS[slot], apiKeyConfigured: false, apiKeyBound: false, options: {} };
+      }
       for (const provider of providers) {
         if (provider.capability === 'webSearch') { models.webSearch = toAdminWebSearchConfig(provider); continue; }
-        models[provider.capability] = { provider: provider.provider, model: provider.model, baseUrl: provider.baseUrl, secretRef: provider.secretRef, apiKeyConfigured: Boolean(provider.secretRef), apiKeyBound: true, options: provider.options };
+        const defaults = MODEL_DEFAULTS[provider.capability as ModelCapabilitySlot] ?? {};
+        models[provider.capability] = {
+          ...defaults,
+          provider: provider.provider,
+          model: provider.model,
+          baseUrl: provider.baseUrl,
+          secretRef: provider.secretRef,
+          apiKeyConfigured: Boolean(provider.secretRef),
+          apiKeyBound: true,
+          options: provider.options,
+          ...provider.options
+        };
       }
       // Fresh installs have no webSearch row yet; still return a usable empty
       // shape so the panel renders the form (and the first save creates it).
@@ -731,8 +749,14 @@ export class LocalCore implements LocalCoreApi {
     const modelAction = route.match(/^\/api\/admin\/models\/([^/]+)\/(discover|test)$/u);
     if (modelAction) {
       const capability = decodeURIComponent(modelAction[1]!);
+      if (modelAction[2] === 'discover') {
+        if (!this.options.http) throw new Error('本地 HTTP 传输不可用，无法拉取模型列表');
+        const service = new ModelDiscoveryService(this.options.http, this.configRepo);
+        const result = await service.discover(capability as never, typeof body.baseUrl === 'string' ? body.baseUrl : undefined);
+        if (!result.ok) throw new Error(result.detail);
+        return { models: result.models, source: result.source } as T;
+      }
       const configured = await this.configRepo.getProvider(capability as never);
-      if (modelAction[2] === 'discover') return { models: configured?.model ? [configured.model] : [], source: 'local-config' } as T;
       return { ok: Boolean(configured?.enabled && configured.secretRef), provider: configured?.provider ?? 'none', model: configured?.model ?? '', detail: configured?.secretRef ? '已绑定本地密钥引用' : '尚未配置本地密钥引用', latencyMs: 0 } as T;
     }
     if (route === '/api/admin/models/web-search/test' && method === 'POST') {
@@ -756,7 +780,7 @@ export class LocalCore implements LocalCoreApi {
       const presets = await this.settingsRepo.get<Array<Record<string, unknown>>>('modelPresets', []);
       const preset = presets.find((item) => item.id === decodeURIComponent(applyPreset));
       if (!preset) throw new Error(`model preset ${applyPreset} not found`);
-      const capability = typeof preset.slot === 'string' && ['chat', 'embedding', 'rerank', 'image', 'tts'].includes(preset.slot) ? preset.slot as 'chat' | 'embedding' | 'rerank' | 'image' | 'tts' : 'chat';
+      const capability = typeof preset.slot === 'string' && (MODEL_CAPABILITY_SLOTS as readonly string[]).includes(preset.slot) ? preset.slot as (typeof MODEL_CAPABILITY_SLOTS)[number] : 'chat';
       const existing = await this.configRepo.getProvider(capability);
       await this.configRepo.setProvider({ capability, provider: normalizeProvider(String(preset.provider ?? '')), model: String(preset.model ?? ''), baseUrl: String(preset.baseUrl ?? ''), secretRef: existing?.secretRef ?? null });
       return { applied: decodeURIComponent(applyPreset), models: (await this.adminRequest<{ models: Record<string, unknown> }>('/api/admin/models')).models } as T;
@@ -1253,6 +1277,14 @@ function normalizeProvider(value: string): string {
   if (!normalized || normalized === 'none') return 'none';
   if (normalized.includes('anthropic')) return 'anthropic';
   return normalized;
+}
+
+/** Everything except the core identity fields and key-handling bookkeeping is
+ * persisted as provider options (maxTokens, supportsVision, size, voice, ...),
+ * and surfaced back on GET merged over the slot defaults. */
+function modelOptionsFrom(raw: Record<string, unknown>): Record<string, unknown> {
+  const CORE_KEYS = new Set(['provider', 'model', 'baseUrl', 'apiKey', 'secretRef', 'apiKeyConfigured', 'apiKeyBound', 'options']);
+  return Object.fromEntries(Object.entries(raw).filter(([key]) => !CORE_KEYS.has(key)));
 }
 
 function redactModelConfig(value: Record<string, unknown>): Record<string, unknown> {

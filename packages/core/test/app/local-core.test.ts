@@ -371,6 +371,76 @@ describe('LocalCore webSearch integration', () => {
     expect(runtime!.providers[1]!.configured).toBe(true);
   });
 
+  it('returns the full default model shape for all 8 slots on a fresh install', async () => {
+    const core = new LocalCore({ db, secrets });
+    const read = await core.adminRequest<{ models: Record<string, unknown> }>('/api/admin/models');
+    for (const slot of ['chat', 'vision', 'summary', 'director', 'embedding', 'image', 'tts', 'rerank']) {
+      const config = read.models[slot] as Record<string, unknown>;
+      expect(config).toBeDefined();
+      expect(config.provider).toBe('none');
+      expect(config.apiKeyConfigured).toBe(false);
+    }
+    const chat = read.models.chat as Record<string, unknown>;
+    expect(chat.maxTokens).toBe(1024);
+    expect(chat.contextWindow).toBe(32000);
+    expect(chat.supportsStreaming).toBe(true);
+    expect((read.models.image as Record<string, unknown>).size).toBe('1024x1024');
+    expect((read.models.tts as Record<string, unknown>).format).toBe('mp3');
+    expect((read.models.rerank as Record<string, unknown>).candidateLimit).toBe(16);
+    // Defaults are not enabled: no provider, no key.
+    expect(chat.model).toBe('');
+  });
+
+  it('persists and reads back all 8 model slots with their extra parameters', async () => {
+    const core = new LocalCore({ db, secrets });
+    await core.adminRequest('/api/admin/models', {
+      method: 'PUT',
+      body: {
+        chat: { provider: 'openai-compatible', baseUrl: 'https://chat.test/v1', model: 'gpt-4o', apiKey: 'chat-key', maxTokens: 2048, contextWindow: 64000, supportsVision: true },
+        vision: { provider: 'openai-compatible', baseUrl: 'https://chat.test/v1', model: 'gpt-4o', apiKey: 'vision-key', maxTokens: 1024 },
+        summary: { provider: 'openai-compatible', baseUrl: 'https://chat.test/v1', model: 'gpt-4o-mini', apiKey: 'summary-key' },
+        director: { provider: 'openai-compatible', baseUrl: 'https://chat.test/v1', model: 'gpt-4o-mini', apiKey: 'director-key' },
+        embedding: { provider: 'openai-compatible', baseUrl: 'https://chat.test/v1', model: 'text-embedding-3-small', apiKey: 'embed-key' },
+        image: { provider: 'openai-images', baseUrl: 'https://img.test/v1', model: 'gpt-image-1', apiKey: 'img-key', size: '512x512' },
+        tts: { provider: 'openai-tts', baseUrl: 'https://tts.test/v1', model: 'tts-1', apiKey: 'tts-key', voice: 'nova' },
+        rerank: { provider: 'openai-rerank', baseUrl: 'https://rerank.test/v1', model: 'rerank-1', apiKey: 'rerank-key', candidateLimit: 8 }
+      }
+    });
+
+    const read = await core.adminRequest<{ models: Record<string, unknown> }>('/api/admin/models');
+    expect((read.models.chat as Record<string, unknown>).maxTokens).toBe(2048);
+    expect((read.models.chat as Record<string, unknown>).supportsVision).toBe(true);
+    expect((read.models.vision as Record<string, unknown>).model).toBe('gpt-4o');
+    expect((read.models.image as Record<string, unknown>).size).toBe('512x512');
+    expect((read.models.tts as Record<string, unknown>).voice).toBe('nova');
+    expect((read.models.rerank as Record<string, unknown>).candidateLimit).toBe(8);
+    // Keys land in Keychain, never in the response.
+    for (const [slot, key] of [['chat', 'chat-key'], ['vision', 'vision-key'], ['embedding', 'embed-key'], ['image', 'img-key'], ['tts', 'tts-key'], ['rerank', 'rerank-key']] as const) {
+      await expect(secrets.get(`provider.${slot}.key`)).resolves.toBe(key);
+      expect((read.models[slot] as Record<string, unknown>).apiKey).toBeUndefined();
+    }
+  });
+
+  it('routes discovery through the real upstream request', async () => {
+    const recorded: { requests: Array<{ url: string; secretRef: string | null }> } = { requests: [] };
+    const http: HttpPlatform = {
+      async request(input) {
+        recorded.requests.push({ url: String(input.url), secretRef: input.secretRef ?? null });
+        const body = new TextEncoder().encode(JSON.stringify({ data: [{ id: 'gpt-4o' }, { id: 'gpt-4o-mini' }] }));
+        return { status: 200, headers: { 'content-type': 'application/json' }, body };
+      },
+      async stream() { throw new Error('not used'); }
+    };
+    const core = new LocalCore({ db, secrets, http });
+    await core.adminRequest('/api/admin/models', {
+      method: 'PUT',
+      body: { chat: { provider: 'openai-compatible', baseUrl: 'https://chat.test/v1', model: 'gpt-4o', apiKey: 'chat-key' } }
+    });
+    const result = await core.adminRequest<{ models: string[]; source: string }>('/api/admin/models/chat/discover', { method: 'POST' });
+    expect(result.models).toEqual(['gpt-4o', 'gpt-4o-mini']);
+    expect(recorded.requests[0]).toMatchObject({ url: 'https://chat.test/v1/models', secretRef: 'provider.chat.key' });
+  });
+
   it('deletes the Keychain secret when the panel sends an explicit empty apiKey', async () => {
     const recorded: { requests: Array<{ url: string; secretRef: string | null }> } = { requests: [] };
     const http = searchHttp(recorded);
