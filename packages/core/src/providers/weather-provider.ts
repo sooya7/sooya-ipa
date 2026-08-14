@@ -1,6 +1,7 @@
 import type { HttpPlatform } from '../platform/http.js';
 import type { WeatherCondition, WeatherSnapshot } from '../db/weather.repo.js';
 import { ProviderRequestError } from '../providers/types.js';
+import { isRecord } from './http-json.js';
 
 export interface WeatherLocation {
   city?: string | null;
@@ -30,6 +31,81 @@ const CN_ISO_CODES = new Map<string, string>([
   ['中华人民共和国', 'CN']
 ]);
 
+// ---- Forecast domain (same frozen shape as the server's weather/forecast.ts) ----
+
+export interface WeatherForecastPeriod {
+  at: string; // ISO instant
+  condition: WeatherCondition;
+  temperatureC?: number;
+  precipitationMm?: number;
+  windKph?: number;
+  periodKind?: 'hourly' | 'daily';
+}
+
+export interface WeatherForecast {
+  locationKey: string;
+  generatedAt: string;
+  provider: string;
+  periods: WeatherForecastPeriod[];
+}
+
+export interface WeatherForecastSummary {
+  generatedAt: string;
+  provider: string;
+  next12h: WeatherForecastPeriod[];
+  next3d: WeatherForecastPeriod[];
+  severe: boolean;
+}
+
+export type SevereWeatherKind =
+  | 'storm'
+  | 'heavy_rain'
+  | 'extreme_heat'
+  | 'extreme_cold'
+  | 'snow'
+  | 'strong_wind';
+
+const EXTREME_HEAT_C = 35;
+const EXTREME_COLD_C = -10;
+const HEAVY_RAIN_MM = 10;
+const STRONG_WIND_KPH = 60;
+
+/** Conservative severe-weather detection (same thresholds as the server). */
+export function severeWeatherKinds(
+  condition: WeatherCondition,
+  temperatureC?: number | null,
+  windKph?: number | null,
+  precipitationMm?: number | null
+): SevereWeatherKind[] {
+  const kinds: SevereWeatherKind[] = [];
+  if (condition === 'storm') kinds.push('storm');
+  if (condition === 'snow') kinds.push('snow');
+  if (condition === 'rain' && (precipitationMm ?? 0) >= HEAVY_RAIN_MM) kinds.push('heavy_rain');
+  if (temperatureC != null && temperatureC >= EXTREME_HEAT_C) kinds.push('extreme_heat');
+  if (temperatureC != null && temperatureC <= EXTREME_COLD_C) kinds.push('extreme_cold');
+  if (windKph != null && windKph >= STRONG_WIND_KPH) kinds.push('strong_wind');
+  return kinds;
+}
+
+/** Splits periods into next12h / next3d and recomputes severe (server shape).
+ * `at` is kept in the signature for server parity (reserved for time-window
+ * scoring) and intentionally unused today. */
+export function summarizeForecast(
+  periods: WeatherForecastPeriod[],
+  generatedAt: string,
+  provider: string,
+  _at: Date
+): WeatherForecastSummary {
+  const sorted = [...periods].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  const hourly = sorted.filter((period) => period.periodKind !== 'daily');
+  const daily = sorted.filter((period) => period.periodKind === 'daily');
+  const cut = Date.parse(generatedAt) + 12 * 3_600_000;
+  const next12h = hourly.length > 0 ? hourly : sorted.filter((period) => Date.parse(period.at) <= cut);
+  const next3d = daily.length > 0 ? daily : sorted.filter((period) => Date.parse(period.at) > cut);
+  const severe = sorted.some((period) => severeWeatherKinds(period.condition, period.temperatureC, period.windKph, period.precipitationMm).length > 0);
+  return { generatedAt, provider, next12h, next3d, severe };
+}
+
 interface OpenMeteoCurrent {
   time?: string | null;
   weather_code?: number | string | null;
@@ -46,6 +122,7 @@ interface OpenMeteoResponse {
   timezone?: string;
   utc_offset_seconds?: number;
   current?: OpenMeteoCurrent;
+  daily?: Record<string, unknown>;
 }
 
 /**
@@ -89,6 +166,37 @@ export class OpenMeteoWeatherProvider {
       provider: this.name,
       locationKey: weatherLocationKey(location),
       stale: false
+    };
+  }
+
+  /** Daily forecast for the next 3 days (same open-meteo query the server
+   * uses); returns the full period list for summarizeForecast(). */
+  async forecast(location: WeatherLocation, signal?: AbortSignal): Promise<WeatherForecast> {
+    const { lat, lng } = await this.coords(location, signal);
+    const url = `${this.baseUrl}/v1/forecast?latitude=${lat}&longitude=${lng}` +
+      '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max&forecast_days=3&timezone=auto';
+    const json = await this.getJson(url, signal);
+    const daily = isRecord(json.daily) ? json.daily : null;
+    const times = arr(daily?.time);
+    if (times.length === 0) throw new ProviderRequestError('open-meteo: 响应缺少 daily 数据', 0);
+    const codes = arr(daily?.weather_code);
+    const tmax = arr(daily?.temperature_2m_max);
+    const tmin = arr(daily?.temperature_2m_min);
+    const precip = arr(daily?.precipitation_sum);
+    const wind = arr(daily?.wind_speed_10m_max);
+    const periods: WeatherForecastPeriod[] = times.map((time, index) => ({
+      at: parseLocalIso(String(time), json.timezone, json.utc_offset_seconds).toISOString(),
+      condition: wmoCondition(num(codes[index])),
+      temperatureC: num(tmax[index]) ?? num(tmin[index]),
+      precipitationMm: num(precip[index]),
+      windKph: num(wind[index]),
+      periodKind: 'daily'
+    }));
+    return {
+      locationKey: weatherLocationKey(location),
+      generatedAt: new Date().toISOString(),
+      provider: this.name,
+      periods
     };
   }
 
@@ -136,8 +244,14 @@ export class OpenMeteoWeatherProvider {
   }
 }
 
-function num(value: number | string | null | undefined): number | undefined {
+function num(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** open-meteo daily arrays come back as arrays (or a bare value for count=1). */
+function arr(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  return value === null || value === undefined ? [] : [value];
 }
 
 /** open-meteo local clock time → ISO instant (with timezone/UTC-offset fallback). */
