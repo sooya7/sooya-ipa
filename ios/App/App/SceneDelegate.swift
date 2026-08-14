@@ -4,7 +4,7 @@ import Capacitor
 /// Capacitor 8 does not auto-register app-local CAPBridgedPlugin classes.
 /// Keep registration next to the bridge controller so every native launch has
 /// the same plugin surface before the web bundle starts bootstrapping LocalCore.
-final class SOOYABridgeViewController: CAPBridgeViewController {
+class SOOYABridgeViewController: CAPBridgeViewController {
     override open func capacitorDidLoad() {
         bridge?.registerPluginInstance(SOOYADatabasePlugin())
         bridge?.registerPluginInstance(SOOYASecretsPlugin())
