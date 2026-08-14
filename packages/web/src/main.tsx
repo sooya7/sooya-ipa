@@ -11,21 +11,48 @@ import { shouldRegisterPwaServiceWorker, isNativeSooya } from './local/nativeRun
 
 const container = document.getElementById('root');
 if (!container) throw new Error('root container missing');
+const root = createRoot(container);
 
-// Native (iPhone) installs LocalCore before the first render. This is
-// intentionally awaited: rendering once with the remote client would freeze
-// useChat's data-client choice for the lifetime of the page.
-const renderApp = () => createRoot(container).render(
+// Native (iPhone) must install the in-process LocalCore before React mounts.
+// Rendering the remote adapter after a native bootstrap failure creates a
+// half-alive app: chat reports a fake network outage, local avatars disappear,
+// and Moments/Admin fall through to HTTP routes that do not exist in the IPA.
+const renderApp = () => root.render(
   <StrictMode>
     <AppShell />
   </StrictMode>
 );
 
+const renderNativeStartupError = (error: unknown) => {
+  const detail = error instanceof Error && error.message ? error.message : '未知启动错误';
+  root.render(
+    <StrictMode>
+      <main className="gate" role="alert">
+        <div className="gate-card">
+          <h1>SOOYA</h1>
+          <p>本地核心启动失败</p>
+          <small>{detail}</small>
+          <button type="button" onClick={() => window.location.reload()}>重新启动</button>
+        </div>
+      </main>
+    </StrictMode>
+  );
+};
+
 if (isNativeSooya()) {
-  void import('./local/nativeBoot.js')
+  // Capacitor 8 requires local custom plugins to be registered in JS before
+  // the bridge proxies are consumed by nativeBoot.ts.
+  void import('./local/nativePluginRegistry.js')
+    .then(() => import('./local/nativeBoot.js'))
     .then(({ installNativeLocalCore }) => installNativeLocalCore())
-    .catch((error) => console.error('LocalCore bootstrap failed, falling back to remote API', error))
-    .finally(renderApp);
+    .then((installed) => {
+      if (!installed) throw new Error('Native LocalCore 未安装');
+      renderApp();
+    })
+    .catch((error) => {
+      console.error('LocalCore bootstrap failed', error);
+      renderNativeStartupError(error);
+    });
 } else {
   renderApp();
 }

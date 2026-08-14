@@ -39,7 +39,7 @@ jobs:
             --bundle packages/web/dist
             --out build/ota
             --release-id "$RELEASE_ID"
-            --native-min 5 --native-max 5
+            --native-min 6 --native-max 6
             --schema-min 46 --schema-max 46
             --bridge-capability database.sqlite
             --bridge-capability keychain.secrets
@@ -64,7 +64,7 @@ jobs:
           fi
           node scripts/build-ota.mjs "${ota_args[@]}"
           (cd build/ota && zip -qry ../bundle.zip bundle)
-          node --input-type=module -e "import { createHash } from 'node:crypto'; import { readFile, writeFile } from 'node:fs/promises'; const file = await readFile('build/bundle.zip'); const manifestPath = 'build/ota/ota-manifest.json'; const manifest = JSON.parse(await readFile(manifestPath, 'utf8')); manifest.bundle.zipSha256 = createHash('sha256').update(file).digest('hex'); await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\\n');"
+          node --input-type=module -e "import { createHash } from 'node:crypto'; import { readFile, writeFile } from 'node:fs/promises'; const file = await readFile('build/bundle.zip'); const manifestPath = 'build/ota/ota-manifest.json'; const manifest = JSON.parse(await readFile(manifestPath, 'utf8')); manifest.bundle.zipSha256 = createHash('sha256').update(file).digest('hex'); await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n');"
       - uses: actions/upload-artifact@v4
         with:
           name: sooya-ota-${{ github.sha }}
