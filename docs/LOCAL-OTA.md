@@ -24,8 +24,9 @@ Build a bundle only after typecheck and the web build pass:
 node scripts/build-ota.mjs \
   --bundle packages/web/dist \
   --out build/ota \
-  --release-id ota-20260813-01 \
-  --native-min 5 --native-max 5 \
+  --release-id ota-<git-sha> \
+  --bundle-url https://github.com/sooya7/sooya-ipa/releases/download/ota-bundle-<git-sha>/bundle.zip \
+  --native-min 10 --native-max 10 \
   --schema-min 46 --schema-max 46 \
   --bridge-capability database.sqlite \
   --bridge-capability keychain.secrets \
@@ -40,17 +41,24 @@ node scripts/build-ota.mjs \
 ```
 
 The manifest records every bundle file, SHA-256, byte count, native bridge
-range, schema range and required bridge capabilities. The app rejects a
-manifest outside those gates and records pending/last-good state through the
-native updater. A production host must publish the manifest and matching
-`bundle.zip` as static HTTPS files; the app only checks an explicitly stored
-`ota.manifestUrl` preference. The configured production endpoint is
-`https://sooya.icu/ota`, so the stable manifest is
-`https://sooya.icu/ota/stable.json`. CI signs the canonical manifest with
-Ed25519 when `OTA_PRIVATE_KEY` is configured and publishes immutable bundles
-plus `stable.json` when `OTA_PUBLISH_URL` and `OTA_PUBLISH_TOKEN` are
-configured. The server accepts authenticated PUTs only under `/ota/` and
-serves the resulting files over HTTPS.
+range, schema range, required bridge capabilities and the immutable bundle
+URL. The app rejects a manifest outside those gates and records pending/last-
+good state through the native updater. The bundle URL is part of the Ed25519
+signed payload, while `bundle.zipSha256` pins the exact downloadable zip.
+
+The production control-plane endpoint remains `https://sooya.icu/ota`, with
+`https://sooya.icu/ota/stable.json` as the stable manifest. Large OTA zip files
+are published as immutable GitHub Release assets under
+`ota-bundle-<git-sha>/bundle.zip`. The iPhone downloads the bundle directly
+from that HTTPS URL. Only the small signed manifest and stable pointer are PUT
+to `sooya.icu`, avoiding proxy/CDN request-duration limits for large bundle
+transfers.
+
+CI requires `OTA_PRIVATE_KEY`, `OTA_PUBLISH_URL` and `OTA_PUBLISH_TOKEN` for a
+production publish. A release asset is accepted only after its GitHub-reported
+byte count and SHA-256 digest match the bundle built by CI. The OTA server's
+legacy authenticated `/uploads/...` transport remains available for recovery,
+but it is not part of the normal publish path.
 
 ## Optional Ombre memory sync
 
