@@ -21,6 +21,7 @@ import { ToolRegistry, ToolPolicy } from '../tools/index.js';
 import type { ToolExecutionContext } from '../tools/registry.js';
 import type { ToolCallRuntime } from '../tools/tool-runtime.js';
 import { ReplyCoordinator } from './reply-coordinator.js';
+import { LocalMediaResolver } from './media-resolver.js';
 import { ContextBuilder } from './context-builder.js';
 import { SummaryBuilder } from './summary-builder.js';
 import { StickerAnalyzer } from './sticker-analyzer.js';
@@ -124,6 +125,9 @@ export class LocalCore implements LocalCoreApi {
   readonly voicesRepo: VoiceRepo;
   readonly metricsRepo: MetricsRepo;
   readonly mediaRepo: MediaRepo;
+  /** Logical-id → physical-location media store (builtin assets vs native
+   * UUID via rel_path); undefined only when no platform store was injected. */
+  readonly media: MediaPlatform | undefined;
   readonly events: LocalEmitter;
   readonly replies: ReplyCoordinator;
   readonly contextBuilder: ContextBuilder;
@@ -160,6 +164,7 @@ export class LocalCore implements LocalCoreApi {
     this.voicesRepo = new VoiceRepo(db, now);
     this.metricsRepo = new MetricsRepo(db, now);
     this.mediaRepo = new MediaRepo(db, now);
+    this.media = options.mediaStore ? new LocalMediaResolver(this.mediaRepo, options.mediaStore) : undefined;
     this.configuredProviders = options.http
       ? async () => (await import('../providers/builtin.js')).createConfiguredProviders(options.http!, this.configRepo)
       : undefined;
@@ -376,14 +381,14 @@ export class LocalCore implements LocalCoreApi {
   }
 
   async upload(files: UploadInputFile[], _options: { signal?: AbortSignal } = {}): Promise<{ media: MediaRef[]; failed: Array<{ filename: string; error: string; code?: string }> }> {
-    if (!this.options.mediaStore) {
+    if (!this.media) {
       return { media: [], failed: files.map((file) => ({ filename: file.name, error: 'media storage unavailable', code: 'no-media-store' })) };
     }
     const media: MediaRef[] = [];
     const failed: Array<{ filename: string; error: string; code?: string }> = [];
     for (const file of files) {
       try {
-        const saved = await this.options.mediaStore.save({
+        const saved = await this.media.save({
           kind: file.field === 'image' ? 'image' : 'file',
           name: file.name,
           mime: file.mime,
@@ -492,8 +497,8 @@ export class LocalCore implements LocalCoreApi {
 
   /** Runs one sticker through the vision analyzer; failure stays recorded on the sticker. */
   private async analyzeSticker(stickerId: string): Promise<void> {
-    if (!this.options.mediaStore) return;
-    const analyzer = new StickerAnalyzer(this.stickersRepo, this.options.mediaStore, () => this.visionProvider());
+    if (!this.media) return;
+    const analyzer = new StickerAnalyzer(this.stickersRepo, this.media, () => this.visionProvider());
     await analyzer.analyze(stickerId);
   }
 
@@ -626,10 +631,10 @@ export class LocalCore implements LocalCoreApi {
 
   /** Extracts text from an uploaded file and records it in media_text. */
   private async extractMediaText(mediaId: string): Promise<void> {
-    if (!this.options.mediaStore) return;
+    if (!this.media) return;
     const row = await this.mediaRepo.get(mediaId);
     if (!row) return;
-    const read = await this.options.mediaStore.read(mediaId).catch(() => null);
+    const read = await this.media.read(mediaId).catch(() => null);
     if (!read) {
       await this.mediaRepo.setExtractedText(mediaId, { status: 'failed', error: 'media_unavailable' });
       return;
@@ -902,8 +907,8 @@ export class LocalCore implements LocalCoreApi {
     }
     const localMediaData = route.match(/^\/api\/admin\/media\/([^/]+)\/data$/u)?.[1];
     if (localMediaData && method === 'GET') {
-      if (!this.options.mediaStore) throw new Error('native media storage is unavailable');
-      const value = await this.options.mediaStore.read(decodeURIComponent(localMediaData));
+      if (!this.media) throw new Error('native media storage is unavailable');
+      const value = await this.media.read(decodeURIComponent(localMediaData));
       if (!value) throw new Error('media not found');
       return { id: value.record.id, mime: value.record.mime, bytes: value.record.bytes, dataBase64: bytesToBase64(value.data) } as T;
     }
@@ -1075,7 +1080,7 @@ export class LocalCore implements LocalCoreApi {
     const meta = parseJsonRecord(row.meta_json);
     return {
       id: row.id, kind: row.kind, mime: row.mime, bytes: row.bytes, url: `local-media://${row.id}`, origin: row.origin,
-      exists: Boolean(this.options.mediaStore), createdAt: row.created_at, name: typeof meta.name === 'string' ? meta.name : null,
+      exists: Boolean(this.media), createdAt: row.created_at, name: typeof meta.name === 'string' ? meta.name : null,
       deletedAt: row.deleted_at, favorite: row.favorite === 1, tags: parseJsonArray(row.tags_json), animated: row.animated === 1,
       usageCount: references.total, references, avatar: meta.avatar === true
     };

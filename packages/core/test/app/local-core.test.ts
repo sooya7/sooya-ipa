@@ -220,6 +220,20 @@ describe('LocalCore', () => {
     expect(media[0]!.url).toBe(`media://${media[0]!.id}`);
   });
 
+  it('reads uploaded media back through the admin data route via its logical id', async () => {
+    const { media } = await core.upload([
+      { name: 'photo.jpg', mime: 'image/jpeg', bytes: new TextEncoder().encode('fake-jpeg'), field: 'image' }
+    ]);
+    const id = media[0]!.id;
+    expect(id.startsWith('media_')).toBe(true);
+
+    const data = await core.adminRequest<{ dataBase64: string; mime: string; bytes: number }>(`/api/admin/media/${encodeURIComponent(id)}/data`);
+    expect(data.mime).toBe('image/jpeg');
+    expect(data.bytes).toBe(9);
+    const bytes = Uint8Array.from(atob(data.dataBase64), (char) => char.charCodeAt(0));
+    expect(new TextDecoder().decode(bytes)).toBe('fake-jpeg');
+  });
+
   it('reports secret-based capability status', async () => {
     const empty = await core.capabilities();
     expect(empty.capabilities.chat!.configured).toBe(false);

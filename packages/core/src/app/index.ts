@@ -16,6 +16,8 @@ export { StickerAnalyzer, STICKER_ANALYSIS_VERSION } from './sticker-analyzer.js
 export type { StickerAnalysisResult } from './sticker-analyzer.js';
 export { LocalLifeCatchUp } from '../life/catch-up-service.js';
 export { MomentComposer } from '../moments/composer.js';
+export { LocalMediaResolver } from './media-resolver.js';
+export type { MediaLocationRow } from './media-resolver.js';
 export { SqliteLocalMemoryStore } from '../memory/local-store.js';
 export { rollbackBuiltinStickerImport, seedBuiltinStickersOnce } from './builtin-stickers.js';
 export type { BuiltinStickerImportResult, BuiltinStickerSeed } from './builtin-stickers.js';

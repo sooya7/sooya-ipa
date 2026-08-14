@@ -1,7 +1,6 @@
 import { Capacitor } from '@capacitor/core';
 import { LocalCore, SERVER_REFERENCE_IMAGES, installReplyFeatureRuntime, rollbackBuiltinStickerImport, seedBuiltinStickersOnce, seedServerPersonaOnce } from '@sooya/core/app';
-import { createConfiguredProviders } from '@sooya/core/providers';
-import type { LocalDatabase, DatabaseValue, DatabaseIntegrityResult, DatabaseBackupResult, RunResult } from '@sooya/core/platform';
+import { createConfiguredProviders } from '@sooya/core/providers';import type { LocalDatabase, DatabaseValue, DatabaseIntegrityResult, DatabaseBackupResult, RunResult } from '@sooya/core/platform';
 import type { SecretsPlatform } from '@sooya/core/platform';
 import type { MediaPlatform, MediaRecord, MediaSaveRequest } from '@sooya/core/platform';
 import type { HttpPlatform, HttpRequest, HttpResponse, HttpResponseHead } from '@sooya/core/platform';
@@ -182,7 +181,7 @@ export async function installNativeLocalCore(): Promise<boolean> {
   const core = new LocalCore({ db, secrets, mediaStore, http, mcp: new CapacitorMcp(), toolRegistry: registry, toolPolicy: policy, toolRuntime: runtime });
   await seedServerPersonaOnce(core.settingsRepo);
   installReplyFeatureRuntime({
-    media: mediaStore,
+    media: core.media!,
     stickers: core.stickersRepo,
     imageProvider: async () => (await createConfiguredProviders(http, core.configRepo)).image,
     ttsProvider: async () => (await createConfiguredProviders(http, core.configRepo)).tts,
