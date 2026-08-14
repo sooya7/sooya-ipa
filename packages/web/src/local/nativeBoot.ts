@@ -1,5 +1,6 @@
 import { Capacitor } from '@capacitor/core';
-import { LocalCore, rollbackBuiltinStickerImport, seedBuiltinStickersOnce, seedServerPersonaOnce } from '@sooya/core/app';
+import { LocalCore, SERVER_REFERENCE_IMAGES, installReplyFeatureRuntime, rollbackBuiltinStickerImport, seedBuiltinStickersOnce, seedServerPersonaOnce } from '@sooya/core/app';
+import { createConfiguredProviders } from '@sooya/core/providers';
 import type { LocalDatabase, DatabaseValue, DatabaseIntegrityResult, DatabaseBackupResult, RunResult } from '@sooya/core/platform';
 import type { SecretsPlatform } from '@sooya/core/platform';
 import type { MediaPlatform, MediaRecord, MediaSaveRequest } from '@sooya/core/platform';
@@ -14,16 +15,7 @@ import { probeNotificationCapabilities } from './notificationCapabilities.js';
 import { prepareOtaUpdater, type LocalOtaUpdater, type NativeReleaseInfo } from './otaUpdater.js';
 import { BUILTIN_STICKERS, BuiltinStickerMedia, afterAppReady } from './builtinStickers.js';
 
-/**
- * Native bootstrap: wires the Capacitor Swift plugins into LocalCore and
- * installs it as the active SooyaClient. Browser/PWA never calls this — they
- * keep the remote API adapter.
- */
-
-interface NativePluginCall {
-  call<T = Record<string, unknown>>(method: string, options: Record<string, unknown>): Promise<T>;
-}
-
+interface NativePluginCall { call<T = Record<string, unknown>>(method: string, options: Record<string, unknown>): Promise<T>; }
 type TransactionOperation = { type: 'execute' | 'run' | 'query'; sql: string; values?: DatabaseValue[] };
 type NativeDatabaseValue = string | number | boolean | null | { type: 'blob'; base64: string } | { type: 'int64'; value: string };
 type NativeTransactionStatement = { type: TransactionOperation['type']; sql: string; values: NativeDatabaseValue[] };
@@ -45,20 +37,15 @@ export async function getNativeReleaseInfo(): Promise<NativeReleaseInfo> {
   return value;
 }
 
-/** LocalDatabase adapter over SOOYADatabasePlugin (Swift + SQLite C API). */
 export class CapacitorDatabase implements LocalDatabase {
   private readonly plugin = nativePlugin('SOOYADatabase');
-
   async open(): Promise<void> { await this.plugin.call('open', {}); }
   async close(): Promise<void> { await this.plugin.call('close', {}); }
   async execute(sql: string): Promise<void> { await this.plugin.call('execute', { sql }); }
   async run(sql: string, values: DatabaseValue[] = []): Promise<RunResult> {
     const result = await this.plugin.call<{ changes?: number; lastInsertRowId?: unknown }>('run', { sql, values: normalizeValues(values) });
     const lastInsertRowid = decodeNativeDatabaseValue(result.lastInsertRowId);
-    return {
-      changes: typeof result.changes === 'number' ? result.changes : 0,
-      ...(typeof lastInsertRowid === 'number' || typeof lastInsertRowid === 'bigint' ? { lastInsertRowid } : {})
-    };
+    return { changes: typeof result.changes === 'number' ? result.changes : 0, ...(typeof lastInsertRowid === 'number' || typeof lastInsertRowid === 'bigint' ? { lastInsertRowid } : {}) };
   }
   async query<T = Record<string, unknown>>(sql: string, values: DatabaseValue[] = []): Promise<T[]> {
     const result = await this.plugin.call<{ rows?: unknown[] }>('query', { sql, values: normalizeValues(values) });
@@ -73,40 +60,24 @@ export class CapacitorDatabase implements LocalDatabase {
   async integrityCheck(): Promise<DatabaseIntegrityResult> {
     const result = await this.plugin.call<{ ok?: boolean; messages?: unknown[]; foreignKeyViolations?: number }>('integrity', {});
     const count = Number.isSafeInteger(result.foreignKeyViolations) && (result.foreignKeyViolations ?? 0) > 0 ? result.foreignKeyViolations! : 0;
-    return {
-      ok: result.ok === true,
-      integrity: Array.isArray(result.messages) ? result.messages.filter((value): value is string => typeof value === 'string') : [],
-      foreignKeys: Array.from({ length: count }, () => ({}))
-    };
+    return { ok: result.ok === true, integrity: Array.isArray(result.messages) ? result.messages.filter((value): value is string => typeof value === 'string') : [], foreignKeys: Array.from({ length: count }, () => ({})) };
   }
   async backup(name: string): Promise<DatabaseBackupResult> { return await this.plugin.call<DatabaseBackupResult>('backup', { name }); }
   async restore(name: string): Promise<void> { await this.plugin.call('restore', { name }); }
 }
 
-/** SecretsPlatform over SOOYASecretsPlugin (Keychain, no raw get for JS). */
 export class CapacitorSecrets implements SecretsPlatform {
   private readonly plugin = nativePlugin('SOOYASecrets');
-
-  async get(key: string): Promise<string | null> {
-    const result = await this.plugin.call<{ present: boolean }>('has', { key });
-    return result.present ? '' : null;
-  }
+  async get(key: string): Promise<string | null> { const result = await this.plugin.call<{ present: boolean }>('has', { key }); return result.present ? '' : null; }
   async set(key: string, value: string): Promise<void> { await this.plugin.call('set', { key, value }); }
   async remove(key: string): Promise<void> { await this.plugin.call('delete', { key }); }
 }
 
-/** MediaPlatform over SOOYAMediaPlugin (app-sandbox binary store). */
 export class CapacitorMedia implements MediaPlatform {
   private readonly plugin = nativePlugin('SOOYAMedia');
-
   async save(request: MediaSaveRequest): Promise<MediaRecord> {
     const bytes = request.data instanceof Uint8Array ? request.data : new Uint8Array(request.data);
-    const result = await this.plugin.call<Record<string, unknown>>('save', {
-      kind: request.kind,
-      mimeType: request.mime ?? 'application/octet-stream',
-      name: request.name ?? null,
-      dataBase64: bytesToBase64(bytes)
-    });
+    const result = await this.plugin.call<Record<string, unknown>>('save', { kind: request.kind, mimeType: request.mime ?? 'application/octet-stream', name: request.name ?? null, dataBase64: bytesToBase64(bytes) });
     return nativeMediaRecord(result, request.kind, request.name);
   }
   async read(id: string): Promise<{ record: MediaRecord; data: Uint8Array } | null> {
@@ -119,54 +90,34 @@ export class CapacitorMedia implements MediaPlatform {
       throw error;
     }
   }
-  async remove(id: string): Promise<boolean> {
-    return await this.plugin.call<{ deleted?: boolean }>('delete', { id }).then((r) => r.deleted === true);
-  }
+  async remove(id: string): Promise<boolean> { return await this.plugin.call<{ deleted?: boolean }>('delete', { id }).then((result) => result.deleted === true); }
 }
 
-/** Native HTTP adapter. Secret references are forwarded as opaque names; the
- * Swift bridge resolves the value from Keychain immediately before sending. */
 export class CapacitorHttp implements HttpPlatform {
   private readonly plugin = nativePlugin('SOOYAHttp');
-
   async request(request: HttpRequest): Promise<HttpResponse> {
     if (request.signal?.aborted) throw request.signal.reason ?? new Error('HTTP request aborted');
     const id = `http_${crypto.randomUUID()}`;
     const body = request.body === undefined ? {} : request.body instanceof Uint8Array || request.body instanceof ArrayBuffer
       ? { bodyBase64: bytesToBase64(request.body instanceof Uint8Array ? request.body : new Uint8Array(request.body)) }
       : { bodyText: request.body };
-    const options = {
-      id, url: request.url, method: request.method ?? 'GET', headers: request.headers ?? {}, timeoutMs: request.timeoutMs ?? 30_000,
-      ...body,
-      ...(request.secretRef ? { secretRef: request.secretRef, secretHeader: request.secretHeader, secretPrefix: request.secretPrefix } : {})
-    };
+    const options = { id, url: request.url, method: request.method ?? 'GET', headers: request.headers ?? {}, timeoutMs: request.timeoutMs ?? 30_000, ...body, ...(request.secretRef ? { secretRef: request.secretRef, secretHeader: request.secretHeader, secretPrefix: request.secretPrefix } : {}) };
     let settled = false;
     let abortListener: (() => void) | undefined;
     const result = await new Promise<{ status: number; headers: Record<string, string>; dataBase64: string }>((resolve, reject) => {
       const finish = (error?: Error, value?: { status: number; headers: Record<string, string>; dataBase64: string }) => {
-        if (settled) return;
-        settled = true;
-        if (abortListener) request.signal?.removeEventListener('abort', abortListener);
-        if (error) reject(error); else resolve(value!);
+        if (settled) return; settled = true; if (abortListener) request.signal?.removeEventListener('abort', abortListener); if (error) reject(error); else resolve(value!);
       };
-      abortListener = () => {
-        void this.plugin.call('cancel', { id }).catch(() => undefined);
-        finish(request.signal?.reason instanceof Error ? request.signal.reason : new Error('HTTP request aborted'));
-      };
+      abortListener = () => { void this.plugin.call('cancel', { id }).catch(() => undefined); finish(request.signal?.reason instanceof Error ? request.signal.reason : new Error('HTTP request aborted')); };
       request.signal?.addEventListener('abort', abortListener, { once: true });
       this.plugin.call<typeof result>('request', options).then((value) => finish(undefined, value), (error) => finish(error instanceof Error ? error : new Error(String(error))));
     });
     return { status: result.status, headers: result.headers ?? {}, body: base64ToBytes(result.dataBase64) };
   }
-
   async stream(request: HttpRequest, onChunk: (chunk: Uint8Array) => void): Promise<HttpResponseHead> {
     if (request.signal?.aborted) throw request.signal.reason ?? new Error('HTTP stream aborted');
     const streamPlugin = (this.plugin as unknown as { stream?: (options: Record<string, unknown>, callback: (value: unknown, error?: { message?: string }) => void) => unknown }).stream;
-    if (!streamPlugin) {
-      const response = await this.request(request);
-      if (response.body.length) onChunk(response.body);
-      return { status: response.status, headers: response.headers };
-    }
+    if (!streamPlugin) { const response = await this.request(request); if (response.body.length) onChunk(response.body); return { status: response.status, headers: response.headers }; }
     const id = `http_${crypto.randomUUID()}`;
     const body = request.body === undefined ? {} : request.body instanceof Uint8Array || request.body instanceof ArrayBuffer
       ? { bodyBase64: bytesToBase64(request.body instanceof Uint8Array ? request.body : new Uint8Array(request.body)) }
@@ -174,71 +125,40 @@ export class CapacitorHttp implements HttpPlatform {
     let head: HttpResponseHead | undefined;
     let settled = false;
     let abortListener: (() => void) | undefined;
-    const abort = async () => {
-      if (settled) return;
-      await this.plugin.call('cancel', { id }).catch(() => undefined);
-    };
-    const promise = new Promise<HttpResponseHead>((resolve, reject) => {
-      const finish = (error?: Error) => {
-        if (settled) return;
-        settled = true;
-        if (abortListener) request.signal?.removeEventListener('abort', abortListener);
-        if (error) reject(error); else if (head) resolve(head); else reject(new Error('native HTTP stream returned no headers'));
-      };
+    const abort = async () => { if (!settled) await this.plugin.call('cancel', { id }).catch(() => undefined); };
+    return await new Promise<HttpResponseHead>((resolve, reject) => {
+      const finish = (error?: Error) => { if (settled) return; settled = true; if (abortListener) request.signal?.removeEventListener('abort', abortListener); if (error) reject(error); else if (head) resolve(head); else reject(new Error('native HTTP stream returned no headers')); };
       const callback = (value: unknown, error?: { message?: string }) => {
         if (error) { finish(new Error(error.message ?? 'native HTTP stream failed')); return; }
         if (!isRecordValue(value)) return;
-        if (value.type === 'headers') {
-          head = { status: typeof value.status === 'number' ? value.status : 0, headers: isRecordValue(value.headers) ? value.headers as Record<string, string> : {} };
-        } else if (value.type === 'chunk' && typeof value.dataBase64 === 'string') {
-          onChunk(base64ToBytes(value.dataBase64));
-        } else if (value.type === 'sse') {
-          const event = typeof value.event === 'string' ? `event: ${value.event}\n` : '';
-          const data = typeof value.data === 'string' ? value.data.split('\n').map((line) => `data: ${line}\n`).join('') : '';
-          onChunk(new TextEncoder().encode(`${event}${data}\n`));
-        } else if (value.type === 'complete') finish();
+        if (value.type === 'headers') head = { status: typeof value.status === 'number' ? value.status : 0, headers: isRecordValue(value.headers) ? value.headers as Record<string, string> : {} };
+        else if (value.type === 'chunk' && typeof value.dataBase64 === 'string') onChunk(base64ToBytes(value.dataBase64));
+        else if (value.type === 'sse') { const event = typeof value.event === 'string' ? `event: ${value.event}\n` : ''; const data = typeof value.data === 'string' ? value.data.split('\n').map((line) => `data: ${line}\n`).join('') : ''; onChunk(new TextEncoder().encode(`${event}${data}\n`)); }
+        else if (value.type === 'complete') finish();
       };
-      if (request.signal) {
-        abortListener = () => { void abort(); finish(request.signal?.reason instanceof Error ? request.signal.reason : new Error('HTTP stream aborted')); };
-        request.signal.addEventListener('abort', abortListener, { once: true });
-      }
-      try {
-        streamPlugin.call(this.plugin, {
-          id, url: request.url, method: request.method ?? 'GET', headers: request.headers ?? {}, timeoutMs: request.timeoutMs ?? 30_000,
-          ...body,
-          ...(request.secretRef ? { secretRef: request.secretRef, secretHeader: request.secretHeader, secretPrefix: request.secretPrefix } : {})
-        }, callback);
-      } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
+      if (request.signal) { abortListener = () => { void abort(); finish(request.signal?.reason instanceof Error ? request.signal.reason : new Error('HTTP stream aborted')); }; request.signal.addEventListener('abort', abortListener, { once: true }); }
+      try { streamPlugin.call(this.plugin, { id, url: request.url, method: request.method ?? 'GET', headers: request.headers ?? {}, timeoutMs: request.timeoutMs ?? 30_000, ...body, ...(request.secretRef ? { secretRef: request.secretRef, secretHeader: request.secretHeader, secretPrefix: request.secretPrefix } : {}) }, callback); }
+      catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
     });
-    return await promise;
   }
 }
 
 export class CapacitorMcp implements McpPlatform {
   private readonly plugin = nativePlugin('SOOYAMcp');
-
   async connect(config: McpServerConfig): Promise<McpConnectionState> {
-    const result = await this.plugin.call<{ serverId: string; mode?: string }>('connect', {
-      serverId: config.id, url: config.url, transport: config.transport, timeoutMs: config.connectTimeoutMs ?? 30_000,
-      authType: config.secretKey ? 'bearer' : 'none', ...(config.secretKey ? { tokenRef: config.secretKey } : {})
-    });
+    const result = await this.plugin.call<{ serverId: string; mode?: string }>('connect', { serverId: config.id, url: config.url, transport: config.transport, timeoutMs: config.connectTimeoutMs ?? 30_000, authType: config.secretKey ? 'bearer' : 'none', ...(config.secretKey ? { tokenRef: config.secretKey } : {}) });
     return { serverId: result.serverId ?? config.id, state: 'ready', toolCount: 0, detail: result.mode };
   }
-
   async disconnect(serverId: string): Promise<void> { await this.plugin.call('disconnect', { serverId }); }
-
   async listTools(serverId: string): Promise<McpTool[]> {
     const result = await this.plugin.call<{ tools: Array<Record<string, unknown>> }>('listTools', { serverId });
     return (result.tools ?? []).flatMap((tool) => typeof tool.name === 'string' ? [{ name: tool.name, description: typeof tool.description === 'string' ? tool.description : undefined, inputSchema: isRecordValue(tool.inputSchema) ? tool.inputSchema : { type: 'object' }, annotations: isRecordValue(tool.annotations) ? tool.annotations : undefined }] : []);
   }
-
   async callTool(serverId: string, name: string, arguments_: Record<string, unknown>, signal?: AbortSignal): Promise<McpToolCallResult> {
     if (signal?.aborted) throw signal.reason ?? new Error('MCP call aborted');
-    const result = await this.plugin.call<McpToolCallResult>('callTool', { serverId, name, arguments: arguments_ });
-    return result;
+    return await this.plugin.call<McpToolCallResult>('callTool', { serverId, name, arguments: arguments_ });
   }
-
-  async close(): Promise<void> { /* Individual servers are closed by admin/remove or app teardown. */ }
+  async close(): Promise<void> { /* individual servers are closed separately */ }
 }
 
 let nativeOtaUpdater: LocalOtaUpdater | null = null;
@@ -246,7 +166,6 @@ let nativeOtaCore: LocalCore | null = null;
 let nativeOtaReady: Promise<void> | null = null;
 let nativeBuiltinMedia: BuiltinStickerMedia | null = null;
 
-/** Idempotent native bootstrap. Returns true when LocalCore was installed. */
 export async function installNativeLocalCore(): Promise<boolean> {
   if (!Capacitor.isNativePlatform()) return false;
   const db = new CapacitorDatabase();
@@ -255,24 +174,29 @@ export async function installNativeLocalCore(): Promise<boolean> {
   const registry = new ToolRegistry();
   const policy = new ToolPolicy(registry);
   const runtime = new ToolCallRuntime({ registry, policy });
-  const mediaStore = new BuiltinStickerMedia(new CapacitorMedia());
+  const nativeMedia = new CapacitorMedia();
+  const mediaStore = new BuiltinStickerMedia(nativeMedia);
+  const secrets = new CapacitorSecrets();
+  const http = new CapacitorHttp();
   nativeBuiltinMedia = mediaStore;
-  const core = new LocalCore({ db, secrets: new CapacitorSecrets(), mediaStore, http: new CapacitorHttp(), mcp: new CapacitorMcp(), toolRegistry: registry, toolPolicy: policy, toolRuntime: runtime });
+  const core = new LocalCore({ db, secrets, mediaStore, http, mcp: new CapacitorMcp(), toolRegistry: registry, toolPolicy: policy, toolRuntime: runtime });
   await seedServerPersonaOnce(core.settingsRepo);
+  installReplyFeatureRuntime({
+    media: mediaStore,
+    stickers: core.stickersRepo,
+    imageProvider: async () => (await createConfiguredProviders(http, core.configRepo)).image,
+    ttsProvider: async () => (await createConfiguredProviders(http, core.configRepo)).tts,
+    referenceImages: loadServerReferenceImages
+  });
   installSooyaClient(new LocalSooyaClient(core, (id) => mediaStore.assetUrl(id)));
   void probeNotificationCapabilities(core);
   nativeOtaCore = core;
   void wireNativeLifecycle(core).catch((error) => console.warn('Native lifecycle wiring is unavailable', error));
-  try {
-    nativeOtaUpdater = await prepareOtaUpdater(core, await getNativeReleaseInfo());
-  } catch (error) {
-    nativeOtaUpdater = null;
-    console.warn('OTA updater is unavailable; LocalCore will continue without OTA', error);
-  }
+  try { nativeOtaUpdater = await prepareOtaUpdater(core, await getNativeReleaseInfo()); }
+  catch (error) { nativeOtaUpdater = null; console.warn('OTA updater is unavailable; LocalCore will continue without OTA', error); }
   return true;
 }
 
-/** Called by the mounted React shell; safe to call repeatedly under StrictMode. */
 export async function notifyNativeAppReady(): Promise<void> {
   if (!nativeOtaCore || !nativeBuiltinMedia) return;
   nativeOtaReady ??= (async () => {
@@ -291,26 +215,24 @@ export async function notifyNativeAppReady(): Promise<void> {
   await nativeOtaReady;
 }
 
-/**
- * Native lifecycle wiring: app-state transitions drive LocalCore foreground/
- * background handling; keyboard insets are published as the CSS variable the
- * stylesheet consumes. All imports are lazy — browsers never execute this.
- */
+async function loadServerReferenceImages(): Promise<Array<{ data: Uint8Array; mime: string }>> {
+  const images: Array<{ data: Uint8Array; mime: string }> = [];
+  for (const path of SERVER_REFERENCE_IMAGES) {
+    try {
+      const response = await fetch(path, { cache: 'force-cache' });
+      if (!response.ok) continue;
+      const mime = response.headers.get('content-type')?.split(';')[0]?.trim() || 'image/png';
+      images.push({ data: new Uint8Array(await response.arrayBuffer()), mime });
+    } catch { /* a missing optional reference does not break chat */ }
+  }
+  return images;
+}
+
 async function wireNativeLifecycle(core: LocalCore): Promise<void> {
-  const [{ App }, { Keyboard }] = await Promise.all([
-    import('@capacitor/app'),
-    import('@capacitor/keyboard')
-  ]);
-  await App.addListener('appStateChange', ({ isActive }) => {
-    if (isActive) void core.onAppActive();
-    else void core.onAppInactive();
-  });
-  await Keyboard.addListener('keyboardWillShow', (info) => {
-    document.documentElement.style.setProperty('--sooya-keyboard-height', `${info.keyboardHeight}px`);
-  });
-  await Keyboard.addListener('keyboardWillHide', () => {
-    document.documentElement.style.setProperty('--sooya-keyboard-height', '0px');
-  });
+  const [{ App }, { Keyboard }] = await Promise.all([import('@capacitor/app'), import('@capacitor/keyboard')]);
+  await App.addListener('appStateChange', ({ isActive }) => { if (isActive) void core.onAppActive(); else void core.onAppInactive(); });
+  await Keyboard.addListener('keyboardWillShow', (info) => { document.documentElement.style.setProperty('--sooya-keyboard-height', `${info.keyboardHeight}px`); });
+  await Keyboard.addListener('keyboardWillHide', () => { document.documentElement.style.setProperty('--sooya-keyboard-height', '0px'); });
 }
 
 function normalizeValues(values: DatabaseValue[]): NativeDatabaseValue[] {
@@ -321,66 +243,32 @@ function normalizeValues(values: DatabaseValue[]): NativeDatabaseValue[] {
     return value;
   });
 }
-
 function decodeNativeDatabaseValue(value: unknown): unknown {
   if (!isRecordValue(value) || typeof value.type !== 'string') return value;
   if (value.type === 'blob' && typeof value.base64 === 'string') return base64ToBytes(value.base64);
   if (value.type === 'int64' && typeof value.value === 'string' && /^-?\d+$/u.test(value.value)) return BigInt(value.value);
   return value;
 }
-
 function decodeNativeDatabaseRow<T>(value: unknown): T {
   if (!isRecordValue(value)) throw new Error('native database query returned a non-object row');
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, decodeNativeDatabaseValue(item)])) as T;
 }
-
 function decodeNativeTransactionResult(value: unknown): unknown {
   if (!isRecordValue(value)) return value;
   if (Array.isArray(value.rows)) return value.rows.map((row) => decodeNativeDatabaseRow<Record<string, unknown>>(row));
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, decodeNativeDatabaseValue(item)]));
 }
-
 function nativeMediaRecord(value: Record<string, unknown>, fallbackKind?: MediaRecord['kind'], fallbackName?: string): MediaRecord {
   const id = typeof value.id === 'string' ? value.id : '';
   const mime = typeof value.mimeType === 'string' ? value.mimeType : 'application/octet-stream';
   const bytes = typeof value.bytes === 'number' ? value.bytes : 0;
   if (!id) throw new Error('native media metadata is missing id');
   const rawKind = typeof value.kind === 'string' ? value.kind : undefined;
-  const kind: MediaRecord['kind'] = rawKind === 'image' || rawKind === 'audio' || rawKind === 'sticker' || rawKind === 'file'
-    ? rawKind
-    : fallbackKind ?? inferMediaKind(mime);
+  const kind: MediaRecord['kind'] = rawKind === 'image' || rawKind === 'audio' || rawKind === 'sticker' || rawKind === 'file' ? rawKind : fallbackKind ?? inferMediaKind(mime);
   const name = typeof value.originalName === 'string' ? value.originalName : fallbackName;
-  return {
-    id, kind, mime, bytes,
-    ...(name ? { name } : {}),
-    ...(typeof value.width === 'number' ? { width: value.width } : {}),
-    ...(typeof value.height === 'number' ? { height: value.height } : {}),
-    ...(typeof value.durationSeconds === 'number' ? { durationSec: value.durationSeconds } : {})
-  };
+  return { id, kind, mime, bytes, ...(name ? { name } : {}), ...(typeof value.width === 'number' ? { width: value.width } : {}), ...(typeof value.height === 'number' ? { height: value.height } : {}), ...(typeof value.durationSeconds === 'number' ? { durationSec: value.durationSeconds } : {}) };
 }
-
-function inferMediaKind(mime: string): MediaRecord['kind'] {
-  if (mime.startsWith('image/')) return 'image';
-  if (mime.startsWith('audio/')) return 'audio';
-  return 'file';
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
-}
-
-function base64ToBytes(base64: string): Uint8Array {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
-
-function isRecordValue(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
+function inferMediaKind(mime: string): MediaRecord['kind'] { if (mime.startsWith('image/')) return 'image'; if (mime.startsWith('audio/')) return 'audio'; return 'file'; }
+function bytesToBase64(bytes: Uint8Array): string { let binary = ''; const chunk = 0x8000; for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk)); return btoa(binary); }
+function base64ToBytes(base64: string): Uint8Array { const binary = atob(base64); const bytes = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i); return bytes; }
+function isRecordValue(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
