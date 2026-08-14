@@ -1,9 +1,9 @@
 /* Native top safe-area: the installed WebView does NOT reliably lay content
  * out below the status bar / Dynamic Island on iPhone, so the old approach of
- * forcing --sooya-safe-top: 0px made headers collide with the system UI.
+ * forcing the safe-top variable to 0px made headers collide with the system UI.
  *
- * One variable rules everywhere: every fixed top element reads
- * --sooya-safe-top (defined in styles.css as env(safe-area-inset-top)).
+ * One variable rules everywhere: every fixed top element reads the
+ * --sooya-safe-top variable (defined in styles.css as env(safe-area-inset-top)).
  * Here we only guarantee a conservative portrait fallback when the WebView
  * reports no inset at all (missing viewport-fit=cover), and zero it out in
  * landscape where the notch moves to the side. Bottom insets stay untouched:
