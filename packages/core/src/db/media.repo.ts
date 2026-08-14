@@ -65,6 +65,28 @@ const AVATAR_META = `json_extract(CASE WHEN json_valid(m.meta_json) THEN m.meta_
 export class MediaRepo {
   constructor(private readonly db: LocalDatabase, private readonly now: () => Date = () => new Date()) {}
 
+  /** Persists the media text-extraction result; upserts by media id. */
+  async setExtractedText(mediaId: string, input: { status: 'pending' | 'ready' | 'failed' | 'unsupported'; text?: string | null; error?: string | null; metadata?: Record<string, unknown> }): Promise<void> {
+    await this.db.run(
+      `INSERT INTO media_text(media_id,status,text,metadata_json,error,updated_at) VALUES(?,?,?,?,?,?)
+       ON CONFLICT(media_id) DO UPDATE SET status=excluded.status,text=excluded.text,metadata_json=excluded.metadata_json,error=excluded.error,updated_at=excluded.updated_at`,
+      [mediaId, input.status, input.text ?? null, JSON.stringify(input.metadata ?? {}), input.error ?? null, nowIso(this.now)]
+    );
+  }
+
+  async getExtractedText(mediaId: string): Promise<{ status: string; text: string | null; error: string | null; updatedAt: string } | undefined> {
+    return await queryOne<{ status: string; text: string | null; error: string | null; updated_at: string }>(
+      this.db, 'SELECT status,text,error,updated_at FROM media_text WHERE media_id = ?', [mediaId]
+    ).then((row) => row ? { status: row.status, text: row.text, error: row.error, updatedAt: row.updated_at } : undefined);
+  }
+
+  async pendingTextExtractions(limit = 200): Promise<MediaRow[]> {
+    return await this.db.query<MediaRow>(
+      `SELECT m.* FROM media m LEFT JOIN media_text t ON t.media_id = m.id
+       WHERE m.kind='file' AND m.deleted_at IS NULL AND (t.media_id IS NULL OR t.status='pending')
+       ORDER BY m.created_at DESC LIMIT ?`, [Math.max(1, Math.min(500, Math.trunc(limit)))]);
+  }
+
   async create(input: CreateMediaInput): Promise<MediaRow> {
     const row: MediaRow = {
       id: input.id ?? newId('media'),
