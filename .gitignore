@@ -24,4 +24,5 @@ playwright-report/
 ios/App/App/public/
 ios/App/Pods/
 ios/App/DerivedData/
+packages/web/public/reference-images/
 
