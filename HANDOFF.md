@@ -46,6 +46,7 @@ SOOYA 有两个仓库,职责分离:
 - **记忆管理一致性**:旧 schema 的 catalog fallback 对未变化条目不重复重写；Admin/Hybrid delete 与 clear 通过单次 SQLite transaction 同时提交本地 inactive、tombstone、forget outbox 和 sync state，失败时整体回滚
 - **旧 Ombre 兼容**:自动识别 `memory.*`、`breath_search`、`hold` 等工具；没有 delta 工具时退回 catalog 映射，不阻塞本地运行
 - **CI 约束**:Native Base 冻结守卫、Node 22 核心测试、Web 570 测试、migration-tools 11 测试、typecheck/build、unsigned IPA workflow 均已接入
+- **原生页面与内置表情修复**:Capacitor `capacitor://localhost` 同源导航由 App Router 接管，动态/管理不再触发整页跳转；本地 Admin bridge 不要求 Web 管理令牌；线上服务器 244 个已启用表情及语义元数据按 SHA256 校验后随 IPA 打包，升级时一次性幂等登记、媒体直接从只读包内 URL 加载，之后尊重用户修改与删除。登记纳入 OTA 健康确认：确认失败只回滚本轮新增记录；表情目录使用权威查询与 cursor 分页，不受 bootstrap 8 条预览限制。
 
 ### ⏳ 当前发布状态
 1. `agent/final-native-base-3` / PR3 已合并到 `main`，包含 Native Base 3、只读 `SOOYAReleasePlugin` 和固化 Ed25519 OTA 公钥。
@@ -118,7 +119,7 @@ npm run build               # web → packages/web/dist
 node scripts/patch-xcode-project.mjs   # iOS 插件接线(幂等)
 ```
 
-本轮本地复验实际结果：Core `94/94`、Web `570/570`、migration-tools `11/11` 全绿；测试使用 Node 22 与 `TZ=UTC`，与 CI 的 Node 22 约束一致。Web 全量采用单文件串行参数验证；默认并行模式仍有已知 `MessageItem` 测试隔离 flake（详见 §4）。
+本轮本地复验实际结果：Core `99/99`、Web `585/585`、migration-tools `11/11` 全绿；测试使用 Node 22，与 CI 的 Node 22 约束一致。另已验证 244 个内置表情逐文件 SHA256/字节数与线上清单一致，生产构建产物包含全部 244 个文件且可经 HTTP 正常读取。
 
 CI(推送后自动):`ci.yml`(5 job)+ `ios-build.yml`(macOS unsigned IPA)+ PR3 OTA 信任根校验。
 

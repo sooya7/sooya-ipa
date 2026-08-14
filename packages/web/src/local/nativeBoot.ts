@@ -1,5 +1,5 @@
 import { Capacitor } from '@capacitor/core';
-import { LocalCore } from '@sooya/core/app';
+import { LocalCore, rollbackBuiltinStickerImport, seedBuiltinStickersOnce } from '@sooya/core/app';
 import type { LocalDatabase, DatabaseValue, DatabaseIntegrityResult, DatabaseBackupResult, RunResult } from '@sooya/core/platform';
 import type { SecretsPlatform } from '@sooya/core/platform';
 import type { MediaPlatform, MediaRecord, MediaSaveRequest } from '@sooya/core/platform';
@@ -12,6 +12,7 @@ import { installSooyaClient } from '../lib/sooyaClient.js';
 import { LocalSooyaClient } from './LocalSooyaClient.js';
 import { probeNotificationCapabilities } from './notificationCapabilities.js';
 import { prepareOtaUpdater, type LocalOtaUpdater, type NativeReleaseInfo } from './otaUpdater.js';
+import { BUILTIN_STICKERS, BuiltinStickerMedia, afterAppReady } from './builtinStickers.js';
 
 /**
  * Native bootstrap: wires the Capacitor Swift plugins into LocalCore and
@@ -21,6 +22,12 @@ import { prepareOtaUpdater, type LocalOtaUpdater, type NativeReleaseInfo } from 
 
 interface NativePluginCall {
   call<T = Record<string, unknown>>(method: string, options: Record<string, unknown>): Promise<T>;
+}
+
+type TransactionOperation = { type: 'execute' | 'run' | 'query'; sql: string; values?: DatabaseValue[] };
+
+export function databaseTransactionCallOptions(operations: TransactionOperation[]): { statements: TransactionOperation[] } {
+  return { statements: operations.map((op) => ({ ...op, values: normalizeValues(op.values ?? []) })) };
 }
 
 function nativePlugin(name: string): NativePluginCall {
@@ -49,10 +56,8 @@ export class CapacitorDatabase implements LocalDatabase {
   async query<T = Record<string, unknown>>(sql: string, values: DatabaseValue[] = []): Promise<T[]> {
     return await this.plugin.call<T[]>('query', { sql, values: normalizeValues(values) });
   }
-  async transaction<T = unknown[]>(operations: Array<{ type: 'execute' | 'run' | 'query'; sql: string; values?: DatabaseValue[] }>): Promise<T> {
-    return await this.plugin.call<T>('transaction', {
-      operations: operations.map((op) => ({ ...op, values: normalizeValues(op.values ?? []) }))
-    });
+  async transaction<T = unknown[]>(operations: TransactionOperation[]): Promise<T> {
+    return await this.plugin.call<T>('transaction', databaseTransactionCallOptions(operations));
   }
   async integrityCheck(): Promise<DatabaseIntegrityResult> {
     return await this.plugin.call<DatabaseIntegrityResult>('integrity', {});
@@ -217,6 +222,7 @@ export class CapacitorMcp implements McpPlatform {
 let nativeOtaUpdater: LocalOtaUpdater | null = null;
 let nativeOtaCore: LocalCore | null = null;
 let nativeOtaReady: Promise<void> | null = null;
+let nativeBuiltinMedia: BuiltinStickerMedia | null = null;
 
 /** Idempotent native bootstrap. Returns true when LocalCore was installed. */
 export async function installNativeLocalCore(): Promise<boolean> {
@@ -227,8 +233,10 @@ export async function installNativeLocalCore(): Promise<boolean> {
   const registry = new ToolRegistry();
   const policy = new ToolPolicy(registry);
   const runtime = new ToolCallRuntime({ registry, policy });
-  const core = new LocalCore({ db, secrets: new CapacitorSecrets(), mediaStore: new CapacitorMedia(), http: new CapacitorHttp(), mcp: new CapacitorMcp(), toolRegistry: registry, toolPolicy: policy, toolRuntime: runtime });
-  installSooyaClient(new LocalSooyaClient(core));
+  const mediaStore = new BuiltinStickerMedia(new CapacitorMedia());
+  nativeBuiltinMedia = mediaStore;
+  const core = new LocalCore({ db, secrets: new CapacitorSecrets(), mediaStore, http: new CapacitorHttp(), mcp: new CapacitorMcp(), toolRegistry: registry, toolPolicy: policy, toolRuntime: runtime });
+  installSooyaClient(new LocalSooyaClient(core, (id) => mediaStore.assetUrl(id)));
   void probeNotificationCapabilities(core);
   nativeOtaCore = core;
   nativeOtaUpdater = await prepareOtaUpdater(core, await getNativeReleaseInfo());
@@ -241,7 +249,13 @@ export async function notifyNativeAppReady(): Promise<void> {
   if (!nativeOtaUpdater || !nativeOtaCore) return;
   nativeOtaReady ??= (async () => {
     const updater = nativeOtaUpdater!;
-    await updater.notifyReady();
+    await afterAppReady(
+      () => seedBuiltinStickersOnce(nativeOtaCore!.database, 'server-2026-08-14', BUILTIN_STICKERS),
+      (ids) => nativeBuiltinMedia!.activate(ids),
+      () => updater.notifyReady(),
+      (result) => rollbackBuiltinStickerImport(nativeOtaCore!.database, result)
+    );
+    window.dispatchEvent(new Event('sooya:stickers-ready'));
     const manifestUrl = await nativeOtaCore!.configRepo.getPreference('ota.manifestUrl', '').catch(() => '');
     if (manifestUrl) void updater.checkAndApply(manifestUrl);
   })();

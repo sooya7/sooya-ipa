@@ -175,6 +175,25 @@ describe('LocalCore', () => {
     expect(configured.capabilities.chat!.configured).toBe(true);
   });
 
+  it('paginates the full local sticker catalogue', async () => {
+    for (let index = 0; index < 61; index += 1) {
+      const media = await core.mediaRepo.create({
+        kind: 'sticker', relPath: `builtin/${index}.gif`, mime: 'image/gif', bytes: 1,
+        sha256: `sha-${index}`, origin: 'builtin'
+      });
+      await core.stickersRepo.create({ mediaId: media.id, name: `表情${index}` });
+    }
+
+    const first = await core.stickerSearch({ limit: 60 });
+    const second = await core.stickerSearch({ limit: 60, cursor: first.nextCursor });
+
+    expect(first.stickers).toHaveLength(60);
+    expect(first.nextCursor).toBe('60');
+    expect(second.stickers).toHaveLength(1);
+    expect(second.nextCursor).toBeNull();
+    expect(second.total).toBe(61);
+  });
+
   it('withdraws a fresh user message', async () => {
     const { message } = await core.send({ clientMsgId: 'w-1', content: [{ type: 'text', text: '撤回我' }] });
     const result = await core.withdraw(message.id);

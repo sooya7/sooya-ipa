@@ -11,3 +11,5 @@ export type { SummaryBuildResult, SummaryBuilderOptions } from './summary-builde
 export { LocalLifeCatchUp } from '../life/catch-up-service.js';
 export { MomentComposer } from '../moments/composer.js';
 export { SqliteLocalMemoryStore } from '../memory/local-store.js';
+export { rollbackBuiltinStickerImport, seedBuiltinStickersOnce } from './builtin-stickers.js';
+export type { BuiltinStickerImportResult, BuiltinStickerSeed } from './builtin-stickers.js';

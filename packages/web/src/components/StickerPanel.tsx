@@ -31,16 +31,18 @@ export function StickerPanel({ stickers, onSelect, onNotice }: Props) {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [favoriteBusy, setFavoriteBusy] = useState<Set<string>>(new Set());
+  const [catalogRevision, setCatalogRevision] = useState(0);
 
   useEffect(() => {
-    // The bootstrap already contains the complete small catalogue. Avoid a
-    // second request when the panel first opens, which also keeps offline chat
-    // usable; scoped/search views fetch their authoritative page.
-    if (scope === 'all' && !query.trim() && stickers.length < 60) {
-      setRemote(null);
-      setNextCursor(null);
-      return;
-    }
+    const refresh = () => setCatalogRevision((value) => value + 1);
+    window.addEventListener('sooya:stickers-ready', refresh);
+    return () => window.removeEventListener('sooya:stickers-ready', refresh);
+  }, []);
+
+  useEffect(() => {
+    // Bootstrap is only a small preview. The panel always asks the active
+    // client for the authoritative first page so newly seeded/native stickers
+    // and catalogues larger than the bootstrap slice are visible immediately.
     let cancelled = false;
     setLoading(true);
     setNextCursor(null);
@@ -60,7 +62,7 @@ export function StickerPanel({ stickers, onSelect, onNotice }: Props) {
       if (!cancelled) setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [onNotice, query, scope, stickers.length]);
+  }, [catalogRevision, onNotice, query, scope, stickers.length]);
 
   const loadMore = async () => {
     if (!nextCursor || loading) return;

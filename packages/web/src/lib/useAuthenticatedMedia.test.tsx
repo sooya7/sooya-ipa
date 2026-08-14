@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useAuthenticatedMedia } from './useAuthenticatedMedia.js';
 import { clearMediaCache } from './authenticatedMedia.js';
+import { clearSooyaClient, installSooyaClient } from './sooyaClient.js';
 
 /**
  * Response bodies are bytes, never a `Blob`.
@@ -35,6 +36,7 @@ afterEach(() => {
   localStorage.clear();
   // 缓存是模块级的，会跨用例存活；不清就会互相污染。
   clearMediaCache();
+  clearSooyaClient();
 });
 
 describe('useAuthenticatedMedia lifecycle', () => {
@@ -50,6 +52,23 @@ describe('useAuthenticatedMedia lifecycle', () => {
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revoke });
     return { create, revoke };
   }
+
+  it('内置媒体直接使用包内 URL，不走 fetch/base64/blob', async () => {
+    (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    installSooyaClient({ resolveBuiltinMediaUrl: (id: string) => id === 'm1' ? '/builtin-stickers/m1.gif' : null } as never);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => { root.render(<Probe path="media://m1" />); });
+
+    expect(container.querySelector('img')?.getAttribute('src')).toBe('/builtin-stickers/m1.gif');
+    expect(fetchMock).not.toHaveBeenCalled();
+    await act(async () => root.unmount());
+    container.remove();
+  });
 
   it('只显示最新一次请求的结果，迟到的旧响应不会顶掉它', async () => {
     (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

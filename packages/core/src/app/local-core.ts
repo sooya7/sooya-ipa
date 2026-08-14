@@ -406,9 +406,11 @@ export class LocalCore implements LocalCoreApi {
 
   async stickerSearch(options: { scope?: 'recent' | 'favorite' | 'all'; q?: string; limit?: number; cursor?: string | null } = {}): Promise<{ stickers: StickerInfo[]; total: number; nextCursor: string | null }> {
     const limit = Math.max(1, Math.min(200, options.limit ?? 50));
-    const stickers = await this.stickersRepo.list({ scope: options.scope ?? 'all', q: options.q, limit, offset: 0 });
-    const total = await this.stickersRepo.count(false);
-    return { stickers: stickers.map(toStickerInfo), total, nextCursor: null };
+    const offset = Math.max(0, Number.parseInt(options.cursor ?? '0', 10) || 0);
+    const all = await this.stickersRepo.list({ scope: options.scope ?? 'all', q: options.q });
+    const stickers = all.slice(offset, offset + limit);
+    const nextOffset = offset + stickers.length;
+    return { stickers: stickers.map(toStickerInfo), total: all.length, nextCursor: nextOffset < all.length ? String(nextOffset) : null };
   }
 
   async life(): Promise<LifeState> {

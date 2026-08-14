@@ -2,7 +2,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import AdminPanel from './AdminPanel.js';
+import AdminPanel, { canUseAdminPanel } from './AdminPanel.js';
 
 const adminMocks = vi.hoisted(() => ({
   system: vi.fn(() => new Promise<never>(() => {})),
@@ -76,6 +76,17 @@ const adminMocks = vi.hoisted(() => ({
   ] })),
   clearErrors: vi.fn(async () => ({ ok: true })),
 }));
+
+describe('canUseAdminPanel', () => {
+  it('原生本地管理通道不要求 Web 管理令牌', () => {
+    expect(canUseAdminPanel(null, { adminRequest: vi.fn() })).toBe(true);
+  });
+
+  it('网页管理仍要求管理令牌', () => {
+    expect(canUseAdminPanel(null, null)).toBe(false);
+    expect(canUseAdminPanel('admin-token', null)).toBe(true);
+  });
+});
 
 vi.mock('../lib/admin.js', () => ({
   ADMIN_UNAUTHORIZED_EVENT: 'sooya:admin-unauthorized',
