@@ -14,6 +14,8 @@ config/models.json
 config/persona.json
 release/
 *.tsbuildinfo
+__pycache__/
+*.py[cod]
 .DS_Store
 test-results/
 playwright-report/
