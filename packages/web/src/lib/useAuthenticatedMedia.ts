@@ -9,6 +9,7 @@ import {
   type ExpectedMedia,
   type MediaAuthScope
 } from './authenticatedMedia.js';
+import { currentSooyaClient } from './sooyaClient.js';
 
 export interface AuthenticatedMediaState {
   url: string | null;
@@ -52,6 +53,13 @@ export function useAuthenticatedMedia(
     }
     if (path.startsWith('blob:')) {
       setUrl(path);
+      setLoading(false);
+      return cleanup;
+    }
+    const localMediaId = path.match(/^(?:local-)?media:\/\/([^?#]+)/u)?.[1];
+    const builtinUrl = localMediaId ? currentSooyaClient()?.resolveBuiltinMediaUrl?.(localMediaId) : null;
+    if (builtinUrl) {
+      setUrl(builtinUrl);
       setLoading(false);
       return cleanup;
     }

@@ -4,7 +4,7 @@ import { toUploadInput } from '../lib/sooyaClient.js';
 
 /** Direct in-process client. It deliberately has no URL, token, or fetch seam. */
 export class LocalSooyaClient implements SooyaClient {
-  constructor(private readonly core: LocalCoreFacade) {}
+  constructor(private readonly core: LocalCoreFacade, private readonly resolveBuiltin?: (id: string) => string | null) {}
 
   bootstrap: SooyaClient['bootstrap'] = () => this.core.bootstrap();
   messages: SooyaClient['messages'] = (options) => this.core.messages(options);
@@ -22,5 +22,6 @@ export class LocalSooyaClient implements SooyaClient {
   presence: SooyaClient['presence'] = () => this.core.presence();
   capabilities: SooyaClient['capabilities'] = () => this.core.capabilities();
   adminRequest: NonNullable<SooyaClient['adminRequest']> = (path, options) => this.core.adminRequest(path, options);
+  resolveBuiltinMediaUrl = (id: string): string | null => this.resolveBuiltin?.(id) ?? null;
   subscribe(listener: LocalEventListener): () => void { return this.core.subscribe(listener); }
 }

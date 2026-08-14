@@ -29,6 +29,7 @@ export interface SooyaClient {
   presence(): Promise<WorldPresence>;
   capabilities(): Promise<{ capabilities: Record<string, { configured: boolean; ok: boolean; detail?: string }>; stickers: { available: number; total: number } }>;
   adminRequest?<T = unknown>(path: string, options?: { method?: string; body?: unknown; signal?: AbortSignal }): Promise<T>;
+  resolveBuiltinMediaUrl?(id: string): string | null;
   subscribe(listener: LocalEventListener): () => void;
 }
 
