@@ -239,14 +239,12 @@ public final class SOOYASecretsPlugin: CAPPlugin, CAPBridgedPlugin {
         // Deliberately no "get": secrets must never cross into JS.
     ]
 
-    private lazy var store: SOOYAKeychainStore = {
-        let resolver = SOOYAKeychainAccessGroupResolver()
-        // The default group for this bundle is stable per install; resolve
-        // once lazily. Failures surface through the plugin as generic errors
-        // without leaking the probe account or any secret.
-        let group = (try? resolver.resolve()) ?? "TEAMID.com.sooya.app"
+    private lazy var storeResult: Result<SOOYAKeychainStore, Error> = Result {
+        let group = try SOOYAKeychainAccessGroupResolver().resolve()
         return SOOYAKeychainStore(identity: SOOYAKeychainIdentity(accessGroup: group))
-    }()
+    }
+
+    private func requireStore() throws -> SOOYAKeychainStore { try storeResult.get() }
 
     @objc public func has(_ call: CAPPluginCall) {
         guard let key = call.getString("key") else {
@@ -254,7 +252,7 @@ public final class SOOYASecretsPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         do {
-            call.resolve(["present": try store.has(key: key)])
+            call.resolve(["present": try requireStore().has(key: key)])
         } catch {
             call.reject((error as? LocalizedError)?.errorDescription ?? "Keychain operation failed")
         }
@@ -266,7 +264,7 @@ public final class SOOYASecretsPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         do {
-            try store.set(key: key, value: value)
+            try requireStore().set(key: key, value: value)
             call.resolve()
         } catch {
             call.reject((error as? LocalizedError)?.errorDescription ?? "Keychain operation failed")
@@ -279,7 +277,7 @@ public final class SOOYASecretsPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         do {
-            try store.delete(key: key)
+            try requireStore().delete(key: key)
             call.resolve()
         } catch {
             call.reject((error as? LocalizedError)?.errorDescription ?? "Keychain operation failed")
