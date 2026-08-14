@@ -28,8 +28,28 @@ function quotedPreview(message: ChatMessage): string {
   return '[空消息]';
 }
 
-function formatClock(iso: string, timeZone?: string): string { const d = new Date(iso); if (Number.isNaN(d.getTime())) return ''; return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false, hourCycle: 'h23', ...(timeZone ? { timeZone } : {}) }).format(d); }
-function formatFullDateTime(iso: string, timeZone?: string): string { const d = new Date(iso); if (Number.isNaN(d.getTime())) return ''; return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short', ...(timeZone ? { timeZone } : {}) }).format(d); }
+const clockFormatters = new Map<string, Intl.DateTimeFormat>();
+function clockFormatter(timeZone?: string): Intl.DateTimeFormat {
+  const key = timeZone ?? 'local';
+  let formatter = clockFormatters.get(key);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false, hourCycle: 'h23', ...(timeZone ? { timeZone } : {}) });
+    clockFormatters.set(key, formatter);
+  }
+  return formatter;
+}
+const dateTimeFormatters = new Map<string, Intl.DateTimeFormat>();
+function dateTimeFormatter(timeZone?: string): Intl.DateTimeFormat {
+  const key = timeZone ?? 'local';
+  let formatter = dateTimeFormatters.get(key);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short', ...(timeZone ? { timeZone } : {}) });
+    dateTimeFormatters.set(key, formatter);
+  }
+  return formatter;
+}
+function formatClock(iso: string, timeZone?: string): string { const d = new Date(iso); if (Number.isNaN(d.getTime())) return ''; return clockFormatter(timeZone).format(d); }
+function formatFullDateTime(iso: string, timeZone?: string): string { const d = new Date(iso); if (Number.isNaN(d.getTime())) return ''; return dateTimeFormatter(timeZone).format(d); }
 function formatBytes(n: number): string { return n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`; }
 function messageText(message: ChatMessage): string { return message.content.map((part) => part.type === 'text' ? stripModelDirectivesForDisplay(part.text) : part.type === 'audio' ? part.transcript ?? '' : '').filter(Boolean).join('\n'); }
 function highlightedText(text: string, query?: string): React.ReactNode {

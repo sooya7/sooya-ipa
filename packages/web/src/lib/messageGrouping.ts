@@ -38,10 +38,20 @@ export function dateLabel(iso: string, now = new Date(), timeZone = userTimeZone
   return `${target.year}年${target.month}月${target.day}日`;
 }
 
+const dateFormatters = new Map<string, Intl.DateTimeFormat>();
+function dateFormatter(timeZone: string): Intl.DateTimeFormat {
+  let formatter = dateFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' });
+    dateFormatters.set(timeZone, formatter);
+  }
+  return formatter;
+}
+
 function dateParts(value: string, timeZone: string): { year: number; month: number; day: number } {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return { year: 1970, month: 1, day: 1 };
-  const parts = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
+  const parts = dateFormatter(timeZone).formatToParts(date);
   return {
     year: Number(parts.find((part) => part.type === 'year')?.value ?? 1970),
     month: Number(parts.find((part) => part.type === 'month')?.value ?? 1),

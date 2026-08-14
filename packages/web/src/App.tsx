@@ -174,27 +174,27 @@ export function ChatView({ chat, viewStateRef }: { chat: ChatController; viewSta
   }, [personaAvatar.error, userAvatar.error]);
 
   const jumpToBottom = () => { stickToBottomRef.current = true; setStickToBottom(true); setUnread(0); bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); };
-  const centerOnMessage = (id: string) => {
+  const centerOnMessage = useCallback((id: string) => {
     const list = latestMessagesRef.current;
     const index = list.findIndex((message) => message.id === id);
     if (index < 0) return;
     virtualizer.scrollToIndex(index, { align: 'center' });
     setHighlightedId(id); setHighlightNonce((value) => value + 1);
     window.setTimeout(() => setHighlightedId((current) => (current === id ? null : current)), 1800);
-  };
-  const jumpToMessage = async (id: string) => {
+  }, [virtualizer]);
+  const jumpToMessage = useCallback(async (id: string) => {
     const target = byId.get(id) ?? await chat.ensureQuotedMessage(id);
     if (!target) { setNotice('原消息已删除或不可用'); return; }
     if (chat.messages.some((message) => message.id === id)) centerOnMessage(id);
     else window.setTimeout(() => centerOnMessage(id), 0);
-  };
-  const jumpToSearchHit = async (hit: MessageSearchHit) => {
+  }, [byId, chat, centerOnMessage]);
+  const jumpToSearchHit = useCallback(async (hit: MessageSearchHit) => {
     chat.addMessages([hit.message]);
     await chat.ensureQuotedMessage(hit.message.id);
     // 等异步 setState 刷新到 latestMessagesRef 后再定位。
     window.setTimeout(() => centerOnMessage(hit.message.id), 0);
-  };
-  const runSearch = async () => {
+  }, [chat, centerOnMessage]);
+  const runSearch = useCallback(async () => {
     if (!searchQuery.trim()) return;
     setHistoryBusy(true); setHistoryError(null);
     try {
@@ -204,15 +204,15 @@ export function ChatView({ chat, viewStateRef }: { chat: ChatController; viewSta
       if (result.hits[0]) await jumpToSearchHit(result.hits[0]);
     } catch (error) { setHistoryError(error instanceof Error ? error.message : '搜索失败'); }
     finally { setHistoryBusy(false); }
-  };
-  const jumpSearch = async (index: number) => {
+  }, [searchQuery, jumpToSearchHit]);
+  const jumpSearch = useCallback(async (index: number) => {
     const normalized = (index + searchHits.length) % searchHits.length;
     const hit = searchHits[normalized];
     if (!hit) return;
     setSearchIndex(normalized);
     await jumpToSearchHit(hit);
-  };
-  const runDateJump = async () => {
+  }, [searchHits, jumpToSearchHit]);
+  const runDateJump = useCallback(async () => {
     if (!dateQuery) return;
     setHistoryBusy(true); setHistoryError(null);
     try {
@@ -222,13 +222,13 @@ export function ChatView({ chat, viewStateRef }: { chat: ChatController; viewSta
       if (result.messages[0]) await jumpToSearchHit({ message: result.messages[0], snippet: '', matchedPartId: null });
     } catch (error) { setHistoryError(error instanceof Error ? error.message : '日期跳转失败'); }
     finally { setHistoryBusy(false); }
-  };
-  const clearHistoryTools = () => { setSearchHits([]); setSearchIndex(0); setSearchQuery(''); setHistoryError(null); setHistoryOpen(false); window.setTimeout(() => { if (scrollerRef.current) scrollerRef.current.scrollTop = historyScrollTopRef.current; }, 0); };
+  }, [dateQuery, chat, jumpToSearchHit]);
+  const clearHistoryTools = useCallback(() => { setSearchHits([]); setSearchIndex(0); setSearchQuery(''); setHistoryError(null); setHistoryOpen(false); window.setTimeout(() => { if (scrollerRef.current) scrollerRef.current.scrollTop = historyScrollTopRef.current; }, 0); }, []);
   const restoreQuote = useCallback(async (id: string) => {
     const message = byId.get(id) ?? await chat.ensureQuotedMessage(id);
     if (message) setQuote(message);
   }, [chat.ensureQuotedMessage, chat.messages]);
-  const action = async (work: () => Promise<unknown>, success?: string) => { try { await work(); if (success) setNotice(success); } catch (error) { setNotice((error as Error).message); } };
+  const action = useCallback(async (work: () => Promise<unknown>, success?: string) => { try { await work(); if (success) setNotice(success); } catch (error) { setNotice((error as Error).message); } }, []);
   const statusLabel = chat.connection === 'online' ? chat.activity.thinking ? chat.activity.label ?? '正在输入' : '在线' : chat.connection === 'connecting' ? '连接中…' : chat.connection === 'unauthorized' ? '需要访问令牌' : '连接已断开，正在重试';
   const streamingMessage = useMemo<ChatMessage | null>(() => chat.streamingDraft ? {
     id: chat.streamingDraft.id,
