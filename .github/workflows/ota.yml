@@ -95,7 +95,19 @@ jobs:
           test -n "${OTA_PUBLISH_TOKEN:-}" || { echo 'OTA_PUBLISH_TOKEN is required'; exit 1; }
           base="${OTA_PUBLISH_URL%/}"
           auth=(-H "Authorization: Bearer ${OTA_PUBLISH_TOKEN}")
-          curl --http1.1 --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/bundle.zip "${base}/bundles/${RELEASE_ID}/bundle.zip"
+          chunk_dir="$(mktemp -d)"
+          trap 'rm -rf "${chunk_dir}"' EXIT
+          split -b 1048576 -d -a 5 --additional-suffix=.part build/bundle.zip "${chunk_dir}/"
+          parts=0
+          for chunk in "${chunk_dir}"/*.part; do
+            name="$(basename "${chunk}")"
+            curl --http1.1 --fail --retry 3 --retry-all-errors -H 'Expect:' "${auth[@]}" -T "${chunk}" "${base}/uploads/${RELEASE_ID}/chunks/${name}"
+            parts=$((parts + 1))
+          done
+          bytes="$(stat -c %s build/bundle.zip)"
+          sha256="$(sha256sum build/bundle.zip | cut -d ' ' -f 1)"
+          printf '{"parts":%s,"bytes":%s,"sha256":"%s"}\n' "${parts}" "${bytes}" "${sha256}" > "${chunk_dir}/assemble.json"
+          curl --http1.1 --fail --retry 3 --retry-all-errors -H 'Content-Type: application/json' "${auth[@]}" --data-binary @"${chunk_dir}/assemble.json" "${base}/uploads/${RELEASE_ID}/assemble"
           curl --http1.1 --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/manifests/${RELEASE_ID}/ota-manifest.json"
           curl --http1.1 --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/stable.json.tmp"
           curl --http1.1 --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/stable.json"

@@ -15,7 +15,8 @@
   "scripts": {
     "build": "npm run build -w @sooya/web",
     "typecheck": "npm run typecheck -w @sooya/core && npm run typecheck -w @sooya/web",
-    "test": "npm run test -w @sooya/core && npm run test -w @sooya/web && npm run test -w @sooya/migration-tools",
+    "test": "npm run test -w @sooya/core && npm run test -w @sooya/web && npm run test -w @sooya/migration-tools && npm run test:ota-server",
+    "test:ota-server": "python scripts/test_ota_server.py",
     "ios:add": "cap add ios",
     "ios:sync": "npm run build && cap sync ios",
     "ios:open": "cap open ios",

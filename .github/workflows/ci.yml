@@ -33,6 +33,8 @@ jobs:
         run: npm run typecheck
       - name: OTA migration guard
         run: npm run check:ota-migrations -- origin/${{ github.base_ref || 'main' }}...HEAD
+      - name: OTA publish server tests
+        run: npm run test:ota-server
       - name: Build web
         run: npm run build
 
