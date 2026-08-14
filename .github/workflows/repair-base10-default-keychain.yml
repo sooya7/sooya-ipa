@@ -38,7 +38,7 @@ jobs:
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add ios/App/App/Plugins/SOOYASecretsPlugin.swift ios/App/App/Plugins/SOOYAHttpPlugin.swift ios/App/App/Plugins/SOOYAMcpPlugin.swift ios/App/AppTests/SOOYASecretsPluginTests.swift ios/App/App/Plugins/SOOYAReleaseConfig.swift ios/App/App/native-base.version .github/workflows/ota.yml
+          git add ios/App/App/Plugins/SOOYASecretsPlugin.swift ios/App/App/Plugins/SOOYAHttpPlugin.swift ios/App/App/Plugins/SOOYAMcpPlugin.swift ios/App/AppTests/SOOYASecretsPluginTests.swift ios/App/App/Plugins/SOOYAReleaseConfig.swift ios/App/App/native-base.version
           git diff --cached --quiet && exit 0
           git commit -m 'fix(native): use signing-safe default Keychain group [base10-keychain-repair]'
           git push origin HEAD:fix/base10-default-keychain
