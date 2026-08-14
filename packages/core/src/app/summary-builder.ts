@@ -15,6 +15,8 @@ export interface SummaryBuildResult {
   summary?: SummaryRow;
   fromSeq?: number;
   toSeq?: number;
+  /** Number of summaries created in this run (>=1 when state is 'created'). */
+  createdCount?: number;
 }
 
 /** Incremental, failure-isolated conversation summarization for local context. */
@@ -32,31 +34,46 @@ export class SummaryBuilder {
     if (maxSeq <= covered) return { state: 'noop' };
     const messages = (await this.options.messages.range(covered + 1, maxSeq))
       .filter((message) => message.status !== 'failed' && !message.meta.withdrawnAt && messageText(message))
-      .slice(-this.maxMessages);
+      .sort((a, b) => a.seq - b.seq);
     if (messages.length === 0) return { state: 'noop' };
-    const fromSeq = messages[0]!.seq;
-    const toSeq = messages.at(-1)!.seq;
+
+    // Chunk the uncovered range so every message is covered by some summary.
+    // A single summary may only span maxMessages messages; slicing the tail
+    // and writing a partial fromSeq would permanently drop the skipped range.
+    const chunks: ChatMessage[][] = [];
+    for (let index = 0; index < messages.length; index += this.maxMessages) {
+      chunks.push(messages.slice(index, index + this.maxMessages));
+    }
+
     const provider = typeof this.options.provider === 'function' ? await this.options.provider() : this.options.provider;
-    let content: string;
-    let model: string | null = null;
-    if (provider?.configured) {
-      try {
-        const result = await provider.complete({
-          system: '你是 SOOYA 的本地对话摘要器。保留事实、偏好、未完成事项、情绪和上下文关系；不要编造。只输出简洁中文摘要。',
-          messages: [{ role: 'user', content: [{ type: 'text', text: formatMessages(messages) }] }],
-          maxTokens: 900,
-          temperature: 0,
-          signal
-        });
-        content = result.text.trim();
-        model = result.model;
-      } catch {
-        content = fallbackSummary(messages);
-      }
-    } else content = fallbackSummary(messages);
-    if (!content) return { state: 'noop' };
-    const summary = await this.options.summaries.create({ fromSeq, toSeq, content: content.slice(0, 8000), model });
-    return { state: 'created', summary, fromSeq, toSeq };
+    let last: SummaryRow | undefined;
+    for (const chunk of chunks) {
+      if (signal?.aborted) throw signal.reason ?? new Error('summary build aborted');
+      const fromSeq = chunk[0]!.seq;
+      const toSeq = chunk.at(-1)!.seq;
+      let content: string;
+      let model: string | null = null;
+      if (provider?.configured) {
+        try {
+          const result = await provider.complete({
+            system: '你是 SOOYA 的本地对话摘要器。保留事实、偏好、未完成事项、情绪和上下文关系；不要编造。只输出简洁中文摘要。',
+            messages: [{ role: 'user', content: [{ type: 'text', text: formatMessages(chunk) }] }],
+            maxTokens: 900,
+            temperature: 0,
+            signal
+          });
+          content = result.text.trim();
+          model = result.model;
+        } catch {
+          content = fallbackSummary(chunk);
+        }
+      } else content = fallbackSummary(chunk);
+      if (!content) continue;
+      last = await this.options.summaries.create({ fromSeq, toSeq, content: content.slice(0, 8000), model });
+    }
+
+    if (!last) return { state: 'noop' };
+    return { state: 'created', summary: last, fromSeq: last.from_seq, toSeq: last.to_seq, createdCount: chunks.length };
   }
 }
 
