@@ -10,11 +10,18 @@ import { isNativeSooya } from './local/nativeRuntime.js';
 export default function AppShell() {
   const route = useAppRoute();
   const [chatStarted, setChatStarted] = useState(route === 'chat');
+  const [personaRevision, setPersonaRevision] = useState(0);
   const shouldMountChat = chatStarted || route === 'chat';
 
   useEffect(() => {
     if (route === 'chat') setChatStarted(true);
   }, [route]);
+
+  useEffect(() => {
+    const refreshPersona = () => setPersonaRevision((value) => value + 1);
+    window.addEventListener('sooya:persona-updated', refreshPersona);
+    return () => window.removeEventListener('sooya:persona-updated', refreshPersona);
+  }, []);
 
   // notifyAppReady is deliberately deferred until the shell has mounted. A
   // successful SQLite/provider bootstrap alone must not bless a broken OTA
@@ -25,7 +32,7 @@ export default function AppShell() {
   }, []);
 
   return <>
-    {shouldMountChat && <ChatSessionHost active={route === 'chat'} />}
+    {shouldMountChat && <ChatSessionHost key={personaRevision} active={route === 'chat'} />}
     {(route === 'chat' || route === 'moments') && <ImageViewerHost />}
     {route === 'moments' && <MomentsPage />}
     {route === 'gallery' && <GalleryPage />}
