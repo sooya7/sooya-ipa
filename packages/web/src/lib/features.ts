@@ -131,8 +131,11 @@ export interface LifePanelData {
 
 async function request<T>(path: string, options: { method?: string; body?: unknown; raw?: boolean } = {}): Promise<T> {
   const local = currentSooyaClient();
-  const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
-  if (local?.adminRequest && !options.raw && !isFormData) {
+  // Local mode handles FormData bodies directly (LocalCore's adminRequest
+  // reads multipart fields in-process); raw binary payloads are adapted by
+  // the callers (referenceData / previewVoice) because there is no HTTP
+  // round-trip on device.
+  if (local?.adminRequest && !options.raw) {
     return await local.adminRequest<T>(path, { method: options.method, body: options.body });
   }
   const headers = new Headers();
@@ -157,6 +160,26 @@ async function request<T>(path: string, options: { method?: string; body?: unkno
     throw new ApiError(message, response.status, parsed);
   }
   return parsed as T;
+}
+
+/** Raw-binary GET that adapts to the local in-process channel: LocalCore
+ * answers { dataBase64 | builtinPath }, the server answers the file itself. */
+async function rawData<T>(path: string): Promise<T> {
+  const local = currentSooyaClient();
+  if (local?.adminRequest) {
+    const value = await local.adminRequest<{ dataBase64?: string; mime?: string; builtinPath?: string }>(path);
+    if (value.builtinPath) {
+      const response = await fetch(value.builtinPath, { cache: 'force-cache' });
+      if (!response.ok) throw new Error('内置参考图读取失败');
+      return (await response.blob()) as T;
+    }
+    if (!value.dataBase64) throw new Error('参考图不存在');
+    const binary = atob(value.dataBase64);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return new Blob([bytes], { type: value.mime ?? 'application/octet-stream' }) as T;
+  }
+  return await request<T>(path, { raw: true });
 }
 
 function params(input: Record<string, string | number | boolean | undefined>): string {
@@ -211,7 +234,7 @@ export const featureApi = {
   deleteReference: (name: string) =>
     request<{ deleted: boolean; removedFile: boolean; referenceImages: string[] }>(`/api/admin/persona/references/${encodeURIComponent(name)}`, { method: 'DELETE' }),
   referenceData: (name: string) =>
-    request<Blob>(`/api/admin/persona/references/${encodeURIComponent(name)}/data`, { raw: true }),
+    rawData<Blob>(`/api/admin/persona/references/${encodeURIComponent(name)}/data`),
 
   gallery: (query: { trash?: boolean; origin?: string; favorite?: boolean; search?: string; from?: string; to?: string; limit?: number; offset?: number } = {}) =>
     request<{ media: FeatureMedia[]; stats: { count: number; bytes: number }; total: number }>(`/api/admin/gallery${params(query)}`),

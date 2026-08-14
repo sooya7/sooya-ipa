@@ -24,6 +24,7 @@ import { ReplyCoordinator } from './reply-coordinator.js';
 import { LocalMediaResolver } from './media-resolver.js';
 import { ModelDiscoveryService } from './model-discovery.js';
 import { MODEL_CAPABILITY_SLOTS, MODEL_DEFAULTS, type ModelCapabilitySlot } from './model-defaults.js';
+import { PersonaReferenceService, REFERENCE_FRAMINGS, type ReferenceFraming } from './persona-reference-service.js';
 import { ContextBuilder } from './context-builder.js';
 import { SummaryBuilder } from './summary-builder.js';
 import { StickerAnalyzer } from './sticker-analyzer.js';
@@ -134,6 +135,7 @@ export class LocalCore implements LocalCoreApi {
   readonly replies: ReplyCoordinator;
   readonly contextBuilder: ContextBuilder;
   readonly summaryBuilder: SummaryBuilder;
+  readonly personaReferences: PersonaReferenceService;
   /** Resolver for providers built from the persisted config (used when no
    * explicit chatProvider was injected, e.g. native boot). */
   private readonly configuredProviders?: () => Promise<ConfiguredProviders>;
@@ -167,6 +169,7 @@ export class LocalCore implements LocalCoreApi {
     this.metricsRepo = new MetricsRepo(db, now);
     this.mediaRepo = new MediaRepo(db, now);
     this.media = options.mediaStore ? new LocalMediaResolver(this.mediaRepo, options.mediaStore) : undefined;
+    this.personaReferences = new PersonaReferenceService(this.settingsRepo, this.mediaRepo);
     this.configuredProviders = options.http
       ? async () => (await import('../providers/builtin.js')).createConfiguredProviders(options.http!, this.configRepo)
       : undefined;
@@ -874,7 +877,10 @@ export class LocalCore implements LocalCoreApi {
       const servers = await this.mcpRepo.listServers();
       const policies = await this.mcpRepo.listPolicies();
       const tools = this.toolRegistry.listForAdmin().map((tool) => ({ ...tool, serverId: tool.serverId ?? null }));
-      return { configSource: 'local-sqlite', globalPolicy: {}, servers: servers.map((server) => ({ ...server, authConfigured: Boolean(server.secretKey), toolCount: policies.filter((policy) => policy.serverId === server.id).length })), tools, memory: { state: 'ready', provider: 'local' }, dashboardUrl: null } as T;
+      return { configSource: 'local-sqlite', globalPolicy: {}, servers: servers.map((server) => {
+        const { secretKey: _secretKey, ...safe } = server;
+        return { ...safe, authConfigured: Boolean(_secretKey), toolCount: policies.filter((policy) => policy.serverId === server.id).length };
+      }), tools, memory: { state: 'ready', provider: 'local' }, dashboardUrl: null } as T;
     }
     const mcpTest = route.match(/^\/api\/admin\/mcp\/([^/]+)\/(test|refresh-tools)$/u);
     if (mcpTest && method === 'POST') {
@@ -887,10 +893,38 @@ export class LocalCore implements LocalCoreApi {
       return { tool: found ?? { name: decodeURIComponent(mcpTool), description: '', inputSchema: { type: 'object' } } } as T;
     }
     const mcpServerId = route.match(/^\/api\/admin\/mcp\/servers\/([^/]+)$/u)?.[1];
-    if (mcpServerId && method === 'DELETE') { await this.options.mcp?.disconnect(decodeURIComponent(mcpServerId)); await this.mcpRepo.removeServer(decodeURIComponent(mcpServerId)); return { deleted: true } as T; }
+    if (mcpServerId && method === 'DELETE') {
+      const id = decodeURIComponent(mcpServerId);
+      const existing = await this.mcpRepo.getServer(id);
+      await this.options.mcp?.disconnect(id);
+      await this.mcpRepo.removeServer(id);
+      if (this.options.secrets) {
+        await this.options.secrets.remove(`mcp.${id}.token`);
+        if (existing?.secretKey && existing.secretKey !== `mcp.${id}.token`) await this.options.secrets.remove(existing.secretKey);
+      }
+      return { deleted: true } as T;
+    }
     if (route === '/api/admin/mcp/servers' && (method === 'POST' || method === 'PUT')) {
       const id = typeof body.id === 'string' && body.id ? body.id : `mcp_${Date.now().toString(36)}`;
-      const server = await this.mcpRepo.upsertServer({ id, name: typeof body.name === 'string' ? body.name : id, url: typeof body.url === 'string' ? body.url : '', transport: body.transport === 'sse' ? 'sse' : 'streamable-http', enabled: body.enabled !== false, required: body.required === true, secretKey: typeof body.secretKey === 'string' ? body.secretKey : undefined });
+      const existing = await this.mcpRepo.getServer(id);
+      // Token never lands in SQLite: a new value overwrites the Keychain
+      // entry, '' deletes it, an absent field keeps the current ref.
+      const submitted = Object.prototype.hasOwnProperty.call(body, 'token') && typeof body.token === 'string' ? body.token.trim() : undefined;
+      const tokenRef = `mcp.${id}.token`;
+      let secretKey: string | undefined;
+      if (submitted !== undefined && submitted !== '') {
+        if (this.options.secrets) await this.options.secrets.set(tokenRef, submitted);
+        secretKey = tokenRef;
+      } else if (submitted === '') {
+        if (this.options.secrets) {
+          await this.options.secrets.remove(tokenRef);
+          if (existing?.secretKey && existing.secretKey !== tokenRef) await this.options.secrets.remove(existing.secretKey);
+        }
+        secretKey = '';
+      } else {
+        secretKey = existing?.secretKey;
+      }
+      const server = await this.mcpRepo.upsertServer({ id, name: typeof body.name === 'string' ? body.name : id, url: typeof body.url === 'string' ? body.url : '', transport: body.transport === 'sse' ? 'sse' : 'streamable-http', enabled: body.enabled !== false, required: body.required === true, secretKey });
       return { server: { ...server, authConfigured: Boolean(server.secretKey) } } as T;
     }
     if (route === '/api/admin/stickers' && method === 'POST') {
@@ -928,6 +962,45 @@ export class LocalCore implements LocalCoreApi {
       const queued = pending.length;
       for (const sticker of pending) void this.analyzeSticker(sticker.id).catch(() => undefined);
       return { queued, skipped: 0 } as T;
+    }
+    // ---- persona reference images (three framing slots, user uploads win) ----
+    if (route === '/api/admin/persona/references' && method === 'GET') {
+      return { dir: null, references: await this.personaReferences.list() } as T;
+    }
+    const referenceSlot = route.match(/^\/api\/admin\/persona\/references\/slot\/([^/]+)$/u)?.[1];
+    if (referenceSlot && method === 'POST') {
+      const framing = decodeURIComponent(referenceSlot) as ReferenceFraming;
+      if (!(REFERENCE_FRAMINGS as readonly string[]).includes(framing)) throw new Error('视角只能是 front、full-body 或 side。');
+      const form = rawBody as { get?: (name: string) => unknown };
+      const file = typeof form?.get === 'function' ? form.get('file') : null;
+      if (!file || typeof (file as { arrayBuffer?: unknown }).arrayBuffer !== 'function') throw new Error('reference file is required');
+      const bytes = new Uint8Array(await (file as Blob).arrayBuffer());
+      const mime = typeof (file as File).type === 'string' ? (file as File).type : 'image/png';
+      if (!mime.startsWith('image/')) throw new Error('只支持 PNG / JPG / WEBP / GIF 图片。');
+      const uploaded = await this.upload([{ name: 'reference', mime, bytes, field: 'image' }]);
+      const media = uploaded.media[0];
+      if (!media) throw new Error('reference media could not be stored');
+      const reference = await this.personaReferences.upload(framing, media.id);
+      const referenceImages = (await this.personaReferences.list()).map((item) => item.name);
+      return { reference, replaced: [], referenceImages } as T;
+    }
+    const referenceData = route.match(/^\/api\/admin\/persona\/references\/([^/]+)\/data$/u)?.[1];
+    if (referenceData && method === 'GET') {
+      const name = decodeURIComponent(referenceData);
+      const references = await this.personaReferences.list();
+      const item = references.find((ref) => ref.name === name);
+      if (item?.mediaId) {
+        const read = this.media ? await this.media.read(item.mediaId) : null;
+        if (!read) throw new Error('reference not found');
+        return { dataBase64: bytesToBase64(read.data), mime: read.record.mime } as T;
+      }
+      if (item) return { builtinPath: item.builtinPath } as T;
+      throw new Error('reference not found');
+    }
+    const referenceDelete = route.match(/^\/api\/admin\/persona\/references\/([^/]+)$/u)?.[1];
+    if (referenceDelete && method === 'DELETE') {
+      const result = await this.personaReferences.remove(decodeURIComponent(referenceDelete));
+      return { deleted: result.framing !== null, removedFile: false, referenceImages: result.referenceImages.map((item) => item.name) } as T;
     }
     const localMediaData = route.match(/^\/api\/admin\/media\/([^/]+)\/data$/u)?.[1];
     if (localMediaData && method === 'GET') {

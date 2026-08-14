@@ -64,17 +64,23 @@ const FRAMING_ORDER: Array<PersonaReference['framing']> = ['front', 'full-body',
  * bundle 重建标记：用于生成新的资源哈希。
  */
 export function ReferencesEditor({ onNotice }: { onNotice: (s: string) => void }) {
-  const [list, setList] = useState<PersonaReference[] | null>(null);
+  const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [list, setList] = useState<PersonaReference[]>([]);
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const createdUrls = useRef<string[]>([]);
 
-  const load = () => featureApi.references().then((r) => setList(r.references)).catch((error) => onNotice(errorText(error)));
+  const load = () => {
+    setState('loading');
+    featureApi.references()
+      .then((r) => { setList(r.references ?? []); setState('ready'); })
+      .catch((error) => { setState('error'); onNotice(errorText(error)); });
+  };
   useEffect(() => { void load(); }, []);
   useEffect(() => () => { for (const url of createdUrls.current) URL.revokeObjectURL(url); }, []);
 
   useEffect(() => {
-    if (!list) return;
+    if (state !== 'ready') return;
     let cancelled = false;
     for (const ref of list) {
       if (!ref.exists || thumbs[ref.name]) continue;
@@ -86,7 +92,7 @@ export function ReferencesEditor({ onNotice }: { onNotice: (s: string) => void }
       }).catch((error) => { if (!cancelled) onNotice(`「${ref.name}」预览加载失败: ${errorText(error)}`); });
     }
     return () => { cancelled = true; };
-  }, [list]);
+  }, [list, state, thumbs]);
 
   const upload = async (framing: PersonaReference['framing'], file?: File) => {
     if (!file || busy) return;
@@ -103,17 +109,25 @@ export function ReferencesEditor({ onNotice }: { onNotice: (s: string) => void }
   };
 
   const remove = async (name: string) => {
-    if (!window.confirm(`删除参考图「${name}」？文件会一并删除，之后生成自拍将不再用它。`)) return;
+    if (!window.confirm(`删除参考图「${name}」？之后该视角自动回退内置参考图。`)) return;
     try {
       await featureApi.deleteReference(name);
-      onNotice('参考图已删除');
+      onNotice('参考图已删除，该视角回退内置图');
       await load();
     } catch (error) {
       onNotice(errorText(error));
     }
   };
 
-  if (!list) return <section className="admin-form-card">正在读取参考图…</section>;
+  if (state === 'loading') return <section className="admin-form-card">正在读取参考图…</section>;
+  if (state === 'error') {
+    return (
+      <section className="admin-form-card" data-testid="reference-settings">
+        <div className="admin-inline-error" role="status">参考图读取失败</div>
+        <button type="button" className="admin-link-button" onClick={() => void load()}>重试</button>
+      </section>
+    );
+  }
   const slotOf = (framing: PersonaReference['framing']) =>
     list.find((r) => r.framing === framing && r.configured) ?? list.find((r) => r.framing === framing && r.exists);
   return (

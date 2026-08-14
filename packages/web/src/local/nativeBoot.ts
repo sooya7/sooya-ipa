@@ -216,9 +216,21 @@ export async function notifyNativeAppReady(): Promise<void> {
 
 async function loadServerReferenceImages(): Promise<Array<{ data: Uint8Array; mime: string }>> {
   const images: Array<{ data: Uint8Array; mime: string }> = [];
-  for (const path of SERVER_REFERENCE_IMAGES) {
+  const core = nativeOtaCore;
+  if (!core) return images;
+  // User-uploaded slot images win; missing slots fall back to the bundled
+  // assets — the management page and the generation runtime share the same
+  // source of truth (PersonaReferenceService).
+  const slots = await core.personaReferences.activeSlots();
+  for (const [framing, mediaId] of Object.entries(slots) as Array<[keyof typeof slots, string | null]>) {
+    if (mediaId) {
+      const read = await core.media?.read(mediaId).catch(() => null);
+      if (read) { images.push({ data: read.data, mime: read.record.mime }); continue; }
+    }
+    const builtin = SERVER_REFERENCE_IMAGES[['front', 'full-body', 'side'].indexOf(framing)] ?? null;
+    if (!builtin) continue;
     try {
-      const response = await fetch(path, { cache: 'force-cache' });
+      const response = await fetch(builtin, { cache: 'force-cache' });
       if (!response.ok) continue;
       const mime = response.headers.get('content-type')?.split(';')[0]?.trim() || 'image/png';
       images.push({ data: new Uint8Array(await response.arrayBuffer()), mime });

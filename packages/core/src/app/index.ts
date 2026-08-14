@@ -22,6 +22,8 @@ export { ModelDiscoveryService } from './model-discovery.js';
 export type { DiscoveryResult } from './model-discovery.js';
 export { MODEL_CAPABILITY_SLOTS, MODEL_DEFAULTS, CHAT_FALLBACK_SLOTS } from './model-defaults.js';
 export type { ModelCapabilitySlot } from './model-defaults.js';
+export { PersonaReferenceService, REFERENCE_FRAMINGS, REFERENCE_BUILTIN_PATHS } from './persona-reference-service.js';
+export type { PersonaReferenceItem, ReferenceFraming } from './persona-reference-service.js';
 export { SqliteLocalMemoryStore } from '../memory/local-store.js';
 export { rollbackBuiltinStickerImport, seedBuiltinStickersOnce } from './builtin-stickers.js';
 export type { BuiltinStickerImportResult, BuiltinStickerSeed } from './builtin-stickers.js';

@@ -304,6 +304,74 @@ describe('LocalCore', () => {
     await expect(db.query<{ count: number }>('SELECT COUNT(*) count FROM memory_tombstones')).resolves.toEqual([{ count: 0 }]);
   });
 
+  it('serves three builtin reference slots on a fresh install and reads their data as bundle paths', async () => {
+    const core = new LocalCore({ db, secrets });
+    const read = await core.adminRequest<{ references: Array<{ framing: string; mediaId: string | null; builtinPath: string; name: string }> }>('/api/admin/persona/references');
+    expect(read.references).toHaveLength(3);
+    expect(read.references.map((item) => item.framing)).toEqual(['front', 'full-body', 'side']);
+    expect(read.references.every((item) => item.mediaId === null && item.builtinPath.startsWith('/reference-images/'))).toBe(true);
+
+    const data = await core.adminRequest<{ builtinPath: string }>(`/api/admin/persona/references/${encodeURIComponent(read.references[0]!.name)}/data`);
+    expect(data.builtinPath).toContain('01_main_reference_front_half.png');
+  });
+
+  it('uploads a user reference to a slot, reads it back, and deletes it back to builtin', async () => {
+    const core = new LocalCore({ db, secrets, mediaStore: new MemoryMediaStore() });
+    const form = new FormData();
+    form.append('file', new File([new TextEncoder().encode('fake-png')], 'me.png', { type: 'image/png' }));
+
+    const uploaded = await core.adminRequest<{ reference: { framing: string; mediaId: string | null }; referenceImages: string[] }>(
+      '/api/admin/persona/references/slot/front', { method: 'POST', body: form }
+    );
+    expect(uploaded.reference.framing).toBe('front');
+    expect(uploaded.reference.mediaId).not.toBeNull();
+
+    const data = await core.adminRequest<{ dataBase64: string; mime: string }>(`/api/admin/persona/references/${encodeURIComponent(uploaded.reference.mediaId!)}/data`);
+    expect(data.mime).toBe('image/png');
+    expect(new TextDecoder().decode(Uint8Array.from(atob(data.dataBase64), (char) => char.charCodeAt(0)))).toBe('fake-png');
+
+    const removed = await core.adminRequest<{ deleted: boolean; referenceImages: string[] }>(
+      `/api/admin/persona/references/${encodeURIComponent(uploaded.reference.mediaId!)}`, { method: 'DELETE' }
+    );
+    expect(removed.deleted).toBe(true);
+    const after = await core.adminRequest<{ references: Array<{ framing: string; mediaId: string | null }> }>('/api/admin/persona/references');
+    expect(after.references.find((item) => item.framing === 'front')!.mediaId).toBeNull();
+  });
+
+  it('keeps MCP tokens in Keychain: SQLite stores only the ref and GET never returns the token', async () => {
+    const core = new LocalCore({ db, secrets, mcp: idleMcp() });
+    const created = await core.adminRequest<{ server: Record<string, unknown> }>('/api/admin/mcp/servers', {
+      method: 'PUT',
+      body: { id: 'my-mcp', name: 'my-mcp', url: 'https://mcp.example.com/mcp', transport: 'streamable-http', token: 'super-secret-token', enabled: true, required: false }
+    });
+    expect(created.server.authConfigured).toBe(true);
+    expect(created.server.token).toBeUndefined();
+
+    const row = (await db.query<{ secret_ref: string }>('SELECT secret_ref FROM mcp_servers WHERE id=?', ['my-mcp']))[0]!;
+    expect(row.secret_ref).toBe('mcp.my-mcp.token');
+    expect(row.secret_ref).not.toContain('super-secret-token');
+    await expect(secrets.get('mcp.my-mcp.token')).resolves.toBe('super-secret-token');
+
+    // Overview redacts the ref too.
+    const overview = await core.adminRequest<{ servers: Array<Record<string, unknown>> }>('/api/admin/mcp/servers');
+    expect(overview.servers[0]).toMatchObject({ id: 'my-mcp', authConfigured: true });
+    expect(overview.servers[0]!.secretKey).toBeUndefined();
+
+    // Updating with a new token overwrites; explicit '' deletes it.
+    await core.adminRequest('/api/admin/mcp/servers', { method: 'PUT', body: { id: 'my-mcp', url: 'https://mcp.example.com/mcp', token: 'token-2' } });
+    await expect(secrets.get('mcp.my-mcp.token')).resolves.toBe('token-2');
+    await core.adminRequest('/api/admin/mcp/servers', { method: 'PUT', body: { id: 'my-mcp', url: 'https://mcp.example.com/mcp', token: '' } });
+    await expect(secrets.get('mcp.my-mcp.token')).resolves.toBeNull();
+    const after = (await db.query<{ secret_ref: string | null }>('SELECT secret_ref FROM mcp_servers WHERE id=?', ['my-mcp']))[0]!;
+    expect(after.secret_ref).toBe('');
+
+    // Deleting the server removes the token ref as well.
+    await core.adminRequest('/api/admin/mcp/servers', { method: 'PUT', body: { id: 'my-mcp', url: 'https://mcp.example.com/mcp', token: 'token-3' } });
+    await core.adminRequest('/api/admin/mcp/servers/my-mcp', { method: 'DELETE' });
+    await expect(secrets.get('mcp.my-mcp.token')).resolves.toBeNull();
+    expect((await db.query('SELECT COUNT(*) c FROM mcp_servers WHERE id=?', ['my-mcp']))[0]!.c).toBe(0);
+  });
+
   it('keeps every admin memory active when the clear transaction fails', async () => {
     const localCore = new LocalCore({ db, mcp: idleMcp() });
     const first = await localCore.memoryRepo.upsert({ kind: 'event', content: '清空失败一' });
