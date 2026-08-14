@@ -316,6 +316,22 @@ describe('LocalCore webSearch integration', () => {
 
   afterEach(async () => await db.close());
 
+  it('returns a usable empty webSearch shape before any config exists', async () => {
+    const core = new LocalCore({ db, secrets });
+    const read = await core.adminRequest<{ models: Record<string, unknown> }>('/api/admin/models');
+    const web = read.models.webSearch as Record<string, unknown>;
+    expect(web).toBeDefined();
+    expect(web.enabled).toBe(false);
+    expect(web.providers).toEqual([]);
+    expect(web.maxResults).toBe(5);
+    expect((web.doubao as Record<string, unknown>).apiKeyConfigured).toBe(false);
+    expect((web.tavily as Record<string, unknown>).apiKeyConfigured).toBe(false);
+    // The empty shape must be saveable: first save creates the row.
+    await saveWebSearch(core);
+    const after = await core.adminRequest<{ models: Record<string, unknown> }>('/api/admin/models');
+    expect((after.models.webSearch as Record<string, unknown>).enabled).toBe(true);
+  });
+
   it('round-trips webSearch config through admin models and stores keys in Keychain', async () => {
     const recorded: { requests: Array<{ url: string; secretRef: string | null }> } = { requests: [] };
     const http = searchHttp(recorded);
@@ -331,14 +347,72 @@ describe('LocalCore webSearch integration', () => {
     expect((web.doubao as Record<string, unknown>).apiKey).toBeUndefined();
     expect(web.maxResults).toBe(5);
 
-    await expect(secrets.get('provider.webSearch.key')).resolves.toBe('doubao-key');
-    await expect(secrets.get('provider.webSearch.fallback.key')).resolves.toBe('tavily-key');
+    await expect(secrets.get('provider.webSearch.doubao.key')).resolves.toBe('doubao-key');
+    await expect(secrets.get('provider.webSearch.tavily.key')).resolves.toBe('tavily-key');
 
     const runtime = await createWebSearch(http, core.configRepo);
     expect(runtime).not.toBeNull();
     expect(runtime!.order).toEqual(['doubao', 'tavily']);
     expect(runtime!.providers[0]!.configured).toBe(true);
     expect(runtime!.providers[1]!.configured).toBe(true);
+  });
+
+  it('deletes the Keychain secret when the panel sends an explicit empty apiKey', async () => {
+    const recorded: { requests: Array<{ url: string; secretRef: string | null }> } = { requests: [] };
+    const http = searchHttp(recorded);
+    const core = new LocalCore({ db, secrets, http });
+    await saveWebSearch(core);
+    await expect(secrets.get('provider.webSearch.doubao.key')).resolves.toBe('doubao-key');
+
+    // "删除密钥": the editor sends apiKey: '' — the doubao ref must be gone.
+    await core.adminRequest('/api/admin/models', {
+      method: 'PUT',
+      body: {
+        webSearch: {
+          enabled: true,
+          providers: ['doubao'],
+          maxResults: 5,
+          timeoutMs: 15000,
+          doubao: { edition: 'custom', baseUrl: 'https://doubao.test', apiKey: '' }
+        }
+      }
+    });
+
+    await expect(secrets.get('provider.webSearch.doubao.key')).resolves.toBeNull();
+    const read = await core.adminRequest<{ models: Record<string, unknown> }>('/api/admin/models');
+    expect((read.models.webSearch as Record<string, unknown>).doubao as Record<string, unknown>).toMatchObject({ apiKeyConfigured: false });
+    const runtime = await createWebSearch(http, core.configRepo);
+    expect(runtime!.providers[0]!.configured).toBe(false);
+  });
+
+  it('swaps provider order without swapping credentials', async () => {
+    const recorded: { requests: Array<{ url: string; secretRef: string | null }> } = { requests: [] };
+    const http = searchHttp(recorded);
+    const core = new LocalCore({ db, secrets, http });
+    await saveWebSearch(core); // doubao -> tavily, keys per identity
+
+    // Reorder to tavily -> doubao WITHOUT resubmitting any key.
+    await core.adminRequest('/api/admin/models', {
+      method: 'PUT',
+      body: {
+        webSearch: {
+          enabled: true,
+          providers: ['tavily', 'doubao'],
+          maxResults: 5,
+          timeoutMs: 15000,
+          doubao: { edition: 'custom', baseUrl: 'https://doubao.test' },
+          tavily: { baseUrl: 'https://tavily.test' }
+        }
+      }
+    });
+
+    const runtime = await createWebSearch(http, core.configRepo);
+    expect(runtime!.order).toEqual(['tavily', 'doubao']);
+    // Tavily must still resolve to the tavily key, doubao to the doubao key.
+    await runtime!.providers[0]!.search({ query: '重排测试', maxResults: 3 });
+    await runtime!.providers[1]!.search({ query: '重排测试', maxResults: 3 });
+    expect(recorded.requests[0]!.secretRef).toBe('provider.webSearch.tavily.key');
+    expect(recorded.requests[1]!.secretRef).toBe('provider.webSearch.doubao.key');
   });
 
   it('runs web search during replies and records citations in message meta', async () => {

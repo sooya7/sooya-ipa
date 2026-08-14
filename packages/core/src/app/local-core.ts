@@ -532,10 +532,15 @@ export class LocalCore implements LocalCoreApi {
   }
 
   /** Maps the web panel's WebSearchConfig-shaped payload (nested doubao/
-   * tavily blocks, provider order) onto the local `webSearch` provider row:
-   * primary provider + optional fallback, each with its own Keychain ref.
-   * 'responses' stays in the mirrored settings for UI order but has no
-   * on-device runtime, so it is never selected as primary/fallback. */
+   * tavily blocks, provider order) onto the local `webSearch` provider row.
+   *
+   * Secret references are keyed by PROVIDER IDENTITY, not by slot, so
+   * reordering providers never swaps credentials: `provider.webSearch.doubao.key`
+   * / `provider.webSearch.tavily.key`. A submitted apiKey overwrites its
+   * identity ref; an explicitly empty apiKey ('' — the panel's "删除密钥")
+   * removes the ref from Keychain; an absent apiKey preserves whatever the
+   * identity currently holds. 'responses' stays in the mirrored settings for
+   * UI order but has no on-device runtime, so it is never a provider. */
   private async saveWebSearchConfig(raw: Record<string, unknown>): Promise<void> {
     const enabled = raw.enabled === true;
     const providers = Array.isArray(raw.providers) ? raw.providers.filter((item): item is string => typeof item === 'string') : [];
@@ -547,23 +552,39 @@ export class LocalCore implements LocalCoreApi {
     const primaryCfg = primary === 'tavily' ? tavily : doubao;
     const secondaryCfg = primary === 'tavily' ? doubao : tavily;
     const baseUrl = typeof primaryCfg.baseUrl === 'string' && primaryCfg.baseUrl.trim() ? primaryCfg.baseUrl.trim() : primary === 'tavily' ? TAVILY_SEARCH_DEFAULT_URL : DOUBAO_SEARCH_DEFAULT_URL;
-    const submittedKey = typeof primaryCfg.apiKey === 'string' ? primaryCfg.apiKey.trim() : '';
     const secondaryBaseUrl = typeof secondaryCfg.baseUrl === 'string' && secondaryCfg.baseUrl.trim()
       ? secondaryCfg.baseUrl.trim()
       : fallback === 'tavily' ? TAVILY_SEARCH_DEFAULT_URL : fallback === 'doubao' ? DOUBAO_SEARCH_DEFAULT_URL : '';
-    const secondaryKey = fallback ? (typeof secondaryCfg.apiKey === 'string' ? secondaryCfg.apiKey.trim() : '') : '';
     if (!enabled || !baseUrl) { await this.configRepo.removeProvider('webSearch'); return; }
     const existing = await this.configRepo.getProvider('webSearch');
-    const secretRef = existing?.secretRef ?? (submittedKey ? 'provider.webSearch.key' : null);
-    const secondarySecretRef = fallback
-      ? (typeof existing?.options.secondarySecretRef === 'string' && existing.options.secondarySecretRef.trim()
-        ? existing.options.secondarySecretRef
-        : secondaryKey ? 'provider.webSearch.fallback.key' : null)
-      : null;
-    if (this.options.secrets) {
-      if (secretRef && submittedKey) await this.options.secrets.set(secretRef, submittedKey);
-      if (secondarySecretRef && secondaryKey) await this.options.secrets.set(secondarySecretRef, secondaryKey);
+    // Identity -> current ref map from the previous row (works across reorders).
+    const identityRefs = new Map<string, string | null>();
+    if (existing) {
+      identityRefs.set(existing.provider === 'tavily' ? 'tavily' : 'doubao', existing.secretRef);
+      const oldFallback = existing.options.fallback === 'tavily' ? 'tavily' : existing.options.fallback === 'doubao' ? 'doubao' : null;
+      if (oldFallback) {
+        identityRefs.set(oldFallback, typeof existing.options.secondarySecretRef === 'string' ? existing.options.secondarySecretRef : null);
+      }
     }
+    const resolveRef = async (identity: 'doubao' | 'tavily', cfg: Record<string, unknown>): Promise<string | null> => {
+      const submitted = Object.prototype.hasOwnProperty.call(cfg, 'apiKey') && typeof cfg.apiKey === 'string' ? cfg.apiKey.trim() : undefined;
+      const ref = `provider.webSearch.${identity}.key`;
+      if (submitted !== undefined && submitted !== '') {
+        if (this.options.secrets) await this.options.secrets.set(ref, submitted);
+        return ref;
+      }
+      if (submitted === '') {
+        // Explicit delete ("删除密钥"): drop the identity's ref from Keychain.
+        const previous = identityRefs.get(identity) ?? null;
+        if (this.options.secrets && previous && previous !== ref) await this.options.secrets.remove(previous);
+        if (this.options.secrets) await this.options.secrets.remove(ref);
+        return null;
+      }
+      // Not touched: keep whatever this identity currently holds.
+      return identityRefs.get(identity) ?? null;
+    };
+    const secretRef = await resolveRef(primary, primaryCfg);
+    const secondarySecretRef = fallback ? await resolveRef(fallback, secondaryCfg) : null;
     await this.configRepo.setProvider({
       capability: 'webSearch',
       provider: primary,
@@ -676,6 +697,9 @@ export class LocalCore implements LocalCoreApi {
         if (provider.capability === 'webSearch') { models.webSearch = toAdminWebSearchConfig(provider); continue; }
         models[provider.capability] = { provider: provider.provider, model: provider.model, baseUrl: provider.baseUrl, secretRef: provider.secretRef, apiKeyConfigured: Boolean(provider.secretRef), apiKeyBound: true, options: provider.options };
       }
+      // Fresh installs have no webSearch row yet; still return a usable empty
+      // shape so the panel renders the form (and the first save creates it).
+      if (!(models.webSearch && isRecord(models.webSearch))) models.webSearch = EMPTY_WEB_SEARCH_CONFIG;
       // Preserve panel-provided details the row does not track (e.g. a
       // 'responses' entry in the provider order) from the mirrored settings.
       const saved = await this.settingsRepo.get<Record<string, unknown>>('models', {});
@@ -1241,6 +1265,17 @@ function redactModelConfig(value: Record<string, unknown>): Record<string, unkno
     return [key, safe];
   }));
 }
+
+/** Empty nested WebSearchConfig returned before any webSearch row exists, so
+ * the panel always renders an editable form (fresh-install first save). */
+const EMPTY_WEB_SEARCH_CONFIG: Record<string, unknown> = {
+  enabled: false,
+  providers: [],
+  maxResults: 5,
+  timeoutMs: 15_000,
+  doubao: { edition: 'custom', baseUrl: '', apiKeyConfigured: false },
+  tavily: { baseUrl: '', apiKeyConfigured: false }
+};
 
 /** Converts the persisted webSearch provider row back into the panel's nested
  * WebSearchConfig shape (enabled/providers/maxResults/timeoutMs/doubao/tavily). */
