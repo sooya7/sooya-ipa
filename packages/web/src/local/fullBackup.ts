@@ -50,14 +50,25 @@ export function fullBackupAvailable(): boolean {
 
 export async function exportFullBackup(options: { includeSecrets: boolean; password?: string }): Promise<FullBackupExportResult> {
   const archive = nativePlugin('SOOYAArchive');
+  const database = nativePlugin('SOOYADatabase');
   const password = options.password?.trim() ?? '';
   if (options.includeSecrets && password.length < 10) throw new Error('包含密钥时，备份密码至少需要 10 个字符');
 
-  const result = await archive.call<FullBackupExportResult>('createFullBackup', {
-    schemaVersion: LATEST_SCHEMA_VERSION,
-    includeSecrets: options.includeSecrets,
-    ...(options.includeSecrets ? { password } : {})
-  });
+  const snapshotName = `full-export-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.sqlite3`;
+  await database.call('backup', { name: snapshotName });
+
+  let result: FullBackupExportResult;
+  try {
+    result = await archive.call<FullBackupExportResult>('createFullBackup', {
+      snapshotName,
+      schemaVersion: LATEST_SCHEMA_VERSION,
+      includeSecrets: options.includeSecrets,
+      ...(options.includeSecrets ? { password } : {})
+    });
+  } catch (error) {
+    await archive.call('cleanup', { path: `backups/${snapshotName}` }).catch(() => undefined);
+    throw error;
+  }
 
   try {
     await Share.share({
