@@ -1,5 +1,5 @@
 import type { LocalDatabase, RunResult } from '../platform/database.js';
-import { runOperation, runTransaction } from '../db/database.js';
+import { placeholders, runOperation, runTransaction } from '../db/database.js';
 
 export interface BuiltinStickerSeed {
   id: string;
@@ -32,16 +32,25 @@ export interface BuiltinStickerImportResult {
   insertedStickerIds: string[];
 }
 
-interface VerifiedBuiltinRow { media_id: string; }
+interface VerifiedBuiltinRow { media_id: string; rel_path: string; sha256: string; }
 
+/**
+ * Verifies which built-in sticker media rows are present with the exact
+ * bundled path/hash. One batched IN query replaces the previous per-seed
+ * query (244 native bridge round trips on every cold start); the rel_path and
+ * sha256 checks are kept, done in JS against the returned rows.
+ */
 async function verifiedMediaIds(db: LocalDatabase, seeds: readonly BuiltinStickerSeed[]): Promise<string[]> {
-  const verified: string[] = [];
-  for (const seed of seeds) {
-    const rows = await db.query<VerifiedBuiltinRow>(`SELECT m.id media_id FROM media m
-      WHERE m.id=? AND m.origin='builtin' AND m.rel_path=? AND m.sha256=?`, [seed.mediaId, seed.assetPath, seed.sha256]);
-    if (rows.length > 0) verified.push(seed.mediaId);
-  }
-  return verified;
+  if (seeds.length === 0) return [];
+  const rows = await db.query<VerifiedBuiltinRow>(`SELECT m.id media_id, m.rel_path, m.sha256 FROM media m
+    WHERE m.origin='builtin' AND m.id IN (${placeholders(seeds.length)})`, seeds.map((seed) => seed.mediaId));
+  const byId = new Map(rows.map((row) => [row.media_id, row]));
+  return seeds
+    .filter((seed) => {
+      const row = byId.get(seed.mediaId);
+      return row !== undefined && row.rel_path === seed.assetPath && row.sha256 === seed.sha256;
+    })
+    .map((seed) => seed.mediaId);
 }
 
 /** Imports one bundled server snapshot once without changing any existing local record. */
