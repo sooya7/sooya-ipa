@@ -1,0 +1,271 @@
+name: temp ota diagnostics patch
+
+on:
+  push:
+    branches: [fix/ota-status-diagnostics]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/ota-status-diagnostics
+          fetch-depth: 0
+      - name: Apply OTA diagnostics patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          component = r'''import { useCallback, useEffect, useMemo, useState } from 'react';
+          import { adminRequest } from '../../lib/admin.js';
+
+          export const DEFAULT_OTA_MANIFEST_URL = 'https://sooya.icu/ota/stable.json';
+
+          interface OtaState {
+            current_web_version?: string | null;
+            last_good_web_version?: string | null;
+            pending_web_version?: string | null;
+            blocked_web_version?: string | null;
+            failed_web_version?: string | null;
+            last_checked_at?: string | null;
+            last_downloaded_at?: string | null;
+            last_applied_at?: string | null;
+            last_failed_at?: string | null;
+            last_error?: string | null;
+          }
+
+          interface OtaStatusResponse {
+            manifestUrl: string;
+            state: OtaState | null;
+          }
+
+          function dateText(value: string | null | undefined): string {
+            if (!value) return '暂无';
+            const time = Date.parse(value);
+            return Number.isFinite(time) ? new Date(time).toLocaleString('zh-CN', { hour12: false }) : value;
+          }
+
+          function versionText(value: string | null | undefined): string {
+            return value || '暂无';
+          }
+
+          export function OtaDiagnosticsCard({ onNotice }: { onNotice: (message: string) => void }) {
+            const [data, setData] = useState<OtaStatusResponse | null>(null);
+            const [loading, setLoading] = useState(true);
+            const [saving, setSaving] = useState(false);
+            const [error, setError] = useState<string | null>(null);
+            const [manifestUrl, setManifestUrl] = useState(DEFAULT_OTA_MANIFEST_URL);
+
+            const load = useCallback(async () => {
+              setLoading(true);
+              try {
+                const result = await adminRequest<OtaStatusResponse>('/api/admin/ota');
+                setData(result);
+                setManifestUrl(result.manifestUrl || DEFAULT_OTA_MANIFEST_URL);
+                setError(null);
+              } catch (cause) {
+                setError(cause instanceof Error ? cause.message : 'OTA 状态读取失败');
+              } finally {
+                setLoading(false);
+              }
+            }, []);
+
+            useEffect(() => { void load(); }, [load]);
+
+            const state = data?.state ?? {};
+            const status = useMemo(() => {
+              if (state.last_error) return { text: '异常', className: 'is-warn' };
+              if (state.blocked_web_version) return { text: '已阻止版本', className: 'is-warn' };
+              if (state.pending_web_version) return { text: '等待冷启动应用', className: 'is-ready' };
+              if (state.current_web_version) return { text: '已启用', className: 'is-ready' };
+              return { text: '未验证', className: 'is-muted' };
+            }, [state.blocked_web_version, state.current_web_version, state.last_error, state.pending_web_version]);
+
+            const save = async () => {
+              const next = manifestUrl.trim();
+              if (!/^https:\/\//iu.test(next)) {
+                onNotice('OTA Manifest 地址必须使用 HTTPS');
+                return;
+              }
+              setSaving(true);
+              try {
+                const result = await adminRequest<OtaStatusResponse>('/api/admin/ota', { method: 'PUT', body: { manifestUrl: next } });
+                setData(result);
+                setManifestUrl(result.manifestUrl || next);
+                setError(null);
+                onNotice('OTA Manifest 地址已保存');
+              } catch (cause) {
+                onNotice(cause instanceof Error ? cause.message : 'OTA 地址保存失败');
+              } finally {
+                setSaving(false);
+              }
+            };
+
+            return (
+              <article className="admin-card" data-testid="admin-ota-diagnostics">
+                <div className="admin-card-heading">
+                  <div>
+                    <span className="admin-card-kicker">OTA DIAGNOSTICS</span>
+                    <h2>OTA 状态</h2>
+                    <p>查看设备是否已经检查、下载和应用 Web Bundle。下载完成后需要彻底退出 App 再冷启动一次。</p>
+                  </div>
+                  <span className={`admin-status-chip ${status.className}`}>{loading ? '读取中' : status.text}</span>
+                </div>
+
+                {error && <p className="admin-inline-error" role="status">{error}</p>}
+
+                <div style={{ display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', margin: '14px 0' }}>
+                  <div><small>当前 Web 版本</small><strong className="admin-breakable" style={{ display: 'block' }}>{versionText(state.current_web_version)}</strong></div>
+                  <div><small>待应用版本</small><strong className="admin-breakable" style={{ display: 'block' }}>{versionText(state.pending_web_version)}</strong></div>
+                  <div><small>最后良好版本</small><strong className="admin-breakable" style={{ display: 'block' }}>{versionText(state.last_good_web_version)}</strong></div>
+                  <div><small>已阻止版本</small><strong className="admin-breakable" style={{ display: 'block' }}>{versionText(state.blocked_web_version)}</strong></div>
+                  <div><small>最后检查</small><strong style={{ display: 'block' }}>{dateText(state.last_checked_at)}</strong></div>
+                  <div><small>最后下载</small><strong style={{ display: 'block' }}>{dateText(state.last_downloaded_at)}</strong></div>
+                  <div><small>最后应用</small><strong style={{ display: 'block' }}>{dateText(state.last_applied_at)}</strong></div>
+                  <div><small>最后失败</small><strong style={{ display: 'block' }}>{dateText(state.last_failed_at)}</strong></div>
+                </div>
+
+                <label style={{ display: 'grid', gap: 6 }}>
+                  <span>Stable Manifest 地址</span>
+                  <input
+                    data-testid="admin-ota-manifest-url"
+                    value={manifestUrl}
+                    onChange={(event) => setManifestUrl(event.target.value)}
+                    inputMode="url"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    placeholder={DEFAULT_OTA_MANIFEST_URL}
+                  />
+                </label>
+
+                {!data?.manifestUrl && (
+                  <p style={{ margin: '8px 0 0' }}>
+                    <strong>当前没有持久化 OTA 地址。</strong> 本页面已填入生产 Stable 地址，保存后后续启动会直接使用它。
+                  </p>
+                )}
+
+                {state.last_error && <p className="admin-inline-error" role="status">最近错误：{state.last_error}</p>}
+
+                <div className="admin-actions" style={{ marginTop: 12 }}>
+                  <button type="button" onClick={() => void load()} disabled={loading}>{loading ? '刷新中…' : '刷新状态'}</button>
+                  <button type="button" onClick={() => void save()} disabled={saving}>{saving ? '保存中…' : data?.manifestUrl ? '保存地址' : '写入默认地址'}</button>
+                </div>
+              </article>
+            );
+          }
+          '''
+
+          test = r'''// @vitest-environment jsdom
+          import { act } from 'react';
+          import { createRoot, type Root } from 'react-dom/client';
+          import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+          import { DEFAULT_OTA_MANIFEST_URL, OtaDiagnosticsCard } from './OtaDiagnosticsCard.js';
+
+          const adminRequest = vi.hoisted(() => vi.fn());
+          vi.mock('../../lib/admin.js', () => ({ adminRequest }));
+
+          let root: Root | null = null;
+          let container: HTMLDivElement | null = null;
+
+          beforeEach(() => {
+            container = document.createElement('div');
+            document.body.append(container);
+            root = createRoot(container);
+            adminRequest.mockReset();
+          });
+
+          afterEach(async () => {
+            if (root) await act(async () => root!.unmount());
+            container?.remove();
+            root = null;
+            container = null;
+          });
+
+          describe('OtaDiagnosticsCard', () => {
+            it('shows the production manifest suggestion when the device has no persisted URL', async () => {
+              adminRequest.mockResolvedValueOnce({ manifestUrl: '', state: { pending_web_version: null } });
+              await act(async () => {
+                root!.render(<OtaDiagnosticsCard onNotice={vi.fn()} />);
+                await Promise.resolve();
+                await Promise.resolve();
+              });
+              await vi.waitFor(() => expect(adminRequest).toHaveBeenCalledWith('/api/admin/ota'));
+              expect((container!.querySelector('[data-testid="admin-ota-manifest-url"]') as HTMLInputElement).value).toBe(DEFAULT_OTA_MANIFEST_URL);
+              expect(container!.textContent).toContain('当前没有持久化 OTA 地址');
+            });
+
+            it('persists the default manifest URL from the diagnostics card', async () => {
+              const notice = vi.fn();
+              adminRequest
+                .mockResolvedValueOnce({ manifestUrl: '', state: {} })
+                .mockResolvedValueOnce({ manifestUrl: DEFAULT_OTA_MANIFEST_URL, state: {} });
+              await act(async () => {
+                root!.render(<OtaDiagnosticsCard onNotice={notice} />);
+                await Promise.resolve();
+                await Promise.resolve();
+              });
+              await vi.waitFor(() => expect(adminRequest).toHaveBeenCalledTimes(1));
+              const button = Array.from(container!.querySelectorAll('button')).find((item) => item.textContent === '写入默认地址') as HTMLButtonElement;
+              await act(async () => {
+                button.click();
+                await Promise.resolve();
+              });
+              await vi.waitFor(() => expect(adminRequest).toHaveBeenCalledWith('/api/admin/ota', { method: 'PUT', body: { manifestUrl: DEFAULT_OTA_MANIFEST_URL } }));
+              expect(notice).toHaveBeenCalledWith('OTA Manifest 地址已保存');
+            });
+          });
+          '''
+
+          Path('packages/web/src/components/admin/OtaDiagnosticsCard.tsx').write_text(component, encoding='utf-8')
+          Path('packages/web/src/components/admin/OtaDiagnosticsCard.test.tsx').write_text(test, encoding='utf-8')
+
+          admin = Path('packages/web/src/components/AdminPanel.tsx')
+          text = admin.read_text(encoding='utf-8')
+          old = "import { ContentManagementPage } from './admin/ContentManagementPage.js';"
+          new = old + "\nimport { OtaDiagnosticsCard } from './admin/OtaDiagnosticsCard.js';"
+          if old not in text:
+            raise SystemExit('AdminPanel import anchor not found')
+          text = text.replace(old, new, 1)
+          old = '    <section className="admin-operations">\n      <article className="admin-card" data-testid="admin-error-list">'
+          new = '    <section className="admin-operations">\n      <OtaDiagnosticsCard onNotice={onNotice} />\n      <article className="admin-card" data-testid="admin-error-list">'
+          if old not in text:
+            raise SystemExit('AdminPanel operations anchor not found')
+          admin.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          updater = Path('packages/web/src/local/otaUpdater.ts')
+          text = updater.read_text(encoding='utf-8')
+          anchor = "interface UpdaterPlugin {"
+          if anchor not in text:
+            raise SystemExit('otaUpdater constant anchor not found')
+          text = text.replace(anchor, "export const DEFAULT_OTA_MANIFEST_URL = 'https://sooya.icu/ota/stable.json';\n\n" + anchor, 1)
+          text = text.replace("getPreference('ota.manifestUrl', '')", "getPreference('ota.manifestUrl', DEFAULT_OTA_MANIFEST_URL)")
+          updater.write_text(text, encoding='utf-8')
+
+          boot = Path('packages/web/src/local/nativeBoot.ts')
+          text = boot.read_text(encoding='utf-8')
+          old = "import { prepareOtaUpdater, type LocalOtaUpdater, type NativeReleaseInfo } from './otaUpdater.js';"
+          new = "import { DEFAULT_OTA_MANIFEST_URL, prepareOtaUpdater, type LocalOtaUpdater, type NativeReleaseInfo } from './otaUpdater.js';"
+          if old not in text:
+            raise SystemExit('nativeBoot import anchor not found')
+          text = text.replace(old, new, 1)
+          text = text.replace("getPreference('ota.manifestUrl', '').catch(() => '')", "getPreference('ota.manifestUrl', DEFAULT_OTA_MANIFEST_URL).catch(() => DEFAULT_OTA_MANIFEST_URL)")
+          boot.write_text(text, encoding='utf-8')
+          PY
+      - name: Commit generated patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/web/src/components/AdminPanel.tsx \
+                  packages/web/src/components/admin/OtaDiagnosticsCard.tsx \
+                  packages/web/src/components/admin/OtaDiagnosticsCard.test.tsx \
+                  packages/web/src/local/otaUpdater.ts \
+                  packages/web/src/local/nativeBoot.ts
+          git rm .github/workflows/_temp-ota-diagnostics-patch.yml
+          git commit -m "feat(admin): add OTA status diagnostics"
+          git push origin HEAD:fix/ota-status-diagnostics
