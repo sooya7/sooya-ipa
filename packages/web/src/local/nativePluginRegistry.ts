@@ -1,4 +1,5 @@
 import { Capacitor, registerPlugin } from '@capacitor/core';
+import { withLegacyNativePluginCall } from './nativePluginAdapter.js';
 
 /**
  * App-local Capacitor plugins are not npm plugins, so Capacitor cannot discover
@@ -19,5 +20,8 @@ export const NATIVE_LOCAL_PLUGIN_NAMES = [
 
 const capacitor = Capacitor as unknown as { Plugins?: Record<string, unknown> };
 const plugins = capacitor.Plugins ?? {};
-for (const name of NATIVE_LOCAL_PLUGIN_NAMES) plugins[name] = registerPlugin(name);
+for (const name of NATIVE_LOCAL_PLUGIN_NAMES) {
+  const proxy = registerPlugin(name) as Record<string, unknown>;
+  plugins[name] = withLegacyNativePluginCall(proxy, name);
+}
 capacitor.Plugins = plugins;
