@@ -53,6 +53,3 @@ Path(path).write_text(text)
 
 replace_once("ios/App/App/Plugins/SOOYAReleaseConfig.swift", "    static let nativeBaseVersion = 9\n", "    static let nativeBaseVersion = 10\n")
 Path("ios/App/App/native-base.version").write_text("10\n")
-replace_once(".github/workflows/ota.yml", "            --native-min 9 --native-max 9\n", "            --native-min 10 --native-max 10\n")
-
-# trigger
