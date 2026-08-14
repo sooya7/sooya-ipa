@@ -59,6 +59,9 @@ export function McpAdminPage({ onNotice }: { onNotice: (message: string) => void
   const [busy, setBusy] = useState<string | null>(null);
   const [showTools, setShowTools] = useState(false);
   const [tool, setTool] = useState<(AdminMcpTool & { inputSchema: Record<string, unknown> }) | null>(null);
+  const [editing, setEditing] = useState<AdminMcpServer | 'new' | null>(null);
+  const [draft, setDraft] = useState({ id: '', name: '', url: '', transport: 'streamable-http' as 'streamable-http' | 'sse', token: '', enabled: true, required: false, clearToken: false });
+  const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -73,6 +76,54 @@ export function McpAdminPage({ onNotice }: { onNotice: (message: string) => void
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+
+  const openNew = () => {
+    setDraft({ id: '', name: '', url: '', transport: 'streamable-http', token: '', enabled: true, required: false, clearToken: false });
+    setEditing('new');
+  };
+
+  const openEdit = (server: AdminMcpServer) => {
+    setDraft({ id: server.id, name: server.id, url: server.url, transport: server.transport === 'sse' ? 'sse' : 'streamable-http', token: '', enabled: server.enabled, required: server.required, clearToken: false });
+    setEditing(server);
+  };
+
+  const saveServer = async () => {
+    const url = draft.url.trim();
+    if (!url) { onNotice('请填写 MCP Server URL'); return; }
+    setSaving(true);
+    try {
+      await adminApi.saveMcpServer({
+        ...(draft.id ? { id: draft.id } : {}),
+        name: draft.name.trim() || undefined,
+        url,
+        transport: draft.transport,
+        ...(draft.token ? { token: draft.token } : draft.clearToken ? { token: '' } : {}),
+        enabled: draft.enabled,
+        required: draft.required
+      });
+      onNotice('MCP Server 已保存');
+      setEditing(null);
+      await load();
+    } catch (cause) {
+      onNotice(cause instanceof Error ? cause.message : '保存 MCP Server 失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removeServer = async (server: AdminMcpServer) => {
+    if (!window.confirm(`删除 MCP Server「${server.id}」？其工具将立即从聊天中移除。`)) return;
+    setBusy(`delete:${server.id}`);
+    try {
+      await adminApi.deleteMcpServer(server.id);
+      onNotice('MCP Server 已删除');
+      await load();
+    } catch (cause) {
+      onNotice(cause instanceof Error ? cause.message : '删除 MCP Server 失败');
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const runServerAction = async (server: AdminMcpServer, action: 'test' | 'refresh') => {
     const key = `${server.id}:${action}`;
@@ -155,8 +206,31 @@ export function McpAdminPage({ onNotice }: { onNotice: (message: string) => void
       </section>
 
       <section className="admin-card admin-mcp-servers" data-testid="admin-mcp-servers">
-        <div className="admin-card-heading"><div><h3>MCP Server</h3><p>日常只需要关注连接状态和错误。URL 会移除查询参数和片段，认证只显示是否已配置。</p></div></div>
-        {overview.servers.length === 0 ? <AdminState kind="empty" message="当前没有配置 MCP Server" /> : overview.servers.map((server) => (
+        <div className="admin-card-heading"><div><h3>MCP Server</h3><p>日常只需要关注连接状态和错误。URL 会移除查询参数和片段，认证 Token 只进系统钥匙串，界面只显示是否已配置。</p></div>
+          <button type="button" className="admin-header-button" data-testid="admin-mcp-add" onClick={openNew}>+ 添加 MCP Server</button>
+        </div>
+        {editing && (
+          <div className="admin-card admin-mcp-editor" data-testid="admin-mcp-editor">
+            <div className="admin-card-heading"><div><h3>{editing === 'new' ? '添加 MCP Server' : `编辑 ${editing.id}`}</h3></div></div>
+            <label>名称 / ID<input value={draft.name} placeholder={draft.id || '例如 ombre'} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></label>
+            <label>URL<input value={draft.url} placeholder="https://mcp.example.com/mcp" onChange={(e) => setDraft({ ...draft, url: e.target.value })} /></label>
+            <label>传输方式<select value={draft.transport} onChange={(e) => setDraft({ ...draft, transport: e.target.value as 'streamable-http' | 'sse' })}>
+              <option value="streamable-http">streamable-http</option>
+              <option value="sse">sse</option>
+            </select></label>
+            <label>认证 Token<input type="password" autoComplete="off" value={draft.token} placeholder={editing !== 'new' ? '留空保持不变' : '粘贴 Bearer Token（可选）'} onChange={(e) => { setDraft({ ...draft, token: e.target.value, clearToken: false }); }} />
+              {editing !== 'new' && <small>{draft.clearToken ? '保存后删除当前 Token' : '留空则保持已保存的 Token'}</small>}
+              {editing !== 'new' && <button type="button" className="admin-link-button" onClick={() => { setDraft({ ...draft, token: '', clearToken: true }); }}>删除 Token</button>}
+            </label>
+            <label className="admin-toggle-row"><input type="checkbox" checked={draft.enabled} onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })} />启用</label>
+            <label className="admin-toggle-row"><input type="checkbox" checked={draft.required} onChange={(e) => setDraft({ ...draft, required: e.target.checked })} />Required（未连接时提示）</label>
+            <div className="admin-actions">
+              <button type="button" data-testid="admin-mcp-save" disabled={saving} onClick={() => void saveServer()}>{saving ? '保存中…' : '保存'}</button>
+              <button type="button" onClick={() => setEditing(null)}>取消</button>
+            </div>
+          </div>
+        )}
+        {overview.servers.length === 0 && !editing ? <AdminState kind="empty" message="当前没有配置 MCP Server，点击右上角「添加 MCP Server」开始接入" /> : overview.servers.map((server) => (
           <article className="admin-mcp-server" key={server.id}>
             <div className="admin-mcp-server-main">
               <div className="admin-mcp-server-title"><strong>{server.id}</strong><span className={`admin-status-chip ${stateClass(server.state)}`}>{statusLabel(server.state)}</span></div>
@@ -167,6 +241,8 @@ export function McpAdminPage({ onNotice }: { onNotice: (message: string) => void
             <div className="admin-actions admin-mcp-actions">
               <button type="button" disabled={busy === `${server.id}:test`} onClick={() => void runServerAction(server, 'test')}>{busy === `${server.id}:test` ? '测试中…' : '连接测试'}</button>
               <button type="button" disabled={busy === `${server.id}:refresh`} onClick={() => void runServerAction(server, 'refresh')}>{busy === `${server.id}:refresh` ? '刷新中…' : '刷新工具'}</button>
+              <button type="button" onClick={() => openEdit(server)}>编辑</button>
+              <button type="button" disabled={busy === `delete:${server.id}`} onClick={() => void removeServer(server)}>删除</button>
             </div>
           </article>
         ))}

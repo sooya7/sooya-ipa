@@ -534,6 +534,12 @@ export const adminApi = {
     ),
   memories: () => adminRequest<{ memories: AdminMemory[]; stats: Record<string, unknown>; recall?: AdminRecallTrace }>('/api/admin/memories'),
   mcpOverview: () => adminRequest<{ configSource: string; globalPolicy: Record<string, boolean>; servers: AdminMcpServer[]; tools: AdminMcpTool[]; memory: AdminOmbreStatus; dashboardUrl: string | null }>('/api/admin/mcp/servers'),
+  /** Creates or updates an MCP server. `token` semantics: a new value
+   * overwrites the Keychain entry, '' deletes it, absent keeps it. */
+  saveMcpServer: (server: { id?: string; name?: string; url: string; transport?: 'streamable-http' | 'sse'; token?: string; enabled?: boolean; required?: boolean }) =>
+    adminRequest<{ server: AdminMcpServer }>('/api/admin/mcp/servers', { method: 'PUT', body: server }),
+  deleteMcpServer: (id: string) =>
+    adminRequest<{ deleted: boolean }>(`/api/admin/mcp/servers/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   mcpToolSchema: (name: string) => adminRequest<{ tool: AdminMcpTool & { inputSchema: Record<string, unknown> } }>(`/api/admin/mcp/tools/${encodeURIComponent(name)}`),
   testMcpServer: (id: string) => adminRequest<{ ok: boolean; server: AdminMcpServer }>(`/api/admin/mcp/${encodeURIComponent(id)}/test`, { method: 'POST' }),
   refreshMcpTools: (id: string) => adminRequest<{ ok: boolean; server: AdminMcpServer }>(`/api/admin/mcp/${encodeURIComponent(id)}/refresh-tools`, { method: 'POST' }),

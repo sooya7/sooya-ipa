@@ -61,7 +61,11 @@ const adminMocks = vi.hoisted(() => ({
     }
   })),
   testMcpServer: vi.fn(),
-  refreshMcpTools: vi.fn()
+  refreshMcpTools: vi.fn(),
+  saveMcpServer: vi.fn(async (server: Record<string, unknown>) => ({
+    server: { id: String(server.id ?? 'mcp_x'), enabled: true, url: String(server.url), transport: String(server.transport ?? 'streamable-http'), authConfigured: Boolean(server.token), required: false, state: 'closed', toolCount: 0 }
+  })),
+  deleteMcpServer: vi.fn(async () => ({ deleted: true }))
 }));
 
 vi.mock('../../lib/admin.js', () => ({ adminApi: adminMocks }));
@@ -120,6 +124,73 @@ describe('McpAdminPage', () => {
 
     await vi.waitFor(() => expect(adminMocks.mcpToolSchema).toHaveBeenCalledWith('ombre.breath'));
     expect(container!.querySelector('[role="dialog"]')?.textContent).toContain('UNIQUE LONG TOOL DESCRIPTION');
+  });
+
+  it('creates an MCP server through the editor form', async () => {
+    await act(async () => {
+      root!.render(<McpAdminPage onNotice={vi.fn()} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(adminMocks.mcpOverview).toHaveBeenCalledTimes(1));
+
+    await act(async () => (container!.querySelector('[data-testid="admin-mcp-add"]') as HTMLButtonElement).click());
+    expect(container!.querySelector('[data-testid="admin-mcp-editor"]')).not.toBeNull();
+
+    const inputs = container!.querySelectorAll('input');
+    const setValue = (input: HTMLInputElement, value: string) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+      act(() => { setter.call(input, value); input.dispatchEvent(new Event('input', { bubbles: true })); });
+    };
+    await act(async () => {
+      setValue(inputs[0]!, 'my-server');
+      setValue(inputs[1]!, 'https://mcp.example.com/mcp');
+      setValue(inputs[2]!, 'secret-token');
+      await Promise.resolve();
+      (container!.querySelector('[data-testid="admin-mcp-save"]') as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+
+    await vi.waitFor(() => expect(adminMocks.saveMcpServer).toHaveBeenCalledTimes(1));
+    const payload = adminMocks.saveMcpServer.mock.calls[0]![0] as Record<string, unknown>;
+    expect(payload.url).toBe('https://mcp.example.com/mcp');
+    expect(payload.token).toBe('secret-token');
+    expect(payload.transport).toBe('streamable-http');
+    await vi.waitFor(() => expect(adminMocks.mcpOverview).toHaveBeenCalledTimes(2));
+  });
+
+  it('prompts to add a server instead of dead-ending when the list is empty', async () => {
+    adminMocks.mcpOverview.mockResolvedValueOnce({
+      configSource: 'local', globalPolicy: {},
+      servers: [], tools: [],
+      memory: { backend: 'local', connection: 'disconnected', health: null, lastCommit: null, pending: 0, uncertain: 0, lastDream: null, dashboardUrl: null },
+      dashboardUrl: null
+    });
+    await act(async () => {
+      root!.render(<McpAdminPage onNotice={vi.fn()} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(adminMocks.mcpOverview).toHaveBeenCalledTimes(1));
+    expect(container!.textContent).toContain('添加 MCP Server');
+    expect(container!.querySelector('[data-testid="admin-mcp-add"]')).not.toBeNull();
+  });
+
+  it('deletes a server after confirmation', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await act(async () => {
+      root!.render(<McpAdminPage onNotice={vi.fn()} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(adminMocks.mcpOverview).toHaveBeenCalledTimes(1));
+
+    const buttons = [...container!.querySelectorAll('.admin-mcp-actions button')];
+    const remove = buttons.find((button) => button.textContent === '删除') as HTMLButtonElement;
+    expect(remove).toBeDefined();
+    await act(async () => {
+      remove.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(adminMocks.deleteMcpServer).toHaveBeenCalledWith('ombre'));
+    (vi.spyOn(window, 'confirm') as ReturnType<typeof vi.spyOn>).mockRestore();
   });
 });
 
