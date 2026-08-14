@@ -95,7 +95,7 @@ jobs:
           test -n "${OTA_PUBLISH_TOKEN:-}" || { echo 'OTA_PUBLISH_TOKEN is required'; exit 1; }
           base="${OTA_PUBLISH_URL%/}"
           auth=(-H "Authorization: Bearer ${OTA_PUBLISH_TOKEN}")
-          curl --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/bundle.zip "${base}/bundles/${RELEASE_ID}/bundle.zip"
-          curl --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/manifests/${RELEASE_ID}/ota-manifest.json"
-          curl --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/stable.json.tmp"
-          curl --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/stable.json"
+          curl --http1.1 --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/bundle.zip "${base}/bundles/${RELEASE_ID}/bundle.zip"
+          curl --http1.1 --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/manifests/${RELEASE_ID}/ota-manifest.json"
+          curl --http1.1 --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/stable.json.tmp"
+          curl --http1.1 --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/stable.json"
