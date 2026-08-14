@@ -3,7 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppLink } from '../components/AppLink.js';
-import { classifyRoute, navigate, useAppRoute } from './navigation.js';
+import { classifyRoute, isAppNavigationUrl, navigate, useAppRoute } from './navigation.js';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -52,6 +52,19 @@ describe('classifyRoute', () => {
     ['/admin/features', 'admin']
   ] as const)('%s -> %s', (pathname, expected) => {
     expect(classifyRoute(pathname)).toBe(expected);
+  });
+});
+
+describe('isAppNavigationUrl', () => {
+  it('把 Capacitor 同主机 URL 识别为应用内导航', () => {
+    const location = { protocol: 'capacitor:', host: 'localhost' };
+    expect(isAppNavigationUrl(new URL('capacitor://localhost/moments'), location)).toBe(true);
+    expect(isAppNavigationUrl(new URL('capacitor://localhost/admin'), location)).toBe(true);
+  });
+
+  it('拒绝 Capacitor 下的其他主机', () => {
+    const location = { protocol: 'capacitor:', host: 'localhost' };
+    expect(isAppNavigationUrl(new URL('capacitor://other/admin'), location)).toBe(false);
   });
 });
 

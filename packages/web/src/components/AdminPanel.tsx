@@ -4,6 +4,7 @@ import { ApiError } from '../lib/api.js';
 import { useAutoNotice } from '../lib/autoNotice.js';
 import { navigate, APP_NAVIGATION_EVENT } from '../lib/navigation.js';
 import { AppLink } from './AppLink.js';
+import { currentSooyaClient, type SooyaClient } from '../lib/sooyaClient.js';
 import { formatAdminDateTime } from '../lib/adminDisplay.js';
 import { featureApi } from '../lib/features.js';
 import { AvatarEditor, emotionLabel, ReferencesEditor, StorageEditor } from './FeatureAdminPage.js';
@@ -1205,8 +1206,13 @@ function Overview({ data, counts, onRefresh }: { data: Dashboard; counts: { avai
   </>;
 }
 
+export function canUseAdminPanel(token: string | null, client: Pick<SooyaClient, 'adminRequest'> | null = currentSooyaClient()): boolean {
+  return Boolean(token || client?.adminRequest);
+}
+
 export default function AdminPanel({ initialTab = 'overview' }: { initialTab?: Tab } = {}) {
   const [token, setToken] = useState(() => getAdminToken());
+  const canUseAdmin = canUseAdminPanel(token);
   const [tokenInput, setTokenInput] = useState('');
   const [tab, setTab] = useState<Tab>(() => tabFromAdminPath(window.location.pathname, initialTab));
   const [dirty, setDirty] = useState(false);
@@ -1282,7 +1288,7 @@ export default function AdminPanel({ initialTab = 'overview' }: { initialTab?: T
   }, [setDirtyState, tab]);
 
   const loadOverview = useCallback(async () => {
-    if (!token) return;
+    if (!canUseAdmin) return;
     setLoading(true);
     try {
       const [system, capabilities, backups] = await Promise.all([
@@ -1302,7 +1308,7 @@ export default function AdminPanel({ initialTab = 'overview' }: { initialTab?: T
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, [canUseAdmin]);
 
   // 子页各自加载自己的数据；不能为了头像/语音页先阻塞等待三项概览请求。
   useEffect(() => {
@@ -1339,7 +1345,7 @@ export default function AdminPanel({ initialTab = 'overview' }: { initialTab?: T
     [data]
   );
 
-  if (!token) {
+  if (!canUseAdmin) {
     return <main className="admin-page admin-v2 admin-lock-page" data-testid="admin-lock"><form className="admin-lock-card" onSubmit={submitToken}><span className="admin-lock-icon"><Icon name="lock" /></span><span className="admin-eyebrow">SOOYA 管理中心</span><h1>输入管理令牌</h1><p>令牌只保存在当前设备，用于访问管理接口。</p><label htmlFor="admin-token">管理令牌</label><input id="admin-token" type="password" autoComplete="current-password" value={tokenInput} onChange={(e) => setTokenInput(e.target.value)} /><button type="submit" disabled={!tokenInput.trim()}>进入管理中心</button></form></main>;
   }
 
