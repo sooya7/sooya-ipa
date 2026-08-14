@@ -12,6 +12,8 @@ export { ContextBuilder } from './context-builder.js';
 export type { BuiltContext, ContextBuilderOptions } from './context-builder.js';
 export { SummaryBuilder } from './summary-builder.js';
 export type { SummaryBuildResult, SummaryBuilderOptions } from './summary-builder.js';
+export { StickerAnalyzer, STICKER_ANALYSIS_VERSION } from './sticker-analyzer.js';
+export type { StickerAnalysisResult } from './sticker-analyzer.js';
 export { LocalLifeCatchUp } from '../life/catch-up-service.js';
 export { MomentComposer } from '../moments/composer.js';
 export { SqliteLocalMemoryStore } from '../memory/local-store.js';

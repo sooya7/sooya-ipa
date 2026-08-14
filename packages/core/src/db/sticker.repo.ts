@@ -1,4 +1,5 @@
 import type { LocalDatabase } from '../platform/database.js';
+import type { DbValue } from '../platform/database.js';
 import { clampInteger, newId, nowIso, queryOne, runOperation, runTransaction, safeJson } from './database.js';
 import type { MediaRow } from './media.repo.js';
 
@@ -222,6 +223,58 @@ export class StickerRepo {
 
   async updateSemantics(id: string, patch: { description?: string; imageText?: string; tags?: string[]; name?: string }): Promise<Sticker | undefined> { return await this.update(id, patch); }
   async updateManualSemantics(id: string, patch: { description?: string; imageText?: string; tags?: string[] }): Promise<Sticker | undefined> { return await this.update(id, patch); }
+
+  /** Transitions the AI-analysis lifecycle state (pending/processing/ready/failed). */
+  async setAnalysisState(id: string, patch: { status: StickerAnalysisStatus; source?: StickerAnalysisSource; version?: number; model?: string | null; analyzedAt?: string | null; error?: string | null }, options: { allowManual?: boolean } = {}): Promise<Sticker | undefined> {
+    const sets = ['analysis_status = ?', 'updated_at = ?'];
+    const values: DbValue[] = [patch.status, nowIso(this.now)];
+    if (patch.source !== undefined) { sets.push('analysis_source = ?'); values.push(patch.source); }
+    if (patch.version !== undefined) { sets.push('analysis_version = ?'); values.push(patch.version); }
+    if (patch.model !== undefined) { sets.push('analysis_model = ?'); values.push(patch.model); }
+    if (patch.analyzedAt !== undefined) { sets.push('analyzed_at = ?'); values.push(patch.analyzedAt); }
+    if (patch.error !== undefined) { sets.push('analysis_error = ?'); values.push(patch.error); }
+    if (patch.status === 'ready') sets.push('analysis_error = NULL');
+    values.push(id);
+    const manualFence = options.allowManual ? '' : " AND analysis_source != 'manual'";
+    const result = await this.db.run(`UPDATE stickers SET ${sets.join(', ')} WHERE id = ?${manualFence}`, values);
+    if (result.changes === 0) return undefined;
+    this.onChange?.();
+    return await this.get(id);
+  }
+
+  /** Applies a vision-model analysis result, keeping manual edits protected. */
+  async applyAiAnalysis(id: string, patch: { suggestedName: string; description: string; imageText: string; tags: string[] }, meta: { version: number; model: string }, options: { force?: boolean; expectedSemanticRevision?: number } = {}): Promise<Sticker | undefined> {
+    const current = await this.get(id);
+    if (!current) return undefined;
+    if (current.analysisSource === 'manual' && !options.force) return current;
+    if (options.expectedSemanticRevision !== undefined && current.semanticRevision !== options.expectedSemanticRevision) return undefined;
+    const timestamp = nowIso(this.now);
+    const sets = [
+      'description = ?', 'image_text = ?', 'tags_json = ?',
+      "analysis_status = 'ready'", "analysis_source = 'ai'",
+      'analysis_version = ?', 'analysis_model = ?', 'analyzed_at = ?', 'analysis_error = NULL',
+      'embedding = NULL', 'embedding_dim = NULL', 'embedding_model = NULL', 'updated_at = ?'
+    ];
+    const values: DbValue[] = [
+      patch.description.trim().slice(0, 500),
+      patch.imageText.trim().slice(0, 300),
+      JSON.stringify(normalizeTags(patch.tags)),
+      meta.version, meta.model.trim().slice(0, 200), timestamp, timestamp
+    ];
+    if (current.nameSource === 'auto') {
+      sets.splice(1, 0, 'name = ?');
+      values.splice(1, 0, patch.suggestedName.trim().slice(0, 60));
+    }
+    sets.push('semantic_revision = semantic_revision + 1');
+    values.push(id);
+    await runTransaction(this.db, [
+      runOperation(`UPDATE stickers SET ${sets.join(', ')} WHERE id = ?`, values),
+      runOperation('DELETE FROM sticker_semantics_fts WHERE sticker_id = ?', [id]),
+      runOperation('INSERT INTO sticker_semantics_fts(sticker_id, content) VALUES (?, ?)', [id, semanticTextFromFields(patch.suggestedName, patch.description, patch.imageText, patch.tags, current.emotion, '')])
+    ]);
+    this.onChange?.();
+    return await this.get(id);
+  }
 
   async setFavorite(id: string, favorite: boolean): Promise<Sticker | undefined> { return await this.update(id, { favorite }); }
   async setUserMeaning(id: string, meaning: string, source: StickerUserMeaningSource): Promise<Sticker | undefined> { return await this.update(id, { userMeaning: meaning, userMeaningSource: source }); }
