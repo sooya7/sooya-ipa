@@ -109,7 +109,43 @@ jobs:
           test -n "${asset_id}" || { echo 'temporary release asset is missing'; exit 1; }
           asset_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
           PULL_ASSET_URL="${asset_url}" PULL_BYTES="${bytes}" PULL_SHA256="${sha256}" node --input-type=module -e "import { writeFileSync } from 'node:fs'; writeFileSync('pull.json', JSON.stringify({ url: process.env.PULL_ASSET_URL, githubToken: process.env.GH_TOKEN, bytes: Number(process.env.PULL_BYTES), sha256: process.env.PULL_SHA256 }));"
-          curl --http1.1 --fail --retry 5 --retry-delay 3 --retry-all-errors -H 'Content-Type: application/json' "${auth[@]}" --data-binary @pull.json "${base}/uploads/${RELEASE_ID}/pull"
+
+          # Queue the server-side download and return immediately. The old synchronous
+          # endpoint could sit behind Cloudflare for >120s and surface as HTTP 524.
+          curl --http1.1 --fail --show-error --silent --max-time 30 \
+            -H 'Content-Type: application/json' "${auth[@]}" \
+            --data-binary @pull.json "${base}/uploads/${RELEASE_ID}/pull" > pull-response.json
+          cat pull-response.json
+
+          state=""
+          for attempt in $(seq 1 240); do
+            if status_json="$(curl --http1.1 --fail --show-error --silent --max-time 30 "${auth[@]}" "${base}/uploads/${RELEASE_ID}/status")"; then
+              state="$(STATUS_JSON="${status_json}" python3 -c 'import json, os; print(json.loads(os.environ["STATUS_JSON"]).get("state", ""))')"
+              case "${state}" in
+                ready)
+                  echo "OTA bundle pull completed"
+                  break
+                  ;;
+                failed)
+                  echo "OTA bundle pull failed: ${status_json}" >&2
+                  exit 1
+                  ;;
+                queued|running)
+                  echo "OTA bundle pull ${state} (${attempt}/240)"
+                  ;;
+                *)
+                  echo "Unexpected OTA pull state: ${status_json}" >&2
+                  ;;
+              esac
+            else
+              echo "OTA pull status not available yet (${attempt}/240)"
+            fi
+            sleep 5
+          done
+          test "${state}" = "ready" || { echo 'OTA bundle pull timed out after 20 minutes' >&2; exit 1; }
+
+          # The worker verifies byte count and SHA-256 before atomically publishing.
+          curl --http1.1 --fail --show-error --silent --head "${base}/bundles/${RELEASE_ID}/bundle.zip" >/dev/null
           curl --http1.1 --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/manifests/${RELEASE_ID}/ota-manifest.json"
           curl --http1.1 --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/stable.json.tmp"
           curl --http1.1 --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/stable.json"
