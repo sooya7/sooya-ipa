@@ -17,10 +17,7 @@ public final class SOOYAWebSocketPlugin: CAPPlugin, CAPBridgedPlugin, URLSession
     private let lock = NSLock()
     private var sockets: [String: URLSessionWebSocketTask] = [:]
     private lazy var session: URLSession = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: OperationQueue())
-    private lazy var secretStore: SOOYAKeychainStore = {
-        let group = (try? SOOYAKeychainAccessGroupResolver().resolve()) ?? "TEAMID.com.sooya.app"
-        return SOOYAKeychainStore(identity: SOOYAKeychainIdentity(accessGroup: group))
-    }()
+    private lazy var secretStore = SOOYAKeychainStore()
 
     @objc public func connect(_ call: CAPPluginCall) {
         do {
