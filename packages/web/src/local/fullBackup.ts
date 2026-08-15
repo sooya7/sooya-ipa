@@ -77,7 +77,6 @@ const SERVER_MIGRATION_SECRETS_KEY = 'migration:server-secrets:v1';
 const PROVIDER_SECRET_CAPABILITIES = new Set(['chat', 'vision', 'summary', 'director', 'embedding', 'image', 'tts', 'rerank']);
 const MODEL_CAPABILITIES = ['chat', 'vision', 'summary', 'director', 'embedding', 'image', 'tts', 'rerank'] as const;
 const OPTIONAL_CHAT_FALLBACK_CAPABILITIES = new Set(['vision', 'summary', 'director']);
-const LOCAL_MODEL_SETTING_KEYS = ['models', 'modelPresets', 'modelSlots'] as const;
 const DOUBAO_SEARCH_DEFAULT_URL = 'https://open.feedcoopapi.com/search_api/web_search';
 const TAVILY_SEARCH_DEFAULT_URL = 'https://api.tavily.com/search';
 
