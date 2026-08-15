@@ -6,6 +6,7 @@ import {
   JobRepo,
   LifeRepo,
   LocationRepo,
+  McpRepository,
   MediaRepo,
   MemoryRepo,
   MessageRepo,
@@ -110,5 +111,44 @@ describe('async Core repositories', () => {
     expect(memory.merged).toBe(false);
     await expect(memories.get(memory.record.id)).resolves.toMatchObject({ content: '用户喜欢猫', source: 'local' });
   });
-});
 
+  it('repairs legacy IPA Ombre names into the reserved ombre server id', async () => {
+    const mcp = new McpRepository(db);
+    await mcp.upsertServer({
+      id: 'mcp_legacy123',
+      name: 'temporary',
+      url: 'https://echo.sooya.icu/mcp',
+      transport: 'streamable-http',
+      secretKey: 'mcp.mcp_legacy123.token'
+    });
+    await db.run("UPDATE mcp_servers SET name='omber' WHERE id='mcp_legacy123'");
+    await mcp.upsertPolicy({
+      serverId: 'mcp_legacy123',
+      remoteName: 'breath_search',
+      canonicalName: 'mcp.mcp_legacy123.breath_search',
+      risk: 'read',
+      phases: ['reply'],
+      authorized: false,
+      schemaHash: 'schema'
+    });
+
+    await expect(mcp.getServer('ombre')).resolves.toMatchObject({
+      id: 'ombre',
+      name: 'omber',
+      url: 'https://echo.sooya.icu/mcp',
+      secretKey: 'mcp.mcp_legacy123.token'
+    });
+    await expect(mcp.getServer('mcp_legacy123')).resolves.toBeUndefined();
+    await expect(mcp.listPolicies('ombre')).resolves.toMatchObject([
+      { serverId: 'ombre', remoteName: 'breath_search' }
+    ]);
+
+    await mcp.removeServer('ombre');
+    await expect(mcp.upsertServer({
+      id: 'mcp_generated456',
+      name: 'ombre',
+      url: 'https://echo.sooya.icu/mcp',
+      transport: 'streamable-http'
+    })).resolves.toMatchObject({ id: 'ombre', name: 'ombre' });
+  });
+});
