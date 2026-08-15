@@ -62,7 +62,7 @@ export class LocalMediaResolver implements MediaPlatform {
         ...(row.height !== null ? { height: row.height } : {}),
         ...(row.duration !== null ? { durationSec: row.duration } : {}),
         ...((saved.name ?? request.name) ? { name: saved.name ?? request.name } : {}),
-        metadata: request.metadata
+        ...(request.metadata ? { metadata: request.metadata } : {})
       };
     } catch (error) {
       // A DB failure must not leave an unreachable native file behind.
