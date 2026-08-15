@@ -40,6 +40,8 @@ const FORMAT_MIME: Record<string, string> = {
   flac: 'audio/flac'
 };
 
+const GENERIC_BINARY_MIMES = new Set(['application/octet-stream', 'application/binary', 'binary/octet-stream']);
+
 function secretFor(config: ProviderConfig, override?: Partial<SecretHeader>): SecretHeader {
   const header = stringOption(config, 'secretHeader');
   const prefix = stringOption(config, 'secretPrefix');
@@ -66,7 +68,9 @@ function booleanOption(config: ProviderConfig, key: string, fallback?: boolean):
 }
 
 function cleanMime(value: string | undefined, fallback: string): string {
-  return value?.split(';')[0]?.trim() || fallback;
+  const normalized = value?.split(';')[0]?.trim().toLocaleLowerCase() ?? '';
+  if (!normalized || GENERIC_BINARY_MIMES.has(normalized)) return fallback;
+  return normalized;
 }
 
 function headerValue(headers: Readonly<Record<string, string>>, name: string): string | undefined {
