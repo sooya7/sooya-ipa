@@ -1,0 +1,169 @@
+name: Fix chat reply state
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-chat-reply-state-20260815.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+      - name: Apply reply-state and header fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          def patch(path: str, replacements: list[tuple[str, str]]) -> None:
+              p = Path(path)
+              text = p.read_text()
+              for old, new in replacements:
+                  count = text.count(old)
+                  if count != 1:
+                      raise SystemExit(f'{path}: expected one match, got {count}: {old[:120]!r}')
+                  text = text.replace(old, new, 1)
+              p.write_text(text)
+
+          patch('packages/web/src/lib/useChat.ts', [
+              (
+                  "  const batchRevisionsRef = useRef(new Map<string, number>());\n  const maxSeqRef = useRef(0);",
+                  "  const batchRevisionsRef = useRef(new Map<string, number>());\n  const terminalBatchRevisionsRef = useRef(new Map<string, number>());\n  const maxSeqRef = useRef(0);"
+              ),
+              (
+                  """        const acceptBatchEvent = (payload: Record<string, any>): boolean => {\n          const batchId = String(payload.batchId ?? '');\n          if (!batchId) return true;\n          const revision = Number(payload.revision ?? 0);\n          const seen = batchRevisionsRef.current.get(batchId) ?? 0;\n          if (revision < seen) return false;\n          batchRevisionsRef.current.set(batchId, revision);\n          return true;\n        };""",
+                  """        const acceptBatchEvent = (payload: Record<string, any>, terminal = false): boolean => {\n          const batchId = String(payload.batchId ?? '');\n          if (!batchId) return true;\n          const revision = Number(payload.revision ?? 0);\n          if (!Number.isFinite(revision) || revision <= 0) return true;\n          const seen = batchRevisionsRef.current.get(batchId) ?? 0;\n          const terminalRevision = terminalBatchRevisionsRef.current.get(batchId) ?? 0;\n          if (revision < seen) return false;\n          if (!terminal && revision <= terminalRevision) return false;\n          batchRevisionsRef.current.set(batchId, Math.max(seen, revision));\n          if (terminal) terminalBatchRevisionsRef.current.set(batchId, Math.max(terminalRevision, revision));\n          return true;\n        };"""
+              ),
+              (
+                  "          case 'reply.queued': updateActivity({ thinking: true, label: `正在看你刚发的 ${Number(data.count ?? 1)} 条消息` }); break;\n          case 'reply.thinking': updateActivity({ thinking: true, label: '正在思考' }); break;",
+                  "          case 'reply.queued': if (acceptBatchEvent(data)) updateActivity({ thinking: true, label: `正在看你刚发的 ${Number(data.count ?? 1)} 条消息` }); break;\n          case 'reply.thinking': if (acceptBatchEvent(data)) updateActivity({ thinking: true, label: '正在思考' }); break;"
+              ),
+              (
+                  "          case 'reply.publishing.partial': {\n            updateActivity({ thinking: false, label: null });",
+                  "          case 'reply.publishing.partial': {\n            if (!acceptBatchEvent(data, true)) break;\n            updateActivity({ thinking: false, label: null });"
+              ),
+              (
+                  "          case 'reply.completed': {\n            updateActivity({ thinking: false, label: null });",
+                  "          case 'reply.completed': {\n            if (!acceptBatchEvent(data, true)) break;\n            updateActivity({ thinking: false, label: null });"
+              ),
+              (
+                  "          case 'reply.superseded': break; // a newer revision owns the batch now\n          case 'reply.failed': {\n            updateActivity({ thinking: false, label: null });",
+                  """          case 'reply.superseded': break; // a newer revision owns the batch now\n          case 'reply.interrupted': {\n            if (!acceptBatchEvent(data, true)) break;\n            updateActivity({ thinking: false, label: null });\n            clearStreamingDraft();\n            const batchId = String(data.batchId ?? '');\n            const revision = Number(data.revision ?? 0);\n            const reason = String(data.reason ?? 'interrupted');\n            if (batchId && reason === 'app_inactive') {\n              setReplyFailures((previous) => ({ ...previous, [`${batchId}:${revision}`]: { batchId, revision, code: 'interrupted', retryable: true, message: '回复被系统中断了。', partial: false } }));\n            }\n            break;\n          }\n          case 'reply.failed': {\n            if (!acceptBatchEvent(data, true)) break;\n            updateActivity({ thinking: false, label: null });"""
+              ),
+              (
+                  """            const failure = data.failure as { batchId?: string; revision?: number; code?: string; retryable?: boolean; message?: string } | undefined;\n            const batchId = String(data.batchId ?? failure?.batchId ?? '');\n            const revision = Number(data.revision ?? failure?.revision ?? 0);\n            if (batchId) {\n              setReplyFailures((previous) => ({ ...previous, [`${batchId}:${revision}`]: { batchId, revision, code: failure?.code ?? 'internal_error', retryable: failure?.retryable ?? false, message: failure?.message ?? '这次回复没有生成成功。', partial: false } }));\n            } else {\n              setError(failure?.message ?? '回复失败');\n            }\n            const message = data.message as ChatMessage | undefined;\n            if (message) applyMessages([message]);\n            break;""",
+                  """            const failure = data.failure as { batchId?: string; revision?: number; code?: string; retryable?: boolean; message?: string } | undefined;\n            const batchId = String(data.batchId ?? failure?.batchId ?? '');\n            const revision = Number(data.revision ?? failure?.revision ?? 0);\n            const detail = String(data.error ?? failure?.message ?? '');\n            if (batchId) {\n              setReplyFailures((previous) => ({ ...previous, [`${batchId}:${revision}`]: { batchId, revision, code: failure?.code ?? 'internal_error', retryable: failure?.retryable ?? true, message: detail || '这次回复没有生成成功。', partial: false } }));\n            } else {\n              setError(detail || '回复失败');\n            }\n            const message = data.message as ChatMessage | undefined;\n            if (message) applyMessages([message]);\n            else void resync();\n            break;"""
+              ),
+              (
+                  "          case 'reply.text.delta': {\n            const id = String(data.messageId ?? '');",
+                  "          case 'reply.text.delta': {\n            if (!acceptBatchEvent(data)) break;\n            const id = String(data.messageId ?? '');"
+              ),
+              (
+                  "          case 'reply.sticker.selecting': updateActivity({ thinking: true, label: '正在挑表情' }); break;\n          case 'reply.image.generating': updateActivity({ thinking: true, label: '正在生成图片' }); break;\n          case 'reply.audio.generating': updateActivity({ thinking: true, label: '正在生成语音' }); break;",
+                  "          case 'reply.sticker.selecting': if (acceptBatchEvent(data)) updateActivity({ thinking: true, label: '正在挑表情' }); break;\n          case 'reply.image.generating': if (acceptBatchEvent(data)) updateActivity({ thinking: true, label: '正在生成图片' }); break;\n          case 'reply.audio.generating': if (acceptBatchEvent(data)) updateActivity({ thinking: true, label: '正在生成语音' }); break;"
+              ),
+              (
+                  "          case 'reply.text.done':\n          case 'reply.content.done': updateActivity({ thinking: true, label: '正在整理' }); break;",
+                  "          case 'reply.text.done':\n          case 'reply.content.done': if (acceptBatchEvent(data)) updateActivity({ thinking: true, label: '正在整理' }); break;"
+              ),
+              (
+                  "      maxSeqRef.current = 0; clearStreamingDraft(); quotedStatesRef.current.clear(); quotedRequestsRef.current.clear(); setQuotedStates({});",
+                  "      maxSeqRef.current = 0; batchRevisionsRef.current.clear(); terminalBatchRevisionsRef.current.clear(); clearStreamingDraft(); quotedStatesRef.current.clear(); quotedRequestsRef.current.clear(); setQuotedStates({}); setReplyFailures({});"
+              ),
+              (
+                  """      const result = await dataClient.retryBatch(batchId);\n      setReplyFailures((previous) => { const next = { ...previous }; for (const key of Object.keys(next)) if (next[key]?.batchId === batchId) delete next[key]; return next; });\n      updateActivity({ thinking: true, label: '正在重新生成' });""",
+                  """      const result = await dataClient.retryBatch(batchId);\n      batchRevisionsRef.current.set(batchId, Math.max(batchRevisionsRef.current.get(batchId) ?? 0, result.revision));\n      setReplyFailures((previous) => { const next = { ...previous }; for (const key of Object.keys(next)) if (next[key]?.batchId === batchId) delete next[key]; return next; });\n      updateActivity({ thinking: true, label: '正在重新生成' });"""
+              )
+          ])
+
+          patch('packages/web/src/components/MessageItem.tsx', [
+              (
+                  "  onRetry?: (message: ChatMessage) => void; onResend?: (message: ChatMessage) => void; onQuote?: (message: ChatMessage) => void; onWithdraw?: (message: ChatMessage) => void; onOpenImage?: (mediaId: string) => void; onNotice?: (text: string) => void;",
+                  "  onRetry?: (message: ChatMessage) => void; onRetryReply?: (batchId: string) => void; onResend?: (message: ChatMessage) => void; onQuote?: (message: ChatMessage) => void; onWithdraw?: (message: ChatMessage) => void; onOpenImage?: (mediaId: string) => void; onNotice?: (text: string) => void;"
+              ),
+              (
+                  "export const MessageItem = memo(function MessageItem({ message, personaName, avatar, userAvatar, showAvatar, timeZone, highlightQuery, highlighted, highlightNonce, quoted, quotedLabel, quotedStatus, onQuotedClick, previousId, onRetry, onResend, onQuote, onWithdraw, onOpenImage, onNotice }: Props) {",
+                  "export const MessageItem = memo(function MessageItem({ message, personaName, avatar, userAvatar, showAvatar, timeZone, highlightQuery, highlighted, highlightNonce, quoted, quotedLabel, quotedStatus, onQuotedClick, previousId, onRetry, onRetryReply, onResend, onQuote, onWithdraw, onOpenImage, onNotice }: Props) {"
+              ),
+              (
+                  """  const visible = message.content.filter((part) => part.type !== 'system');\n  const failedMessage = message.status === 'failed';\n  const replayable = isReplayableUserMessage(message);\n  const retryable = isRetryableFailedMessage(message);""",
+                  """  const visible = message.content.filter((part) => part.type !== 'system');\n  const failedMessage = message.status === 'failed';\n  const replayable = isReplayableUserMessage(message);\n  const retryable = isRetryableFailedMessage(message);\n  const assistantRetryBatchId = !mine && failedMessage && typeof message.meta?.batchId === 'string' ? message.meta.batchId : null;\n  const hasRenderableContent = visible.some((part) => {\n    if (part.type === 'text') return Boolean(stripModelDirectivesForDisplay(part.text));\n    if (part.type === 'audio') return Boolean(part.media || part.transcript);\n    if (part.type === 'sticker') return Boolean(part.media);\n    return part.type === 'image' || part.type === 'file';\n  });"""
+              ),
+              (
+                  """        <div className=\"bubbles\">{visible.map((part) => { switch (part.type) { case 'text': { const displayText = stripModelDirectivesForDisplay(part.text); const readAloudId = part.meta?.readAloudMediaId as string | undefined; return displayText ? <div key={part.id} className=\"text-bubble-block\"><div className={`bubble bubble-text ${mine ? 'mine' : 'theirs'}`} data-testid=\"text-bubble\">{highlightedText(displayText, highlightQuery)}</div>{!mine && <WebCitations meta={part.meta} />}{readAloudId && <ReadAloudButton mediaId={readAloudId} />}</div> : null; } case 'sticker': return <StickerPart key={part.id} part={part} />; case 'image': return <ImagePart key={part.id} part={part} mine={mine} onOpen={onOpenImage} />; case 'audio': return <AudioBubble key={part.id} part={part} mine={mine} />; case 'file': return <FilePart key={part.id} part={part} mine={mine} />; default: return null; } })}</div>\n        <div className=\"msg-meta\"><span className=\"clock\" title={formatFullDateTime(message.createdAt, timeZone)}>{formatClock(message.createdAt, timeZone)}</span>{message.pendingLocal && message.status !== 'failed' && <span className=\"sending-dot\" aria-label=\"发送中\" />}{failedMessage && <span className=\"failed-flag\">发送失败{retryable && onRetry && <button type=\"button\" className=\"retry-btn\" onClick={() => onRetry(message)}>重试</button>}</span>}<button type=\"button\" className=\"message-menu-button\" aria-label=\"消息操作\" onClick={(event) => openMenu(event.clientX, event.clientY)}>···</button></div>""",
+                  """        <div className=\"bubbles\">{!mine && failedMessage && !hasRenderableContent && <div className=\"bubble bubble-note reply-failed-bubble\" data-testid=\"assistant-reply-failed\"><span>这次回复没有生成成功。</span>{assistantRetryBatchId && onRetryReply && <button type=\"button\" className=\"retry-btn\" onClick={() => onRetryReply(assistantRetryBatchId)}>重新生成</button>}</div>}{visible.map((part) => { switch (part.type) { case 'text': { const displayText = stripModelDirectivesForDisplay(part.text); const readAloudId = part.meta?.readAloudMediaId as string | undefined; return displayText ? <div key={part.id} className=\"text-bubble-block\"><div className={`bubble bubble-text ${mine ? 'mine' : 'theirs'}`} data-testid=\"text-bubble\">{highlightedText(displayText, highlightQuery)}</div>{!mine && <WebCitations meta={part.meta} />}{readAloudId && <ReadAloudButton mediaId={readAloudId} />}</div> : null; } case 'sticker': return <StickerPart key={part.id} part={part} />; case 'image': return <ImagePart key={part.id} part={part} mine={mine} onOpen={onOpenImage} />; case 'audio': return <AudioBubble key={part.id} part={part} mine={mine} />; case 'file': return <FilePart key={part.id} part={part} mine={mine} />; default: return null; } })}</div>\n        <div className=\"msg-meta\"><span className=\"clock\" title={formatFullDateTime(message.createdAt, timeZone)}>{formatClock(message.createdAt, timeZone)}</span>{message.pendingLocal && message.status !== 'failed' && <span className=\"sending-dot\" aria-label=\"发送中\" />}{failedMessage && mine && <span className=\"failed-flag\">发送失败{retryable && onRetry && <button type=\"button\" className=\"retry-btn\" onClick={() => onRetry(message)}>重试</button>}</span>}{failedMessage && !mine && hasRenderableContent && <span className=\"failed-flag\">回复中断{assistantRetryBatchId && onRetryReply && <button type=\"button\" className=\"retry-btn\" onClick={() => onRetryReply(assistantRetryBatchId)}>重新生成</button>}</span>}<button type=\"button\" className=\"message-menu-button\" aria-label=\"消息操作\" onClick={(event) => openMenu(event.clientX, event.clientY)}>···</button></div>"""
+              )
+          ])
+
+          patch('packages/web/src/App.tsx', [
+              (
+                  "  const byId = useMemo(() => new Map(chat.messages.map((message) => [message.id, message])), [chat.messages]);\n  const timeZone = userTimeZone();",
+                  "  const byId = useMemo(() => new Map(chat.messages.map((message) => [message.id, message])), [chat.messages]);\n  const failedAssistantBatchIds = useMemo(() => new Set(chat.messages.flatMap((message) => message.role === 'assistant' && message.status === 'failed' && typeof message.meta?.batchId === 'string' ? [message.meta.batchId] : [])), [chat.messages]);\n  const timeZone = userTimeZone();"
+              ),
+              (
+                  "  const statusLabel = chat.connection === 'online' ? chat.activity.thinking ? chat.activity.label ?? '正在输入' : '在线' : chat.connection === 'connecting' ? '连接中…' : chat.connection === 'unauthorized' ? '需要访问令牌' : '连接已断开，正在重试';",
+                  "  const statusLabel = chat.connection === 'online' ? '在线' : chat.connection === 'connecting' ? '连接中…' : chat.connection === 'unauthorized' ? '需要访问令牌' : '连接已断开，正在重试';"
+              ),
+              (
+                  """                  onRetry={message.status === 'failed' && isRetryableFailedMessage(message) ? (item) => void action(() => chat.retryFailed(item)) : undefined}\n                  onResend={isReplayableUserMessage(message) && message.status !== 'failed' && !message.pendingLocal ? (item) => void action(() => chat.sendAgain(item)) : undefined}""",
+                  """                  onRetry={message.status === 'failed' && isRetryableFailedMessage(message) ? (item) => void action(() => chat.retryFailed(item)) : undefined}\n                  onRetryReply={(batchId) => void action(() => chat.retryReply(batchId))}\n                  onResend={isReplayableUserMessage(message) && message.status !== 'failed' && !message.pendingLocal ? (item) => void action(() => chat.sendAgain(item)) : undefined}"""
+              ),
+              (
+                  """        {chat.activity.thinking && !streamingMessage && (\n          <div className=\"msg-row theirs\" data-testid=\"typing-indicator\">\n            <div className=\"avatar-slot\"><img className=\"avatar\" src={persona?.avatar ?? '/avatars/sooya.svg'} alt=\"\" /></div>""",
+                  """        {chat.activity.thinking && !streamingMessage && (\n          <div className=\"msg-row theirs\" data-testid=\"typing-indicator\">\n            <div className=\"avatar-slot\">{chat.messages.at(-1)?.role !== 'assistant' && <img className=\"avatar\" src={persona?.avatar ?? '/avatars/sooya.svg'} alt=\"\" />}</div>"""
+              ),
+              (
+                  "    {Object.values(chat.replyFailures).map((failure) => (",
+                  "    {Object.values(chat.replyFailures).filter((failure) => !failedAssistantBatchIds.has(failure.batchId)).map((failure) => ("
+              )
+          ])
+
+          patch('packages/web/src/components/ChatHeader.tsx', [
+              (
+                  "          <span className={`topbar-status ${connection}`} data-testid=\"connection-status\"><span className=\"status-dot\" />{statusLabel}</span>",
+                  "          <span className={`topbar-status ${connection}`} data-testid=\"connection-status\"><span className=\"status-dot\" /><span className=\"topbar-status-label\">{statusLabel}</span></span>"
+              )
+          ])
+
+          css = Path('packages/web/src/components/ChatHeader.css')
+          css.write_text("""/* Chat-header-only layout refinements. Loaded after the global chat theme so\n   mobile presence/activity information gets real space without changing the\n   header height while a reply is moving through its transient states. */\n\n.chat-topbar {\n  min-width: 0;\n}\n\n@media (max-width: 560px) {\n  .chat-topbar {\n    height: auto;\n    min-height: calc(var(--topbar-h) + var(--sooya-safe-top));\n    padding: calc(var(--sooya-safe-top) + 6px) 10px 6px;\n    grid-template-columns: minmax(0, 1fr) minmax(0, max-content);\n    grid-template-areas:\n      'identity actions'\n      'world world';\n    grid-template-rows: auto auto;\n    column-gap: 8px;\n    row-gap: 3px;\n    align-items: center;\n    max-width: 100%;\n  }\n\n  .chat-topbar .topbar-identity {\n    grid-area: identity;\n    min-width: 0;\n    gap: 8px;\n  }\n\n  .chat-topbar .topbar-text {\n    min-width: 0;\n    display: grid;\n    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);\n    grid-template-areas:\n      'name name'\n      'status life';\n    column-gap: 6px;\n    row-gap: 1px;\n    align-items: center;\n  }\n\n  .chat-topbar .topbar-name {\n    grid-area: name;\n  }\n\n  .chat-topbar .topbar-status {\n    grid-area: status;\n    min-width: 0;\n    overflow: hidden;\n    white-space: nowrap;\n  }\n\n  .chat-topbar .topbar-status-label {\n    min-width: 0;\n    overflow: hidden;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n  }\n\n  .chat-topbar .topbar-life {\n    grid-area: life;\n    max-width: none;\n    min-width: 0;\n    white-space: nowrap;\n    overflow: hidden;\n    overflow-wrap: normal;\n    text-overflow: ellipsis;\n    line-height: 1.25;\n  }\n\n  .chat-topbar .topbar-life::before {\n    content: '· ';\n  }\n\n  .chat-topbar .topbar-world {\n    grid-area: world;\n    width: 100%;\n    max-width: none;\n    min-width: 0;\n    padding-left: 42px;\n    padding-right: 2px;\n    font-size: 11px;\n    line-height: 1.25;\n  }\n\n  .chat-topbar .topbar-world-line {\n    white-space: nowrap;\n    overflow: hidden;\n    min-width: 0;\n  }\n\n  .chat-topbar .topbar-world-line span {\n    min-width: 0;\n    overflow: hidden;\n    overflow-wrap: normal;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n  }\n\n  .chat-topbar .topbar-actions {\n    grid-area: actions;\n    justify-self: end;\n    align-self: center;\n    margin-left: 0;\n    margin-right: 8px;\n    min-width: 0;\n    width: max-content;\n    max-width: 100%;\n    gap: 5px;\n    transform: none;\n  }\n\n  .chat-topbar .topbar-actions > * {\n    min-width: 0;\n  }\n\n  .chat-topbar .notification-menu {\n    flex: 0 0 30px;\n  }\n\n  .chat-topbar .topbar-actions .history-tool-button,\n  .chat-topbar .topbar-actions .notification-bell,\n  .chat-topbar .topbar-actions .topbar-admin-entry {\n    width: 30px;\n    min-width: 30px;\n    height: 30px;\n    flex: 0 0 30px;\n  }\n}\n""")
+
+          patch('packages/web/src/components/MessageItem.test.tsx', [
+              (
+                  """describe('MessageItem 重放操作', () => {\n  it('不为失败的助手消息或历史音频显示重试入口', async () => {\n    await render(<MessageItem {...common} message={message({ id: 'a1', status: 'failed' })} onRetry={() => {}} />);\n    expect(container.querySelector('.retry-btn')).toBeNull();\n\n    await act(async () => { root!.unmount(); });\n    root = null;\n    container.remove();\n    await render(<MessageItem {...common} message={message({\n      id: 'u1', role: 'user', status: 'failed',\n      content: [{ id: 'audio', type: 'audio', mediaId: 'md_audio', status: 'sent' }]\n    })} onRetry={() => {}} />);\n    expect(container.querySelector('.retry-btn')).toBeNull();\n  });\n});""",
+                  """describe('MessageItem 重放操作', () => {\n  it('失败的助手空消息原地显示重试卡，历史音频仍不开放发送重试', async () => {\n    const retryReply = vi.fn();\n    await render(<MessageItem {...common} message={message({ id: 'a1', status: 'failed', meta: { batchId: 'batch_1' }, content: [{ id: 'a1-p1', type: 'text', text: '', status: 'failed' }] })} onRetryReply={retryReply} />);\n    expect(container.querySelector('[data-testid=\"assistant-reply-failed\"]')?.textContent).toContain('这次回复没有生成成功');\n    const retry = container.querySelector<HTMLButtonElement>('.retry-btn')!;\n    await act(async () => { retry.click(); });\n    expect(retryReply).toHaveBeenCalledWith('batch_1');\n\n    await act(async () => { root!.unmount(); });\n    root = null;\n    container.remove();\n    await render(<MessageItem {...common} message={message({\n      id: 'u1', role: 'user', status: 'failed',\n      content: [{ id: 'audio', type: 'audio', mediaId: 'md_audio', status: 'sent' }]\n    })} onRetry={() => {}} />);\n    expect(container.querySelector('.retry-btn')).toBeNull();\n  });\n});"""
+              )
+          ])
+
+          test = Path('packages/web/src/lib/useChat.test.tsx')
+          test.write_text(test.read_text() + """\n\ndescribe('useChat 回复终态栅栏', () => {\n  it('中断后拒绝同 revision 的迟到输入事件，新 revision 仍可正常回复', async () => {\n    const { chat, push } = await mountStreaming();\n\n    await push('reply.queued', { batchId: 'batch_state', revision: 1, count: 1 });\n    expect(chat().activity.thinking).toBe(true);\n\n    await push('reply.interrupted', { batchId: 'batch_state', revision: 1, reason: 'app_inactive' });\n    expect(chat().activity.thinking).toBe(false);\n    expect(Object.values(chat().replyFailures)[0]?.retryable).toBe(true);\n\n    await push('reply.text.done', { batchId: 'batch_state', revision: 1 });\n    await push('reply.text.delta', { batchId: 'batch_state', revision: 1, messageId: 'stale_assistant', delta: '旧回复' });\n    expect(chat().activity.thinking).toBe(false);\n    expect(chat().streamingDraft).toBeNull();\n\n    await push('reply.queued', { batchId: 'batch_state', revision: 2, count: 1 });\n    expect(chat().activity.thinking).toBe(true);\n\n    await push('reply.interrupted', { batchId: 'batch_state', revision: 1, reason: 'superseded' });\n    expect(chat().activity.thinking).toBe(true);\n  });\n});\n""")
+          PY
+      - run: npm ci
+      - name: Web tests
+        run: npm run test -w @sooya/web
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Production build
+        run: npm run build
+      - name: Commit verified fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/fix-chat-reply-state-20260815.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add packages/web/src/lib/useChat.ts packages/web/src/lib/useChat.test.tsx packages/web/src/components/MessageItem.tsx packages/web/src/components/MessageItem.test.tsx packages/web/src/components/ChatHeader.tsx packages/web/src/components/ChatHeader.css packages/web/src/App.tsx
+          git commit -m 'fix(chat): settle reply failures and stabilize mobile header'
+          git push origin HEAD:main
