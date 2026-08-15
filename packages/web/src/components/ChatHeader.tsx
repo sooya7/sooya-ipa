@@ -13,6 +13,13 @@ export interface ChatHeaderProps {
   onSearch: () => void;
 }
 
+function jumpToLatestMessage(): void {
+  const scroller = document.querySelector<HTMLElement>('[data-testid="scroller"]');
+  if (!scroller) return;
+  scroller.scrollTop = scroller.scrollHeight;
+  scroller.dispatchEvent(new Event('scroll'));
+}
+
 export function ChatHeader({ persona, connection, statusLabel, life, presence, onSearch }: ChatHeaderProps) {
   return (
     <header className="topbar chat-topbar">
@@ -35,6 +42,9 @@ export function ChatHeader({ persona, connection, statusLabel, life, presence, o
             <path d="M12 20.8A8.8 8.8 0 0 1 3.2 12" />
           </svg>
         </AppLink>
+        <button type="button" className="history-tool-button" aria-label="回到最新消息" title="回到底部" onClick={jumpToLatestMessage} data-testid="jump-to-bottom">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-testid="jump-to-bottom-icon"><path d="m6 9 6 6 6-6" /><path d="M6 19h12" /></svg>
+        </button>
         <button type="button" className="history-tool-button" aria-label="搜索和日期跳转" onClick={onSearch} data-testid="history-tools">
           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-testid="history-search-icon"><circle cx="10.8" cy="10.8" r="6.2" /><path d="m15.5 15.5 5 5" /></svg>
         </button>
@@ -45,4 +55,3 @@ export function ChatHeader({ persona, connection, statusLabel, life, presence, o
     </header>
   );
 }
-
