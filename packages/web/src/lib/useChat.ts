@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError, type BootstrapInfo } from './api.js';
+import { acceptBatchEvent as acceptFencedBatchEvent } from './batchEventFence.js';
 import { ChatStream } from './stream.js';
 import { currentSooyaClient, type SooyaClient } from './sooyaClient.js';
 import { fetchAllMessagePages, replaceFailedMessage } from './messageSync.js';
@@ -136,21 +137,11 @@ export function useChat(client: SooyaClient | null = currentSooyaClient()) {
   }, [dataClient]);
 
   const handleEvent = useCallback((type: string, data: Record<string, any>) => {
-        // Drop events from an old revision of a batch (stale generation must
-        // never overwrite the newer one's state).
-        const acceptBatchEvent = (payload: Record<string, any>, terminal = false): boolean => {
-          const batchId = String(payload.batchId ?? '');
-          if (!batchId) return true;
-          const revision = Number(payload.revision ?? 0);
-          if (!Number.isFinite(revision) || revision <= 0) return true;
-          const seen = batchRevisionsRef.current.get(batchId) ?? 0;
-          const terminalRevision = terminalBatchRevisionsRef.current.get(batchId) ?? 0;
-          if (revision < seen) return false;
-          if (!terminal && revision <= terminalRevision) return false;
-          batchRevisionsRef.current.set(batchId, Math.max(seen, revision));
-          if (terminal) terminalBatchRevisionsRef.current.set(batchId, Math.max(terminalRevision, revision));
-          return true;
-        };
+        // Drop events from an old or already-terminal revision of a batch.
+        // In particular, a late app_inactive interruption must never resurrect
+        // a failure card after reply.completed for the same revision.
+        const acceptBatchEvent = (payload: Record<string, any>, terminal = false): boolean =>
+          acceptFencedBatchEvent(batchRevisionsRef.current, terminalBatchRevisionsRef.current, payload, terminal);
         switch (type) {
           case 'message.received':
           case 'message.updated': if (data.message) applyMessages([data.message as ChatMessage]); break;
@@ -455,4 +446,3 @@ function optimisticPartsFor(message: ChatMessage): ChatMessage['content'] {
     .filter((part) => part.type !== 'system' && part.type !== 'audio')
     .map((part, index) => ({ ...part, id: `localpart_${index}`, status: 'pending' as const }));
 }
-
