@@ -15,6 +15,7 @@ interface OtaManifest {
 }
 
 interface OtaStateRow {
+  current_web_version?: string | null;
   pending_web_version?: string | null;
   pending_bundle_id?: string | null;
   pending_manifest_json?: string | null;
@@ -23,10 +24,16 @@ interface OtaStateRow {
 
 export const DEFAULT_OTA_MANIFEST_URL = 'https://sooya.icu/ota/stable.json';
 
+interface UpdaterBundleInfo {
+  id?: string;
+  version?: string;
+}
+
 interface UpdaterPlugin {
   notifyAppReady?: () => Promise<void>;
   download?: (input: { url: string; version: string; sessionKey?: string; checksum?: string }) => Promise<{ id: string }>;
   set?: (input: { id: string }) => Promise<void>;
+  current?: () => Promise<{ bundle?: UpdaterBundleInfo | null }>;
 }
 
 /** Integrity-gated OTA coordinator. Swift/native changes are still IPA-only;
@@ -57,9 +64,11 @@ export class LocalOtaUpdater {
       const value = manifest as OtaManifest;
       await verifyManifestSignature(value, this.releaseInfo);
       const state = await this.readState();
+      const checkedAt = new Date().toISOString();
+      await this.core.database.run(`UPDATE local_update_state SET last_checked_at=?,updated_at=?,last_error=NULL WHERE id=1`, [checkedAt, checkedAt]);
       if (state.blocked_web_version === value.releaseId) return { checked: true, downloaded: false, releaseId: value.releaseId, reason: 'release-blocked' };
+      if (state.current_web_version === value.releaseId) return { checked: true, downloaded: false, releaseId: value.releaseId, reason: 'already-current' };
       if (state.pending_web_version === value.releaseId && state.pending_bundle_id) return { checked: true, downloaded: false, releaseId: value.releaseId, reason: 'already-pending' };
-      await this.core.database.run(`UPDATE local_update_state SET last_checked_at=?,updated_at=?,last_error=NULL WHERE id=1`, [new Date().toISOString(), new Date().toISOString()]);
       const bundleUrl = new URL(value.bundleUrl ?? 'bundle.zip', manifestUrl);
       if (bundleUrl.protocol !== 'https:') throw new Error('OTA bundle URL must use HTTPS');
       const downloaded = await this.plugin.download({
@@ -84,10 +93,26 @@ export class LocalOtaUpdater {
     const state = await this.readState();
     if (!state.pending_web_version || !state.pending_bundle_id) return { applied: false, reason: 'no-pending-update' };
     if (state.blocked_web_version === state.pending_web_version) return { applied: false, releaseId: state.pending_web_version, reason: 'release-blocked' };
+
+    // CapacitorUpdater.set() immediately destroys the current JS context and
+    // reloads the app. On the next boot our SQLite pending marker is still
+    // present until notifyReady() runs. Without checking the native active
+    // bundle first, every boot calls set() again and creates an infinite reload
+    // loop. Treat an already-active pending bundle as successfully switched and
+    // let notifyReady() promote/clear the pending row after React mounts.
+    const active = await this.plugin.current?.().catch(() => null);
+    const activeId = active?.bundle?.id;
+    const activeVersion = active?.bundle?.version;
+    if (activeId === state.pending_bundle_id || activeVersion === state.pending_web_version) {
+      return { applied: false, releaseId: state.pending_web_version, reason: 'already-active' };
+    }
+
     try {
       const manifest = state.pending_manifest_json ? JSON.parse(state.pending_manifest_json) as unknown : null;
       validateManifest(manifest, this.releaseInfo);
       await verifyManifestSignature(manifest, this.releaseInfo);
+      // Terminal operation: Capgo reloads immediately, so no code after a
+      // successful set() can be relied upon to run in this JavaScript context.
       await this.plugin.set({ id: state.pending_bundle_id });
       return { applied: true, releaseId: state.pending_web_version };
     } catch (error) {
@@ -105,7 +130,7 @@ export class LocalOtaUpdater {
   }
 
   private async readState(): Promise<OtaStateRow> {
-    return (await this.core.database.query<OtaStateRow>('SELECT pending_web_version,pending_bundle_id,pending_manifest_json,blocked_web_version FROM local_update_state WHERE id=1'))[0] ?? {};
+    return (await this.core.database.query<OtaStateRow>('SELECT current_web_version,pending_web_version,pending_bundle_id,pending_manifest_json,blocked_web_version FROM local_update_state WHERE id=1'))[0] ?? {};
   }
 }
 
