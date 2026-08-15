@@ -5,6 +5,8 @@ import type { HttpPlatform } from '../platform/http.js';
 import { ConfigRepository, JobRepo, LifeCityRepo, LifeClockRepo, LifeRepo, LifeV2Repo, LocationRepo, MediaRepo, MemoryRepo, MessageRepo, MetricsRepo, MomentRepo, ReplyBatchRepo, SettingsRepo, StickerRepo, SummaryRepo, ThoughtRepo, VoiceRepo, WeatherRepo, type MediaRow, type ProviderConfig, type Sticker } from '../db/index.js';
 import type { ChatProvider } from '../providers/types.js';
 import type { ConfiguredProviders } from '../providers/provider-factory.js';
+import { DirectorClient } from './director/client.js';
+import { MediaDirector } from './media-director.js';
 import { createWebSearch, DOUBAO_SEARCH_DEFAULT_URL, TAVILY_SEARCH_DEFAULT_URL } from '../providers/web-search.js';
 import { OpenMeteoWeatherProvider, summarizeForecast, type WeatherForecastSummary } from '../providers/weather-provider.js';
 import type { MemoryProvider } from '../memory/types.js';
@@ -133,6 +135,9 @@ export class LocalCore implements LocalCoreApi {
    * UUID via rel_path); undefined only when no platform store was injected. */
   readonly media: MediaPlatform | undefined;
   readonly events: LocalEmitter;
+  /** Structured media-decision layer (voice/image directors) over the
+   * director provider slot; degrades through deterministic fallbacks. */
+  readonly mediaDirector: MediaDirector;
   readonly replies: ReplyCoordinator;
   readonly contextBuilder: ContextBuilder;
   readonly summaryBuilder: SummaryBuilder;
@@ -231,6 +236,13 @@ export class LocalCore implements LocalCoreApi {
       provider: async () => options.chatProvider ?? await options.chatProviderFactory?.() ?? (await this.configuredProviders?.())?.chat ?? null
     });
     this.events = new LocalEmitter(now);
+    // Media Director: resolves the director slot (with chat fallback) lazily
+    // per call, so admin config changes take effect without rebuilding. Events
+    // carry only privacy-safe fields (task/latency/sizes/failure class).
+    this.mediaDirector = new MediaDirector(new DirectorClient(
+      async () => (await this.configuredProviders?.())?.director ?? null,
+      { onEvent: (event) => this.events.emit(`director.${event.task}.${event.event}`, { ...event }) }
+    ));
     this.replies = new ReplyCoordinator({
       messages: this.messagesRepo,
       batches: this.batchesRepo,
@@ -240,6 +252,7 @@ export class LocalCore implements LocalCoreApi {
       webSearch: options.http ? () => createWebSearch(options.http!, this.configRepo) : null,
       toolRuntime: options.toolRuntime,
       contextBuilder: this.contextBuilder,
+      mediaDirector: this.mediaDirector,
       now,
       debounceMs: options.replyDebounceMs,
       emit: (type, data) => this.events.emit(type, data)

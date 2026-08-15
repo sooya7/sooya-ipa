@@ -10,6 +10,7 @@ import type {
 } from './types.js';
 import { ProviderNotConfiguredError, ProviderRequestError } from './types.js';
 import { endpoint, healthStatus, isRecord, requestJson, requestSse, type SecretHeader, toBase64 } from './http-json.js';
+import { isJsonModeRejection, withJsonInstruction } from '../util/json-extract.js';
 
 abstract class BuiltinProvider {
   protected readonly secret: SecretHeader;
@@ -32,14 +33,50 @@ abstract class BuiltinProvider {
   }
 }
 
+/**
+ * Observed, not configured: flipped off the first time an endpoint refuses
+ * `response_format` (server parity). Keyed by provider identity because IPA
+ * factory calls construct fresh provider instances per resolve, so an
+ * instance field would forget the lesson immediately.
+ */
+const jsonModeSupportByEndpoint = new Map<string, boolean>();
+
 export class BuiltinChatProvider extends BuiltinProvider implements ChatProvider {
   readonly name = this.config.provider;
   readonly configured = Boolean(this.config.baseUrl && this.config.model && this.config.secretRef);
   readonly supportsTools = this.config.options.tools !== false;
 
+  private endpointKey(): string {
+    return `${this.config.provider}|${this.config.baseUrl}|${this.config.model}`;
+  }
+
+  private get jsonModeSupported(): boolean {
+    return jsonModeSupportByEndpoint.get(this.endpointKey()) ?? true;
+  }
+
+  private set jsonModeSupported(value: boolean) {
+    jsonModeSupportByEndpoint.set(this.endpointKey(), value);
+  }
+
   async complete(request: ChatRequest): Promise<ChatResult> {
     if (!this.configured) throw new ProviderNotConfiguredError('chat');
-    return this.config.provider === 'anthropic' ? await this.anthropic(request) : await this.openAiCompatible(request);
+    const run = (): Promise<ChatResult> => this.config.provider === 'anthropic' ? this.anthropic(request) : this.openAiCompatible(request);
+    if (request.jsonMode !== true) return await run();
+    // Config declares JSON mode the same way config declares vision: statically.
+    // An endpoint that 4xx's on `response_format` used to fail the whole call,
+    // which callers then swallowed as a fallback/skip -- a silent downgrade
+    // with no visible symptom. Retry once under a prompt constraint and
+    // remember the answer, so later calls skip the doomed request entirely.
+    const degradedAlready = !this.jsonModeSupported;
+    try {
+      const result = await run();
+      return degradedAlready ? { ...result, jsonModeDegraded: true } : result;
+    } catch (error) {
+      if (degradedAlready || !isJsonModeRejection(error)) throw error;
+      this.jsonModeSupported = false;
+      const result = await run();
+      return { ...result, jsonModeDegraded: true };
+    }
   }
 
   async stream(request: ChatRequest, onChunk: (chunk: ChatChunk) => void): Promise<ChatResult> {
@@ -52,16 +89,23 @@ export class BuiltinChatProvider extends BuiltinProvider implements ChatProvider
   async inspectHealth(): Promise<HealthStatus> { return this.health('chat'); }
 
   private async openAiCompatible(request: ChatRequest): Promise<ChatResult> {
+    // `jsonMode` is what the caller needs, `response_format` is only one way
+    // to get it. When the endpoint has rejected that field once, the
+    // constraint moves into the prompt instead of being dropped on the floor.
+    const nativeJson = request.jsonMode === true && this.jsonModeSupported;
+    const effective = request.jsonMode === true && !nativeJson
+      ? { ...request, system: withJsonInstruction(request.system) }
+      : request;
     const response = await requestJson<Record<string, unknown>>(this.http, {
-      url: endpoint(this.config.baseUrl, '/v1/chat/completions'), method: 'POST', signal: request.signal,
+      url: endpoint(this.config.baseUrl, '/v1/chat/completions'), method: 'POST', signal: effective.signal,
       body: {
         model: this.model,
-        messages: toOpenAiMessages(request),
-        ...(request.maxTokens ? { max_tokens: request.maxTokens } : {}),
-        ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
-        ...(request.jsonMode ? { response_format: { type: 'json_object' } } : {}),
-        ...(request.tools?.length ? { tools: request.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })) } : {}),
-        ...(request.toolChoice ? { tool_choice: request.toolChoice === 'none' ? 'none' : request.toolChoice === 'auto' ? 'auto' : { type: 'function', function: { name: request.toolChoice.name } } } : {})
+        messages: toOpenAiMessages(effective),
+        ...(effective.maxTokens ? { max_tokens: effective.maxTokens } : {}),
+        ...(effective.temperature !== undefined ? { temperature: effective.temperature } : {}),
+        ...(nativeJson ? { response_format: { type: 'json_object' } } : {}),
+        ...(effective.tools?.length ? { tools: effective.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })) } : {}),
+        ...(effective.toolChoice ? { tool_choice: effective.toolChoice === 'none' ? 'none' : effective.toolChoice === 'auto' ? 'auto' : { type: 'function', function: { name: effective.toolChoice.name } } } : {})
       }
     }, this.secret);
     const choice = Array.isArray(response.choices) ? response.choices[0] : undefined;

@@ -8,6 +8,7 @@ import { formatWebSearchContext, webSearchPartMeta } from '../providers/web-sear
 import type { ChatMessage } from './types.js';
 import type { ContextBuilder } from './context-builder.js';
 import { currentReplyFeatureRuntime, type ReplyFeatureRuntime } from './reply-feature-runtime.js';
+import type { MediaDirector } from './media-director.js';
 import { parseUserDirectives, StreamingDirectiveFilter, stripModelDirectives, type ModelDirectives, type UserDirectives } from './directives.js';
 import { buildImageFallbackPrompt, stripModelMediaExecutionClaims } from './reply-media-policy.js';
 import { decideWebSearch } from './web-search-policy.js';
@@ -36,6 +37,8 @@ export interface ReplyCoordinatorOptions {
   contextBuilder?: ContextBuilder;
   /** Injected multimedia feature runtime; falls back to the global install. */
   replyFeatureRuntime?: ReplyFeatureRuntime | null;
+  /** Media Director (image/voice) built from the director provider slot. */
+  mediaDirector?: MediaDirector | null;
   now?: () => Date;
   debounceMs?: number;
   emit: (type: string, data: Record<string, unknown>) => void;

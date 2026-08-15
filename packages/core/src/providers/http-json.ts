@@ -159,9 +159,14 @@ export async function requestJson<T>(
   }
   if (response.status < 200 || response.status >= 300) {
     const record = isRecord(value) ? value : {};
+    // OpenAI-style endpoints wrap the reason as {error:{message}}; extract it
+    // so downstream classifiers (e.g. the JSON-mode downgrade) can see it.
+    const nestedError = isRecord(record.error) ? record.error : {};
     const message = typeof record.error === 'string'
       ? record.error
-      : typeof record.message === 'string' ? record.message : `provider request failed (${response.status})`;
+      : typeof nestedError.message === 'string'
+        ? nestedError.message
+        : typeof record.message === 'string' ? record.message : `provider request failed (${response.status})`;
     throw new ProviderRequestError(message.slice(0, 500), response.status);
   }
   return value as T;
