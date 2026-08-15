@@ -5,7 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_OTA_MANIFEST_URL, OtaDiagnosticsCard } from './OtaDiagnosticsCard.js';
 
 const adminRequest = vi.hoisted(() => vi.fn());
+const checkAndDownload = vi.hoisted(() => vi.fn());
+const applyPendingNow = vi.hoisted(() => vi.fn());
+const currentOtaUpdater = vi.hoisted(() => vi.fn());
 vi.mock('../../lib/admin.js', () => ({ adminRequest }));
+vi.mock('../../local/otaUpdater.js', () => ({ currentOtaUpdater }));
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
@@ -15,6 +19,10 @@ beforeEach(() => {
   document.body.append(container);
   root = createRoot(container);
   adminRequest.mockReset();
+  checkAndDownload.mockReset();
+  applyPendingNow.mockReset();
+  currentOtaUpdater.mockReset();
+  currentOtaUpdater.mockReturnValue({ checkAndDownload, applyPendingNow });
 });
 
 afterEach(async () => {
@@ -55,5 +63,29 @@ describe('OtaDiagnosticsCard', () => {
     });
     await vi.waitFor(() => expect(adminRequest).toHaveBeenCalledWith('/api/admin/ota', { method: 'PUT', body: { manifestUrl: DEFAULT_OTA_MANIFEST_URL } }));
     expect(notice).toHaveBeenCalledWith('OTA Manifest 地址已保存');
+  });
+
+  it('checks, downloads and applies an OTA from the manual button without a user cold restart', async () => {
+    const notice = vi.fn();
+    adminRequest.mockResolvedValue({ manifestUrl: DEFAULT_OTA_MANIFEST_URL, state: {} });
+    checkAndDownload.mockResolvedValue({ checked: true, downloaded: true, releaseId: 'ota-next' });
+    applyPendingNow.mockResolvedValue({ applied: true, releaseId: 'ota-next' });
+
+    await act(async () => {
+      root!.render(<OtaDiagnosticsCard onNotice={notice} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(adminRequest).toHaveBeenCalled());
+    const button = Array.from(container!.querySelectorAll('button')).find((item) => item.textContent === '检查并立即安装') as HTMLButtonElement;
+    await act(async () => {
+      button.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await vi.waitFor(() => expect(checkAndDownload).toHaveBeenCalledWith(DEFAULT_OTA_MANIFEST_URL));
+    expect(applyPendingNow).toHaveBeenCalledTimes(1);
+    expect(notice).toHaveBeenCalledWith('OTA 已下载，正在立即切换版本…');
   });
 });
