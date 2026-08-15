@@ -270,11 +270,12 @@ function base64ToBytes(value: string): Uint8Array {
   return bytes;
 }
 
-function bytesToBase64(value: Uint8Array): string {
+function bytesToBase64(value: Uint8Array | ArrayBuffer): string {
+  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
   let binary = '';
   const chunkSize = 0x8000;
-  for (let offset = 0; offset < value.length; offset += chunkSize) {
-    binary += String.fromCharCode(...value.subarray(offset, offset + chunkSize));
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
   }
   return btoa(binary);
 }
