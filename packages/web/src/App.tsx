@@ -230,7 +230,7 @@ export function ChatView({ chat, viewStateRef }: { chat: ChatController; viewSta
     if (message) setQuote(message);
   }, [chat.ensureQuotedMessage, chat.messages]);
   const action = useCallback(async (work: () => Promise<unknown>, success?: string) => { try { await work(); if (success) setNotice(success); } catch (error) { setNotice((error as Error).message); } }, []);
-  const statusLabel = chat.connection === 'online' ? '在线' : chat.connection === 'connecting' ? '连接中…' : chat.connection === 'unauthorized' ? '需要访问令牌' : '连接已断开，正在重试';
+  const statusLabel = chat.connection === 'online' ? chat.activity.thinking ? chat.activity.label ?? '正在输入' : '在线' : chat.connection === 'connecting' ? '连接中…' : chat.connection === 'unauthorized' ? '需要访问令牌' : '连接已断开，正在重试';
   const streamingMessage = useMemo<ChatMessage | null>(() => chat.streamingDraft ? {
     id: chat.streamingDraft.id,
     conversationId: 'main',
@@ -312,7 +312,7 @@ export function ChatView({ chat, viewStateRef }: { chat: ChatController; viewSta
         )}
         {chat.activity.thinking && !streamingMessage && (
           <div className="msg-row theirs" data-testid="typing-indicator">
-            <div className="avatar-slot">{chat.messages.at(-1)?.role !== 'assistant' && <img className="avatar" src={persona?.avatar ?? '/avatars/sooya.svg'} alt="" />}</div>
+            <div className="avatar-slot"><img className="avatar" src={persona?.avatar ?? '/avatars/sooya.svg'} alt="" /></div>
             <div className="msg-body"><div className="bubble bubble-text theirs typing"><span className="typing-dots"><i /><i /><i /></span></div></div>
           </div>
         )}

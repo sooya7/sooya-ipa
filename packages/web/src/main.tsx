@@ -1,7 +1,6 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import AppShell from './AppShell.js';
-import { ImageGenerationProgressHost } from './components/ImageGenerationProgressHost.js';
 import './styles.css';
 import './native.css';
 import './components/AdminPanel.css';
@@ -23,10 +22,7 @@ if (native) document.documentElement.classList.add('sooya-native');
 // and Moments/Admin fall through to HTTP routes that do not exist in the IPA.
 const renderApp = () => root.render(
   <StrictMode>
-    <>
-      <AppShell />
-      <ImageGenerationProgressHost />
-    </>
+    <AppShell />
   </StrictMode>
 );
 
