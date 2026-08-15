@@ -1,0 +1,95 @@
+name: Fix model admin save regression
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-model-admin-save-20260815.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+      - name: Apply model admin fixes and regression tests
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f'anchor not found in {path}: {old[:120]!r}')
+              p.write_text(text.replace(old, new, 1))
+
+          # 1) Never merge a field edit over a render-time stale config snapshot.
+          replace_once(
+              'packages/web/src/components/AdminPanel.tsx',
+              """  const update = (key: string, value: unknown) => setModels((prev) => ({\n    ...(prev ?? {}),\n    [selected]: { ...config, [key]: value }\n  }));\n""",
+              """  const update = (key: string, value: unknown) => setModels((prev) => {\n    const latest = (prev?.[selected] ?? {}) as Record<string, unknown>;\n    return {\n      ...(prev ?? {}),\n      [selected]: { ...latest, [key]: value }\n    };\n  });\n"""
+          )
+
+          # 2) Walk all viable discovery URLs on endpoint-not-found responses.
+          replace_once(
+              'packages/core/src/app/model-discovery.ts',
+              """      let url = urls[0]!;\n      let response = await this.request(url, headers, row?.secretRef ?? null, secretHeader, secretPrefix, controller.signal);\n      // NewAPI exposes its frontend model list at /api/models; only fall back\n      // when the standard route is genuinely absent.\n      if ((response.status === 404 || response.status === 405) && urls[1]) {\n        url = urls[1]!;\n        response = await this.request(url, headers, row?.secretRef ?? null, secretHeader, secretPrefix, controller.signal);\n      }\n""",
+              """      let url = urls[0]!;\n      let response = await this.request(url, headers, row?.secretRef ?? null, secretHeader, secretPrefix, controller.signal);\n      // Providers differ on whether callers paste the API root, /v1, or a full\n      // inference endpoint. Walk the normalized candidates only when the current\n      // endpoint is genuinely absent; auth/rate-limit failures remain authoritative.\n      for (let index = 1; (response.status === 404 || response.status === 405) && index < urls.length; index += 1) {\n        url = urls[index]!;\n        response = await this.request(url, headers, row?.secretRef ?? null, secretHeader, secretPrefix, controller.signal);\n      }\n"""
+          )
+
+          old_urls = """function discoveryUrls(rawBase: string): string[] {\n  let base = rawBase.replace(/\\/+$/u, '');\n  // Operators often paste the image-generation endpoint from the provider docs.\n  base = base.replace(/\\/(?:images\\/(?:generations|edits))$/iu, '');\n  const primary = base.endsWith('/models') ? base : `${base}/models`;\n  const urls = [primary];\n  try {\n    const parsed = new URL(base);\n    if (!base.endsWith('/models') && /\\/v1$/iu.test(parsed.pathname)) {\n      urls.push(`${parsed.origin}/api/models`);\n    }\n  } catch { /* invalid base: keep the single primary url */ }\n  return urls;\n}\n"""
+          new_urls = """function discoveryUrls(rawBase: string): string[] {\n  let base = rawBase.trim().replace(/\\/+$/u, '');\n  // Operators often paste a full inference endpoint from provider docs. Normalize\n  // those back to the API root before looking for the model-list endpoint.\n  base = base.replace(/\\/(?:chat\\/completions|responses|embeddings|rerank|audio\\/speech|images\\/(?:generations|edits))$/iu, '');\n  const urls: string[] = [];\n  const push = (value: string) => { if (value && !urls.includes(value)) urls.push(value); };\n\n  if (/\\/models$/iu.test(base)) {\n    push(base);\n    return urls;\n  }\n\n  try {\n    const parsed = new URL(base);\n    const path = parsed.pathname.replace(/\\/+$/u, '');\n    if (!path) {\n      // A bare host is most commonly an OpenAI-compatible API root. Prefer the\n      // standard /v1 endpoint, while retaining legacy /models and NewAPI fallback.\n      push(`${parsed.origin}/v1/models`);\n      push(`${parsed.origin}/models`);\n      push(`${parsed.origin}/api/models`);\n    } else {\n      push(`${base}/models`);\n      if (/\\/v1$/iu.test(path)) push(`${parsed.origin}/api/models`);\n    }\n  } catch {\n    push(`${base}/models`);\n  }\n  return urls;\n}\n"""
+          replace_once('packages/core/src/app/model-discovery.ts', old_urls, new_urls)
+
+          # 3) UI regression: batched edits must not reset protocol to "none".
+          admin_test = Path('packages/web/src/components/AdminPanel.test.tsx')
+          text = admin_test.read_text()
+          marker = "  it('存入模型库走服务器绑定接口，并且未保存的新 key 不会被存入', async () => {\n"
+          test = """  it('批量编辑接口协议和地址后保存不会把协议覆盖回未配置', async () => {\n    window.history.replaceState(null, '', '/admin/models');\n    adminMocks.models.mockResolvedValueOnce({\n      models: {\n        chat: { provider: 'none', model: '', baseUrl: '', apiKeyConfigured: false }\n      }\n    } as never);\n    container = document.createElement('div');\n    document.body.append(container);\n    root = createRoot(container);\n    await act(async () => {\n      root!.render(<AdminPanel initialTab=\"models\" />);\n      await Promise.resolve();\n      await Promise.resolve();\n    });\n\n    const labels = [...container.querySelectorAll('label')];\n    const protocol = labels.find((item) => item.textContent?.includes('接口协议'))!.querySelector('select') as HTMLSelectElement;\n    const baseUrl = labels.find((item) => item.textContent?.includes('接口地址'))!.querySelector('input') as HTMLInputElement;\n    await act(async () => {\n      const selectSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!;\n      selectSetter.call(protocol, 'openai-compatible');\n      protocol.dispatchEvent(new Event('change', { bubbles: true }));\n      const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;\n      inputSetter.call(baseUrl, 'https://gateway.test/v1');\n      baseUrl.dispatchEvent(new Event('input', { bubbles: true }));\n      baseUrl.dispatchEvent(new Event('change', { bubbles: true }));\n    });\n\n    const saveButton = [...container.querySelectorAll('button')].find((item) => item.textContent?.includes('保存模型配置'))!;\n    await act(async () => { saveButton.click(); await Promise.resolve(); });\n\n    expect(adminMocks.updateModels).toHaveBeenCalledWith({\n      chat: expect.objectContaining({\n        provider: 'openai-compatible',\n        baseUrl: 'https://gateway.test/v1',\n        model: ''\n      })\n    });\n  });\n\n"""
+          if test not in text:
+              if marker not in text:
+                  raise SystemExit('AdminPanel test insertion marker not found')
+              admin_test.write_text(text.replace(marker, test + marker, 1))
+
+          # 4) Core regression: provider/base URL/key must round-trip before a model is selected.
+          core_test = Path('packages/core/test/app/local-core.test.ts')
+          text = core_test.read_text()
+          marker = "  it('routes discovery through the real upstream request', async () => {\n"
+          test = """  it('persists provider connection details before a model is selected', async () => {\n    const core = new LocalCore({ db, secrets });\n    await core.adminRequest('/api/admin/models', {\n      method: 'PUT',\n      body: { chat: { provider: 'openai-compatible', baseUrl: 'https://chat.test/v1', model: '', apiKey: 'chat-key' } }\n    });\n\n    const read = await core.adminRequest<{ models: Record<string, unknown> }>('/api/admin/models');\n    const chat = read.models.chat as Record<string, unknown>;\n    expect(chat.provider).toBe('openai-compatible');\n    expect(chat.baseUrl).toBe('https://chat.test/v1');\n    expect(chat.model).toBe('');\n    expect(chat.apiKeyConfigured).toBe(true);\n    await expect(secrets.get('provider.chat.key')).resolves.toBe('chat-key');\n    await expect(core.configRepo.getProvider('chat')).resolves.toMatchObject({ enabled: false });\n  });\n\n"""
+          if test not in text:
+              if marker not in text:
+                  raise SystemExit('LocalCore test insertion marker not found')
+              core_test.write_text(text.replace(marker, test + marker, 1))
+
+          # 5) Discovery regression for bare roots and pasted inference endpoints.
+          discovery_test = Path('packages/core/src/app/model-discovery.test.ts')
+          text = discovery_test.read_text()
+          marker = "  it('falls back to NewAPI /api/models on 404 and parses the grouped shape', async () => {\n"
+          test = """  it('normalizes bare hosts and pasted inference endpoints to /v1/models', async () => {\n    for (const baseUrl of ['https://gateway.test', 'https://gateway.test/v1/chat/completions', 'https://gateway.test/v1/responses']) {\n      const urls: string[] = [];\n      const service = new ModelDiscoveryService(fakeHttp((input) => {\n        urls.push(input.url);\n        return { status: 200, body: JSON.stringify({ data: [{ id: 'gpt-4o' }] }) };\n      }), repo(fakeConfig({ baseUrl })) as ConfigRepository);\n      const result = await service.discover('chat');\n      expect(result.ok).toBe(true);\n      expect(urls[0]).toBe('https://gateway.test/v1/models');\n    }\n  });\n\n"""
+          if test not in text:
+              if marker not in text:
+                  raise SystemExit('Model discovery test insertion marker not found')
+              discovery_test.write_text(text.replace(marker, test + marker, 1))
+
+          Path('.github/workflows/fix-model-admin-save-20260815.yml').unlink()
+          PY
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test -w @sooya/core
+      - run: npm run test -w @sooya/web
+      - name: Commit verified fix
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add packages/web/src/components/AdminPanel.tsx packages/web/src/components/AdminPanel.test.tsx packages/core/src/app/model-discovery.ts packages/core/src/app/model-discovery.test.ts packages/core/test/app/local-core.test.ts .github/workflows/fix-model-admin-save-20260815.yml
+          git diff --cached --check
+          git commit -m 'fix(models): keep provider config while editing and normalize discovery URLs'
+          git push
