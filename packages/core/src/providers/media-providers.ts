@@ -29,6 +29,7 @@ import {
 
 const IMAGE_REFERENCE_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 const IMAGE_REFERENCE_MAX_BYTES = 10 * 1024 * 1024;
+const DIAGNOSTIC_KEY_LIMIT = 12;
 
 const FORMAT_MIME: Record<string, string> = {
   mp3: 'audio/mpeg',
@@ -95,6 +96,72 @@ function requestId(): string {
   } catch {
     return `sooya-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   }
+}
+
+function diagnosticKeys(value: Record<string, unknown>): string[] {
+  return Object.keys(value).slice(0, DIAGNOSTIC_KEY_LIMIT).map((key) => key.slice(0, 48));
+}
+
+function diagnosticUrlScheme(value: string): string | null {
+  try {
+    const protocol = new URL(value).protocol.toLocaleLowerCase();
+    if (protocol === 'https:') return 'https';
+    if (protocol === 'http:') return 'http';
+    return protocol.replace(/:$/u, '') || 'other';
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Privacy-safe description of an upload response. It deliberately reports
+ * only object key names, candidate field paths and URL schemes. It never
+ * includes string values, hosts, paths, query strings, API keys or base64.
+ */
+export function describeAnumaUploadResponse(response: unknown): string {
+  if (!isRecord(response)) {
+    if (Array.isArray(response)) return `type=array; length=${response.length}`;
+    if (response === null) return 'type=null';
+    if (typeof response === 'string') return `type=string; length=${response.length}`;
+    return `type=${typeof response}`;
+  }
+
+  const nested: string[] = [];
+  const urls: string[] = [];
+  const seen = new Set<object>();
+
+  const visit = (record: Record<string, unknown>, path: string, depth: number): void => {
+    if (seen.has(record) || depth > 2) return;
+    seen.add(record);
+    for (const [rawKey, value] of Object.entries(record).slice(0, DIAGNOSTIC_KEY_LIMIT)) {
+      const key = rawKey.slice(0, 48);
+      const field = `${path}${key}`;
+      if (typeof value === 'string') {
+        const scheme = diagnosticUrlScheme(value);
+        if (scheme) urls.push(`${field}:${scheme}`);
+        continue;
+      }
+      if (isRecord(value)) {
+        nested.push(`${field}=[${diagnosticKeys(value).join(',') || 'none'}]`);
+        visit(value, `${field}.`, depth + 1);
+        continue;
+      }
+      if (Array.isArray(value) && depth < 2) {
+        const firstRecord = value.find((item): item is Record<string, unknown> => isRecord(item));
+        if (firstRecord) {
+          nested.push(`${field}[]=[${diagnosticKeys(firstRecord).join(',') || 'none'}]`);
+          visit(firstRecord, `${field}[].`, depth + 1);
+        }
+      }
+    }
+  };
+
+  visit(response, '', 0);
+  const parts = [`keys=[${diagnosticKeys(response).join(',') || 'none'}]`];
+  if (nested.length) parts.push(`nested=${nested.slice(0, 8).join('|')}`);
+  if (urls.length) parts.push(`urls=[${urls.slice(0, 8).join(',')}]`);
+  else parts.push('urls=[none]');
+  return parts.join('; ');
 }
 
 type ImageApiResponse = { data?: Array<{ b64_json?: string; url?: string; mime_type?: string }> };
@@ -277,10 +344,11 @@ export class BuiltinImageProvider implements ImageProvider {
       throw pipelineError('reference_upload', error);
     }
     if (!isRecord(response) || typeof response.url !== 'string' || !response.url.startsWith('https://')) {
+      const diagnostic = describeAnumaUploadResponse(response);
       throw pipelineError('reference_upload', new ImageReferenceError(
         'reference_upload_invalid_response',
         '参考图上传返回无效，请稍后重试',
-        'anuma reference upload did not return an HTTPS URL'
+        `anuma reference upload did not return an HTTPS URL (${diagnostic})`
       ));
     }
     return response.url;
