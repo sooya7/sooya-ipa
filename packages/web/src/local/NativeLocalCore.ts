@@ -6,7 +6,7 @@ import {
   type LocalCoreOptions,
   type ModelCapabilitySlot
 } from '@sooya/core/app';
-import type { HttpPlatform } from '@sooya/core/platform';
+import type { HttpPlatform, McpPlatform } from '@sooya/core/platform';
 import {
   BuiltinChatProvider,
   BuiltinEmbeddingProvider,
@@ -28,7 +28,7 @@ export interface NativeModelTestResult {
 }
 
 const PROBE_TEXT = '你好';
-const VISION_PROBE_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+const VISION_PROBE_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 
 /**
  * Native IPA variant of LocalCore. The regular LocalCore admin bridge keeps
@@ -38,16 +38,32 @@ const VISION_PROBE_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQV
  */
 export class NativeLocalCore extends LocalCore {
   private readonly probeHttp: HttpPlatform;
+  private readonly probeMcp?: McpPlatform;
 
   constructor(options: LocalCoreOptions & { http: HttpPlatform }) {
     super(options);
     this.probeHttp = options.http;
+    this.probeMcp = options.mcp;
   }
 
   override async adminRequest<T = unknown>(path: string, options: LocalAdminRequestOptions = {}): Promise<T> {
     const url = new URL(path, 'https://sooya.local');
+    const method = (options.method ?? 'GET').toUpperCase();
+
+    // Native SOOYAMcp keeps an established server session in memory. The
+    // generic admin refresh path reconnects before listing tools, so a second
+    // "连接测试" used to hit duplicateServer and incorrectly mark a healthy
+    // connection as degraded. Explicitly close the old session before the
+    // diagnostic reconnect; the persisted config/tool policy stays untouched.
+    const mcpAction = url.pathname.match(/^\/api\/admin\/mcp\/([^/]+)\/(test|refresh-tools)$/u);
+    if (mcpAction && method === 'POST') {
+      const serverId = decodeURIComponent(mcpAction[1]!);
+      await this.probeMcp?.disconnect(serverId).catch(() => undefined);
+      return await super.adminRequest<T>(path, options);
+    }
+
     const match = url.pathname.match(/^\/api\/admin\/models\/([^/]+)\/test$/u);
-    if (!match || (options.method ?? 'GET').toUpperCase() !== 'POST') return await super.adminRequest<T>(path, options);
+    if (!match || method !== 'POST') return await super.adminRequest<T>(path, options);
 
     const capability = decodeURIComponent(match[1]!) as ModelCapabilitySlot;
     if (!(MODEL_CAPABILITY_SLOTS as readonly string[]).includes(capability)) throw new Error('未知的能力槽位');
