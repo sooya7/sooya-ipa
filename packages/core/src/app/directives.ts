@@ -26,6 +26,7 @@ const IMAGE_PATTERNS = [
   /画(?:一)?(?:只|个|条|头|匹|朵|棵|座|艘|辆|位|张|幅|份|篇)(?:.{0,12})?/u,
   /(?:发|来|给|要|想)(?:一)?(?:张|个|幅)(?:照片|相片|照)/u,
   /(?:发|来|给|要|想)(?:一)?(?:张|个|幅)?(?:照片|相片)/u,
+  /(?:发|来|给我|给|要)(?:一)?(?:张|个|幅)?图(?:片)?/u,
   /(?:看看|看下|看一?下).{0,6}(?:照片|相片|自拍)/u,
   /(?:给我看|让我看).{0,6}(?:照片|相片|自拍)/u,
   /拍(?:一)?(?:张|个)你的(?:照片|相片|照)/u,
@@ -34,9 +35,10 @@ const IMAGE_PATTERNS = [
   /draw (?:me )?(?:a|an)?/iu, /generate (?:an? )?image/iu
 ];
 const SELFIE_PATTERNS = [/自拍/u, /拍.{0,4}你的(?:照片|相片|照)/u, /(?:发|来|给|要|想|看看|看下).{0,6}你的.{0,4}(?:照片|相片|样子)/u, /selfie/iu];
+const GENERIC_ASSISTANT_PHOTO_RE = /^(?:你)?(?:给我)?(?:发|来|给|要)(?:我)?(?:一)?(?:张|个|幅)?(?:照片|相片|照|图|图片)(?:给我)?(?:看看|看下|看一下)?[吧呀啊嘛吗呢。！？!?~～]*$/u;
 const IMAGE_PROMPT_EXTRACT = [
   /(?:生成|画|做)(?:一)?(?:张|幅|个)?(?:图片?|画|插画|海报)?[，,:：]?\s*(.+)$/u,
-  /(?:拍|发|来|给)(?:一)?(?:张|个|幅)?(?:自拍|照片|相片|照)[，,:：]?\s*(.+)$/u,
+  /(?:拍|发|来|给)(?:一)?(?:张|个|幅)?(?:自拍|图片?|照片|相片|照)[，,:：]?\s*(.+)$/u,
   /draw (?:me )?(?:an? )?(.+)$/iu, /generate (?:an? )?image of (.+)$/iu
 ];
 const ABILITY_QUESTION_RE = /(?:会不会|能不能|会|能|可以|可否|能否)(?:[^，。！!？?、\n]{0,12})(?:画画|画图|生成图|生成图片|图片|生图|插图|海报|表情包|表情|语音|音频|读出来|自拍|拍照|照片|视频|画|图)[吗么嘛呢？?~～。]*$/u;
@@ -65,7 +67,8 @@ export function parseUserDirectives(text: string): UserDirectives {
   else if (has(VOICE_PATTERNS)) directives.wantVoice = true;
   if (has(IMAGE_PATTERNS)) {
     directives.wantImage = true;
-    directives.selfieIntent = has(SELFIE_PATTERNS) || undefined;
+    const genericAssistantPhoto = GENERIC_ASSISTANT_PHOTO_RE.test(value);
+    directives.selfieIntent = has(SELFIE_PATTERNS) || genericAssistantPhoto || undefined;
     let extracted: string | undefined;
     for (const pattern of IMAGE_PROMPT_EXTRACT) {
       const match = pattern.exec(value);
@@ -75,14 +78,13 @@ export function parseUserDirectives(text: string): UserDirectives {
       }
     }
     if (extracted) directives.imagePrompt = extracted;
-    // A selfie request without a describable prompt ("拍一张你的自拍") still
-    // needs an actionable default so the image provider is not fed the whole
-    // user sentence.
-    else if (directives.selfieIntent) directives.imagePrompt = '自拍';
-    // Other image intent without an extractable prompt ("给我看看你的照片")
-    // keeps wantImage only: the reply model is expected to fill in a concrete
-    // [[image:...]] prompt. Do not degrade to the raw user sentence, which
-    // makes the generated image prompt unstable.
+    // A selfie/generic assistant-photo request without a describable prompt
+    // still needs an actionable default so the image provider is guaranteed
+    // to receive a real prompt when the model forgets its private marker.
+    else if (directives.selfieIntent) directives.imagePrompt = genericAssistantPhoto ? '自然生活自拍' : '自拍';
+    // Other image intent without an extractable prompt keeps wantImage only;
+    // ReplyCoordinator will resolve a bounded context fallback before calling
+    // the image provider.
   }
   return directives;
 }
