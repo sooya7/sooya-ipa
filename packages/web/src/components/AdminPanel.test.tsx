@@ -318,8 +318,12 @@ describe('AdminPanel 子页首屏', () => {
       baseUrl.dispatchEvent(new Event('change', { bubbles: true }));
     });
 
+    const dashboard = container.querySelector('[data-testid="admin-dashboard"]')!;
+    expect(dashboard.getAttribute('data-dirty')).toBe('true');
+
     const saveButton = [...container.querySelectorAll('button')].find((item) => item.textContent?.includes('保存模型配置'))!;
     await act(async () => { saveButton.click(); await Promise.resolve(); });
+    expect(dashboard.hasAttribute('data-dirty')).toBe(false);
 
     expect(adminMocks.updateModels).toHaveBeenCalledWith({
       chat: expect.objectContaining({

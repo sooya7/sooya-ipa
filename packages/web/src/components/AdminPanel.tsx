@@ -431,7 +431,7 @@ function ModelLibrary({ onNotice, onApplied, reloadKey = 0 }: { onNotice: (v: st
   );
 }
 
-function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
+function ModelsPanel({ onNotice, onSaved }: { onNotice: (v: string) => void; onSaved: () => void }) {
   const [models, setModels] = useState<AdminModels | null>(null);
   const [selected, setSelected] = useState<ModelPanelSelection>('chat');
   const [available, setAvailable] = useState<string[] | null>(null);
@@ -473,6 +473,7 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
       setKeyDraft('');
       // The old verdict was about the config that was just replaced.
       setTestResult(null);
+      onSaved();
       onNotice(typed ? '模型配置与密钥已保存' : '模型配置已保存');
     } catch (e) {
       onNotice(errorText(e));
@@ -588,7 +589,7 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
           <WebSearchModelEditor
             config={models.webSearch as AdminWebSearchConfig}
             responsesAvailable={String((models.chat as Record<string, unknown> | undefined)?.provider ?? '') === 'openai-responses' && (models.chat as Record<string, unknown> | undefined)?.supportsTools === true}
-            onSaved={setModels}
+            onSaved={(next) => { setModels(next); onSaved(); }}
             onNotice={onNotice}
           />
         </> : <>
@@ -1366,7 +1367,7 @@ export default function AdminPanel({ initialTab = 'overview' }: { initialTab?: T
         : tab === 'life'
             ? <LifeObservationPanel onNotice={setNotice} />
             : tab === 'models'
-                ? <ModelsPanel onNotice={setNotice} />
+                ? <ModelsPanel onNotice={setNotice} onSaved={() => setDirtyState(false)} />
                 : tab === 'mcp'
                   ? <McpAdminPage onNotice={setNotice} />
                 : tab === 'content'
