@@ -28,7 +28,6 @@ permissions:
 
 jobs:
   patch-model-save:
-    if: github.ref == 'refs/heads/agent/model-provisional-save' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,14 +44,12 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-
           path = Path('packages/core/src/app/local-core.ts')
           source = path.read_text()
           old_guard = "if (!provider || !baseUrl || !model) continue;"
           if source.count(old_guard) != 1:
               raise SystemExit(f'expected one model save guard, found {source.count(old_guard)}')
           source = source.replace(old_guard, "if (!provider || !baseUrl) continue;", 1)
-
           old_set = """await this.configRepo.setProvider({
           capability: slot,
           provider,
@@ -74,7 +71,6 @@ jobs:
               raise SystemExit(f'expected one model setProvider block, found {source.count(old_set)}')
           source = source.replace(old_set, new_set, 1)
           path.write_text(source)
-
           Path('packages/core/src/app/model-admin-save-contract.test.ts').write_text("""import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
