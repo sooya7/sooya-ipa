@@ -248,13 +248,49 @@ async function fetchLocalMedia(path: string, options: AuthenticatedMediaOptions)
   const binary = atob(value.dataBase64);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-  const contentType = value.mime?.split(';', 1)[0]?.trim().toLowerCase() || 'application/octet-stream';
+  const declaredContentType = value.mime?.split(';', 1)[0]?.trim().toLowerCase() || 'application/octet-stream';
+  const contentType = normalizeLocalMediaContentType(bytes, declaredContentType, options.expected);
   if (!matchesExpectedType(contentType, options.expected)) throw new AuthenticatedMediaError('content_type', 200, '媒体类型不匹配');
   const blob = new Blob([bytes], { type: contentType });
   if (blob.size === 0) throw new AuthenticatedMediaError('empty', 200, '媒体内容为空');
   const url = URL.createObjectURL(blob);
   blobByObjectUrl.set(url, blob);
   return { url, blob, contentType };
+}
+
+const GENERIC_BINARY_MIMES = new Set(['application/octet-stream', 'application/binary', 'binary/octet-stream']);
+
+/**
+ * Older generated voice notes may have been persisted while Fish/OpenAI
+ * returned a generic binary Content-Type. Recover those rows from their actual
+ * audio bytes so the strict media guard can still create the right Blob MIME.
+ */
+export function normalizeLocalMediaContentType(bytes: Uint8Array, declared: string, expected: ExpectedMedia): string {
+  const normalized = declared.split(';', 1)[0]?.trim().toLowerCase() || 'application/octet-stream';
+  if (expected !== 'audio' || !GENERIC_BINARY_MIMES.has(normalized)) return normalized;
+  return sniffAudioMime(bytes) ?? normalized;
+}
+
+export function sniffAudioMime(bytes: Uint8Array): string | null {
+  if (matchesAscii(bytes, 0, 'ID3')) return 'audio/mpeg';
+  if (matchesAscii(bytes, 0, 'RIFF') && matchesAscii(bytes, 8, 'WAVE')) return 'audio/wav';
+  if (matchesAscii(bytes, 0, 'OggS')) return 'audio/ogg';
+  if (matchesAscii(bytes, 0, 'fLaC')) return 'audio/flac';
+  if (matchesAscii(bytes, 4, 'ftyp')) return 'audio/mp4';
+  if (bytes.length >= 2 && bytes[0] === 0xff) {
+    const second = bytes[1]!;
+    if ((second & 0xf6) === 0xf0) return 'audio/aac';
+    if ((second & 0xe0) === 0xe0) return 'audio/mpeg';
+  }
+  return null;
+}
+
+function matchesAscii(bytes: Uint8Array, offset: number, text: string): boolean {
+  if (bytes.length < offset + text.length) return false;
+  for (let index = 0; index < text.length; index += 1) {
+    if (bytes[offset + index] !== text.charCodeAt(index)) return false;
+  }
+  return true;
 }
 
 /**
@@ -324,4 +360,3 @@ function responseError(status: number): AuthenticatedMediaError {
   if (status >= 500) return new AuthenticatedMediaError('server', status, '媒体服务暂时不可用');
   return new AuthenticatedMediaError('http', status, `媒体请求失败（${status}）`);
 }
-
