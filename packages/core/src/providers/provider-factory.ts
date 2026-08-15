@@ -1,4 +1,4 @@
-import type { ConfigRepository } from '../db/config.repo.js';
+import type { ConfigRepository, ProviderConfig } from '../db/config.repo.js';
 import type { HttpPlatform } from '../platform/http.js';
 import type {
   ChatProvider,
@@ -22,6 +22,20 @@ export interface ConfiguredProviders {
   rerank: RerankProvider | null;
   image: ImageProvider | null;
   tts: TTSProvider | null;
+}
+
+/**
+ * The admin/migration model stores the vendor identity separately from the
+ * wire protocol. Media adapters historically keyed only off `provider`, which
+ * made a persisted `{ provider: 'anuma', options.protocol: 'anuma-input-images' }`
+ * silently fall back to the OpenAI images endpoint. Normalize only the runtime
+ * copy so the saved/admin-facing provider identity remains stable.
+ */
+function runtimeImageConfig(config: ProviderConfig): ProviderConfig {
+  const protocol = typeof config.options.protocol === 'string' ? config.options.protocol.trim() : '';
+  if (!protocol || protocol === config.provider) return config;
+  if (protocol === 'anuma-input-images') return { ...config, provider: protocol };
+  return config;
 }
 
 /**
@@ -50,7 +64,7 @@ export async function createConfiguredProviders(
     vision: vision && vision.enabled ? new BuiltinChatProvider(http, vision) : chatProvider,
     embedding: embedding && embedding.enabled ? new BuiltinEmbeddingProvider(http, embedding) : null,
     rerank: rerank && rerank.enabled ? new BuiltinRerankProvider(http, rerank) : null,
-    image: image && image.enabled ? new BuiltinImageProvider(http, image) : null,
+    image: image && image.enabled ? new BuiltinImageProvider(http, runtimeImageConfig(image)) : null,
     tts: tts && tts.enabled ? new BuiltinTtsProvider(http, tts) : null
   };
 }

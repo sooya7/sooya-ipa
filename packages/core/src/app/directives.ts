@@ -41,6 +41,16 @@ const IMAGE_PROMPT_EXTRACT = [
 ];
 const ABILITY_QUESTION_RE = /(?:会不会|能不能|会|能|可以|可否|能否)(?:[^，。！!？?、\n]{0,12})(?:画画|画图|生成图|生成图片|图片|生图|插图|海报|表情包|表情|语音|音频|读出来|自拍|拍照|照片|视频|画|图)[吗么嘛呢？?~～。]*$/u;
 
+/**
+ * Safety net for models that narrate a successful image API call but forget
+ * the private [[image...]] marker. Without this guard the visible reply can say
+ * "真的走了生图接口" while the runtime never calls the image provider.
+ * Keep this deliberately narrow: ordinary mentions/questions about image APIs
+ * must never trigger a generation.
+ */
+const NARRATED_IMAGE_ACTION_RE = /(?:这次|现在|刚刚)(?:是)?真的.{0,12}(?:生图|生成图片)|(?:真的|已经)(?:走了|调用了|用了|打开了|接上了).{0,10}(?:生图接口|图片生成接口|生图通道)/u;
+const FIRST_PERSON_SCENE_RE = /(?:^|[（(。！？!?\s])我(?:坐|站|躺|靠|穿|拿|抱|在|正|把|手|头|看|低|抬|蹲|走|笑|望)/u;
+
 export function parseUserDirectives(text: string): UserDirectives {
   const value = (text ?? '').trim();
   if (!value || ABILITY_QUESTION_RE.test(value)) return {};
@@ -160,6 +170,22 @@ function addSticker(directives: ModelDirectives, intent: string): void {
   directives.stickers = [...(directives.stickers ?? []), intent].slice(0, 8);
 }
 
+function inferNarratedImageDirective(text: string): { prompt: string; self: boolean } | null {
+  if (!NARRATED_IMAGE_ACTION_RE.test(text)) return null;
+  const scene = text
+    .split(/\n+/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !NARRATED_IMAGE_ACTION_RE.test(line))
+    .filter((line) => !/(?:生图接口|图片生成接口|打开通道|走接口|文字描述代替画面|就这一帧，?给你看)/u.test(line))
+    .join(' ')
+    .replace(/^[（(][^）)]{0,120}[）)]\s*/u, '')
+    .trim();
+  const prompt = (scene || text).slice(0, 1_500).trim();
+  if (!prompt) return null;
+  return { prompt, self: /自拍/u.test(text) || FIRST_PERSON_SCENE_RE.test(prompt) };
+}
+
 export function stripModelDirectives(raw: string): StripResult {
   const directives: ModelDirectives = {};
   const partial = TRAILING_PARTIAL_RE.exec(raw);
@@ -189,6 +215,13 @@ export function stripModelDirectives(raw: string): StripResult {
     .replace(/[ \t]{2,}/gu, ' ')
     .replace(/\n{3,}/gu, '\n\n')
     .trim();
+  if (!directives.imagePrompt && !directives.selfImagePrompt) {
+    const inferred = inferNarratedImageDirective(text);
+    if (inferred) {
+      if (inferred.self) directives.selfImagePrompt = inferred.prompt;
+      else directives.imagePrompt = inferred.prompt;
+    }
+  }
   return { text, directives };
 }
 
