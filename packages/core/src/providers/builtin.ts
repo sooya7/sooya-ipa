@@ -6,6 +6,7 @@ import type {
 } from './types.js';
 import { ImageEditUnsupportedError, ProviderNotConfiguredError, ProviderRequestError } from './types.js';
 import { binaryBytes, endpoint, healthStatus, isRecord, requestBytes, requestJson, requestSse, type SecretHeader, toBase64 } from './http-json.js';
+import { BuiltinImageProvider as ProtocolAwareImageProvider, BuiltinTtsProvider as ProtocolAwareTtsProvider } from './media-providers.js';
 
 export interface ConfiguredProviders {
   chat: ChatProvider | null;
@@ -27,8 +28,8 @@ export async function createConfiguredProviders(http: HttpPlatform, config: Conf
     vision: vision && vision.enabled ? new BuiltinChatProvider(http, vision) : chatProvider,
     embedding: embedding && embedding.enabled ? new BuiltinEmbeddingProvider(http, embedding) : null,
     rerank: rerank && rerank.enabled ? new BuiltinRerankProvider(http, rerank) : null,
-    image: image && image.enabled ? new BuiltinImageProvider(http, image) : null,
-    tts: tts && tts.enabled ? new BuiltinTtsProvider(http, tts) : null
+    image: image && image.enabled ? new ProtocolAwareImageProvider(http, image) : null,
+    tts: tts && tts.enabled ? new ProtocolAwareTtsProvider(http, tts) : null
   };
 }
 
