@@ -71,19 +71,21 @@ jobs:
               raise SystemExit(f'expected one model setProvider block, found {source.count(old_set)}')
           source = source.replace(old_set, new_set, 1)
           path.write_text(source)
-          Path('packages/core/src/app/model-admin-save-contract.test.ts').write_text("""import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
-
-describe('native model admin provisional save', () => {
-  it('persists connection details before a model is selected without enabling runtime use', () => {
-    const source = readFileSync(path.resolve('src/app/local-core.ts'), 'utf8');
-    expect(source).toContain('if (!provider || !baseUrl) continue;');
-    expect(source).not.toContain('if (!provider || !baseUrl || !model) continue;');
-    expect(source).toContain('enabled: Boolean(model),');
-  });
-});
-""")
+          test_source = (
+              "import { describe, expect, it } from 'vitest';\n"
+              "import { readFileSync } from 'node:fs';\n"
+              "import path from 'node:path';\n"
+              "\n"
+              "describe('native model admin provisional save', () => {\n"
+              "  it('persists connection details before a model is selected without enabling runtime use', () => {\n"
+              "    const source = readFileSync(path.resolve('src/app/local-core.ts'), 'utf8');\n"
+              "    expect(source).toContain('if (!provider || !baseUrl) continue;');\n"
+              "    expect(source).not.toContain('if (!provider || !baseUrl || !model) continue;');\n"
+              "    expect(source).toContain('enabled: Boolean(model),');\n"
+              "  });\n"
+              "});\n"
+          )
+          Path('packages/core/src/app/model-admin-save-contract.test.ts').write_text(test_source)
           PY
       - name: Run core tests
         run: npm run test -w @sooya/core
