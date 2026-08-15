@@ -1,0 +1,75 @@
+name: Fix admin dirty state after save
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-admin-dirty-after-save-20260815.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+      - name: Apply dirty-state fix and regression assertion
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f'anchor not found in {path}: {old[:160]!r}')
+              p.write_text(text.replace(old, new, 1))
+
+          panel = 'packages/web/src/components/AdminPanel.tsx'
+          replace_once(
+              panel,
+              "function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {",
+              "function ModelsPanel({ onNotice, onSaved }: { onNotice: (v: string) => void; onSaved: () => void }) {"
+          )
+          replace_once(
+              panel,
+              "      setTestResult(null);\n      onNotice(typed ? '模型配置与密钥已保存' : '模型配置已保存');",
+              "      setTestResult(null);\n      onSaved();\n      onNotice(typed ? '模型配置与密钥已保存' : '模型配置已保存');"
+          )
+          replace_once(
+              panel,
+              "            onSaved={setModels}",
+              "            onSaved={(next) => { setModels(next); onSaved(); }}"
+          )
+          replace_once(
+              panel,
+              "                ? <ModelsPanel onNotice={setNotice} />",
+              "                ? <ModelsPanel onNotice={setNotice} onSaved={() => setDirtyState(false)} />"
+          )
+
+          test_path = 'packages/web/src/components/AdminPanel.test.tsx'
+          replace_once(
+              test_path,
+              "    const saveButton = [...container.querySelectorAll('button')].find((item) => item.textContent?.includes('保存模型配置'))!;\n    await act(async () => { saveButton.click(); await Promise.resolve(); });\n\n    expect(adminMocks.updateModels).toHaveBeenCalledWith({",
+              "    const dashboard = container.querySelector('[data-testid=\"admin-dashboard\"]')!;\n    expect(dashboard.getAttribute('data-dirty')).toBe('true');\n\n    const saveButton = [...container.querySelectorAll('button')].find((item) => item.textContent?.includes('保存模型配置'))!;\n    await act(async () => { saveButton.click(); await Promise.resolve(); });\n    expect(dashboard.hasAttribute('data-dirty')).toBe(false);\n\n    expect(adminMocks.updateModels).toHaveBeenCalledWith({"
+          )
+
+          Path('.github/workflows/fix-admin-dirty-after-save-20260815.yml').unlink()
+          PY
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test -w @sooya/web -- src/components/AdminPanel.test.tsx
+      - name: Commit verified fix
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add packages/web/src/components/AdminPanel.tsx packages/web/src/components/AdminPanel.test.tsx .github/workflows/fix-admin-dirty-after-save-20260815.yml
+          git diff --cached --check
+          git commit -m 'fix(admin): clear unsaved state after model config save'
+          git push
