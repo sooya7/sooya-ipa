@@ -9,6 +9,7 @@ import type { ChatMessage } from './types.js';
 import type { ContextBuilder } from './context-builder.js';
 import { currentReplyFeatureRuntime, type ReplyFeatureRuntime } from './reply-feature-runtime.js';
 import { parseUserDirectives, StreamingDirectiveFilter, stripModelDirectives, type ModelDirectives, type UserDirectives } from './directives.js';
+import { buildImageFallbackPrompt, stripModelMediaExecutionClaims } from './reply-media-policy.js';
 import { decideWebSearch } from './web-search-policy.js';
 
 /** Maximum number of image/sticker binaries read into the model context per reply. */
@@ -158,7 +159,9 @@ export class ReplyCoordinator {
       await write;
       if (controller.signal.aborted || await this.options.batches.currentRevision(batchId) !== revision) throw new SupersededReplyError('reply revision is no longer current');
       const stripped = stripModelDirectives(rawText || result.text || '');
-      const semanticText = stripped.text || visibleText.trim(); const directives = mergeDirectives(userDirectives, stripped.directives);
+      const rawSemanticText = stripped.text || visibleText.trim();
+      const semanticText = stripModelMediaExecutionClaims(rawSemanticText, Boolean(userDirectives.wantImage || userDirectives.wantVoice));
+      const directives = mergeDirectives(userDirectives, stripped.directives, buildImageFallbackPrompt(userDirectives, recent, latestUser));
       visibleText = directives.voiceOnly || directives.stickerOnly ? '' : semanticText;
       await this.options.messages.updatePart(partId, { text: visibleText });
       const mediaCount = await this.appendRequestedMedia(assistantId, semanticText, directives, controller.signal);
@@ -180,19 +183,31 @@ export class ReplyCoordinator {
   async recover(): Promise<void> { const open = await this.options.batches.latestOpen(); if (open) this.schedule(open.id, open.revision); }
 
   private async appendRequestedMedia(messageId: string, text: string, directives: EffectiveDirectives, signal: AbortSignal): Promise<number> {
-    const runtime = this.runtime(); if (!runtime || signal.aborted) return 0; let appended = 0;
+    if (signal.aborted) return 0;
+    const runtime = this.runtime();
+    if (!runtime) {
+      if (directives.requiredImage) throw new Error('image runtime is unavailable');
+      return 0;
+    }
+    let appended = 0;
     const imagePrompt = directives.selfImagePrompt ?? directives.imagePrompt;
+    if (directives.requiredImage && !imagePrompt) throw new Error('image request did not resolve to a prompt');
     if (imagePrompt) {
       try {
         const provider = await runtime.imageProvider?.();
-        if (provider?.configured) {
+        if (!provider?.configured) {
+          if (directives.requiredImage) throw new Error('image provider is not configured');
+        } else {
           const references = directives.selfImagePrompt ? await runtime.referenceImages?.().catch(() => []) : undefined;
           const generated = await provider.generate(imagePrompt, { signal, ...(references?.length ? { referenceImages: references } : {}) });
           const record = await runtime.media.save({ kind: 'image', data: generated.data, mime: generated.mime, name: `sooya-${Date.now()}.image`, metadata: { prompt: imagePrompt, provider: provider.name, generated: true } });
           await this.options.messages.appendPart(messageId, { type: 'image', mediaId: record.id, meta: { prompt: imagePrompt, generated: true, selfImage: Boolean(directives.selfImagePrompt) } });
           this.options.emit('reply.media.created', { messageId, type: 'image', mediaId: record.id }); appended += 1;
         }
-      } catch (error) { this.options.emit('reply.media.failed', { messageId, type: 'image', error: errorMessage(error) }); }
+      } catch (error) {
+        this.options.emit('reply.media.failed', { messageId, type: 'image', error: errorMessage(error) });
+        if (directives.requiredImage) throw error;
+      }
     }
     if (directives.stickers?.length && !directives.noSticker && runtime.stickers) {
       const seen = new Set<string>();
@@ -256,19 +271,23 @@ export class ReplyCoordinator {
   private async commitMemory(batchId: string, revision: number, user: ChatMessage, assistantText: string, signal: AbortSignal): Promise<void> { if (!signal.aborted) await this.options.memory.commit({ batchId, revision, userText: textOf(user), assistantText, signal }); }
 }
 
-interface EffectiveDirectives extends ModelDirectives { noSticker?: boolean; noVoice?: boolean; }
-function mergeDirectives(user: UserDirectives, model: ModelDirectives): EffectiveDirectives {
-  const directives: EffectiveDirectives = { ...model, noSticker: user.noSticker, noVoice: user.noVoice };
+interface EffectiveDirectives extends ModelDirectives { noSticker?: boolean; noVoice?: boolean; requiredImage?: boolean; }
+function mergeDirectives(user: UserDirectives, model: ModelDirectives, fallbackImagePrompt: string | null): EffectiveDirectives {
+  const directives: EffectiveDirectives = { ...model, noSticker: user.noSticker, noVoice: user.noVoice, requiredImage: user.wantImage || undefined };
   if (!user.noSticker && user.wantSticker && !directives.stickers?.length) { directives.sticker = 'auto'; directives.stickers = ['auto']; }
   if (!user.noVoice && user.wantVoice) directives.voice = true;
   if (user.voiceOnly) { directives.voice = true; directives.voiceOnly = true; }
   if (user.stickerOnly) { directives.stickerOnly = true; directives.stickers ||= ['auto']; }
-  if (user.wantImage && !directives.imagePrompt && !directives.selfImagePrompt) { if (user.selfieIntent) directives.selfImagePrompt = user.imagePrompt ?? null; else directives.imagePrompt = user.imagePrompt ?? null; }
+  if (user.wantImage && !directives.imagePrompt && !directives.selfImagePrompt) {
+    const prompt = user.imagePrompt?.trim() || fallbackImagePrompt?.trim() || '一张与当前对话相关的自然生活照片';
+    if (user.selfieIntent) directives.selfImagePrompt = prompt;
+    else directives.imagePrompt = prompt;
+  }
   if (user.noSticker) { directives.sticker = null; directives.stickers = []; directives.stickerOnly = false; }
   if (user.noVoice) { directives.voice = false; directives.voiceOnly = false; }
   return directives;
 }
-function appendDirectiveProtocol(system: string | undefined): string { return [system ?? '', '你可以在回复中使用私有多媒体标记，标记不会显示给用户：', '[[sticker:情绪或含义]] 发送表情包；[[image:画面描述]] 生成图片；[[image-self:自拍画面描述]] 生成你的自拍；[[voice]] 把本次文字同时转成语音；[[voice-only]] 只发语音；[[sticker-only:含义]] 只发表情包。', '只有确实需要多媒体时才使用标记，不要把标记解释给用户。'].filter(Boolean).join('\n'); }
+function appendDirectiveProtocol(system: string | undefined): string { return [system ?? '', '你可以在回复中使用私有多媒体标记，标记不会显示给用户：', '[[sticker:情绪或含义]] 发送表情包；[[image:画面描述]] 生成图片；[[image-self:自拍画面描述]] 生成你的自拍；[[voice]] 把本次文字同时转成语音；[[voice-only]] 只发语音；[[sticker-only:含义]] 只发表情包。', '只有确实需要多媒体时才使用标记，不要把标记解释给用户。', '多媒体 Provider 会在你的文本生成结束后由本地 Runtime 执行；你看不到它的配置状态、调用结果或错误。不要声称接口已调用、未配置、失败、成功、回传为空或通道不可用。用户明确要求图片时，只需提供真实画面意图/私有图片标记，绝不要用文字假装已经发图。'].filter(Boolean).join('\n'); }
 class SupersededReplyError extends Error { override name = 'SupersededReplyError'; }
 function isMessage(value: ChatMessage | undefined): value is ChatMessage { return value !== undefined; }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500); }
