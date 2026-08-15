@@ -164,7 +164,7 @@ export class ReplyCoordinator {
       const directives = mergeDirectives(userDirectives, stripped.directives, buildImageFallbackPrompt(userDirectives, recent, latestUser));
       visibleText = directives.voiceOnly || directives.stickerOnly ? '' : semanticText;
       await this.options.messages.updatePart(partId, { text: visibleText });
-      const mediaCount = await this.appendRequestedMedia(assistantId, semanticText, directives, controller.signal);
+      const mediaCount = await this.appendRequestedMedia(assistantId, semanticText, directives, controller.signal, { batchId, revision });
       if (!semanticText.trim() && mediaCount === 0) throw new Error('provider returned an empty reply');
       await this.options.messages.updateMeta(assistantId, { batchId, revision, partial: false, model: result.model, finishReason: result.finishReason ?? null, usage: result.usage ?? null, directives, mediaCount, ...(webSearchResult ? webSearchPartMeta(webSearchResult) : {}), ...(result.webSearch ? { webSearch: result.webSearch } : {}) });
       await this.options.messages.setStatus(assistantId, 'sent');
@@ -182,8 +182,9 @@ export class ReplyCoordinator {
 
   async recover(): Promise<void> { const open = await this.options.batches.latestOpen(); if (open) this.schedule(open.id, open.revision); }
 
-  private async appendRequestedMedia(messageId: string, text: string, directives: EffectiveDirectives, signal: AbortSignal): Promise<number> {
+  private async appendRequestedMedia(messageId: string, text: string, directives: EffectiveDirectives, signal: AbortSignal, context: { batchId: string; revision: number }): Promise<number> {
     if (signal.aborted) return 0;
+    const { batchId, revision } = context;
     const runtime = this.runtime();
     if (!runtime) {
       if (directives.requiredImage) throw new Error('image runtime is unavailable');
@@ -198,18 +199,20 @@ export class ReplyCoordinator {
         if (!provider?.configured) {
           if (directives.requiredImage) throw new Error('image provider is not configured');
         } else {
+          this.options.emit('reply.image.generating', { batchId, revision, messageId, type: 'image' });
           const references = directives.selfImagePrompt ? await runtime.referenceImages?.().catch(() => []) : undefined;
           const generated = await provider.generate(imagePrompt, { signal, ...(references?.length ? { referenceImages: references } : {}) });
           const record = await runtime.media.save({ kind: 'image', data: generated.data, mime: generated.mime, name: `sooya-${Date.now()}.image`, metadata: { prompt: imagePrompt, provider: provider.name, generated: true } });
           await this.options.messages.appendPart(messageId, { type: 'image', mediaId: record.id, meta: { prompt: imagePrompt, generated: true, selfImage: Boolean(directives.selfImagePrompt) } });
-          this.options.emit('reply.media.created', { messageId, type: 'image', mediaId: record.id }); appended += 1;
+          this.options.emit('reply.media.created', { batchId, revision, messageId, type: 'image', mediaId: record.id }); appended += 1;
         }
       } catch (error) {
-        this.options.emit('reply.media.failed', { messageId, type: 'image', error: errorMessage(error) });
+        this.options.emit('reply.media.failed', { batchId, revision, messageId, type: 'image', error: errorMessage(error) });
         if (directives.requiredImage) throw error;
       }
     }
     if (directives.stickers?.length && !directives.noSticker && runtime.stickers) {
+      this.options.emit('reply.sticker.selecting', { batchId, revision, messageId });
       const seen = new Set<string>();
       for (const intent of directives.stickers.slice(0, 3)) {
         try {
@@ -217,20 +220,21 @@ export class ReplyCoordinator {
           const sticker = matches.find((item) => !seen.has(item.id)) ?? (await runtime.stickers.list({ enabledOnly: true, sort: 'usage', limit: 24 })).find((item) => !seen.has(item.id));
           if (!sticker) continue; seen.add(sticker.id);
           await this.options.messages.appendPart(messageId, { type: 'sticker', mediaId: sticker.mediaId, meta: { stickerId: sticker.id, intent } });
-          await runtime.stickers.markAssistantUsed(sticker.id); this.options.emit('reply.media.created', { messageId, type: 'sticker', mediaId: sticker.mediaId, stickerId: sticker.id }); appended += 1;
-        } catch (error) { this.options.emit('reply.media.failed', { messageId, type: 'sticker', error: errorMessage(error) }); }
+          await runtime.stickers.markAssistantUsed(sticker.id); this.options.emit('reply.media.created', { batchId, revision, messageId, type: 'sticker', mediaId: sticker.mediaId, stickerId: sticker.id }); appended += 1;
+        } catch (error) { this.options.emit('reply.media.failed', { batchId, revision, messageId, type: 'sticker', error: errorMessage(error) }); }
       }
     }
     if (directives.voice && !directives.noVoice && text.trim()) {
       try {
         const provider = await runtime.ttsProvider?.();
         if (provider?.configured) {
+          this.options.emit('reply.audio.generating', { batchId, revision, messageId, type: 'audio' });
           const audio = await provider.synthesize(text, { signal, ...(directives.voiceEmotion ? { emotion: directives.voiceEmotion } : {}) });
           const record = await runtime.media.save({ kind: 'audio', data: audio.data, mime: audio.mime, name: `sooya-${Date.now()}.${audio.format}`, metadata: { provider: provider.name, generated: true } });
           await this.options.messages.appendPart(messageId, { type: 'audio', mediaId: record.id, transcript: text, duration: audio.durationSec ?? null, meta: { generated: true, emotion: directives.voiceEmotion ?? null, intensity: directives.voiceIntensity ?? null } });
-          this.options.emit('reply.media.created', { messageId, type: 'audio', mediaId: record.id }); appended += 1;
+          this.options.emit('reply.media.created', { batchId, revision, messageId, type: 'audio', mediaId: record.id }); appended += 1;
         }
-      } catch (error) { this.options.emit('reply.media.failed', { messageId, type: 'audio', error: errorMessage(error) }); }
+      } catch (error) { this.options.emit('reply.media.failed', { batchId, revision, messageId, type: 'audio', error: errorMessage(error) }); }
     }
     return appended;
   }
