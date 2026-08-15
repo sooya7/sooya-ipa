@@ -1,37 +1,15 @@
-import type { ConfigRepository, ProviderConfig } from '../db/config.repo.js';
+// The single createConfiguredProviders factory lives in provider-factory.ts.
+// It was previously duplicated here (without the anuma protocol normalization
+// and the summary/director slots), which silently left LocalCore's own runtime
+// on the stale copy.
+import type { ProviderConfig } from '../db/config.repo.js';
 import type { HttpPlatform } from '../platform/http.js';
 import type {
-  BinaryData, ChatContentPart, ChatChunk, ChatProvider, ChatRequest, ChatResult, ChatToolCall, EmbeddingProvider, EmbeddingResult,
-  GeneratedImage, HealthStatus, ImageProvider, RerankProvider, RerankMatch, SynthesizedAudio, TTSOptions, TTSProvider
+  ChatContentPart, ChatChunk, ChatProvider, ChatRequest, ChatResult, ChatToolCall, EmbeddingProvider, EmbeddingResult,
+  HealthStatus, RerankProvider, RerankMatch
 } from './types.js';
-import { ImageEditUnsupportedError, ProviderNotConfiguredError, ProviderRequestError } from './types.js';
-import { binaryBytes, endpoint, healthStatus, isRecord, requestBytes, requestJson, requestSse, type SecretHeader, toBase64 } from './http-json.js';
-import { BuiltinImageProvider as ProtocolAwareImageProvider, BuiltinTtsProvider as ProtocolAwareTtsProvider } from './media-providers.js';
-
-export interface ConfiguredProviders {
-  chat: ChatProvider | null;
-  /** Independent vision slot; falls back to the chat model when unconfigured. */
-  vision: ChatProvider | null;
-  embedding: EmbeddingProvider | null;
-  rerank: RerankProvider | null;
-  image: ImageProvider | null;
-  tts: TTSProvider | null;
-}
-
-export async function createConfiguredProviders(http: HttpPlatform, config: ConfigRepository): Promise<ConfiguredProviders> {
-  const [chat, vision, embedding, rerank, image, tts] = await Promise.all([
-    config.getProvider('chat'), config.getProvider('vision'), config.getProvider('embedding'), config.getProvider('rerank'), config.getProvider('image'), config.getProvider('tts')
-  ]);
-  const chatProvider = chat && chat.enabled ? new BuiltinChatProvider(http, chat) : null;
-  return {
-    chat: chatProvider,
-    vision: vision && vision.enabled ? new BuiltinChatProvider(http, vision) : chatProvider,
-    embedding: embedding && embedding.enabled ? new BuiltinEmbeddingProvider(http, embedding) : null,
-    rerank: rerank && rerank.enabled ? new BuiltinRerankProvider(http, rerank) : null,
-    image: image && image.enabled ? new ProtocolAwareImageProvider(http, image) : null,
-    tts: tts && tts.enabled ? new ProtocolAwareTtsProvider(http, tts) : null
-  };
-}
+import { ProviderNotConfiguredError, ProviderRequestError } from './types.js';
+import { endpoint, healthStatus, isRecord, requestJson, requestSse, type SecretHeader, toBase64 } from './http-json.js';
 
 abstract class BuiltinProvider {
   protected readonly secret: SecretHeader;
@@ -239,37 +217,6 @@ export class BuiltinRerankProvider extends BuiltinProvider implements RerankProv
     return rows.flatMap((row) => isRecord(row) && typeof row.index === 'number' && Number.isInteger(row.index) && typeof row.relevance_score === 'number' ? [{ index: row.index, score: row.relevance_score }] : []);
   }
   async inspectHealth(): Promise<HealthStatus> { return this.health('rerank'); }
-}
-
-export class BuiltinImageProvider extends BuiltinProvider implements ImageProvider {
-  readonly name = this.config.provider;
-  readonly configured = Boolean(this.config.baseUrl && this.config.model && this.config.secretRef);
-  async generate(prompt: string, options: { size?: string; signal?: AbortSignal; referenceImages?: Array<{ data: BinaryData; mime: string }> } = {}): Promise<GeneratedImage> {
-    if (!this.configured) throw new ProviderNotConfiguredError('image');
-    const response = await requestJson<Record<string, unknown>>(this.http, { url: endpoint(this.config.baseUrl, '/v1/images/generations'), method: 'POST', signal: options.signal, body: { model: this.model, prompt, ...(options.size ? { size: options.size } : {}), n: 1 } }, this.secret);
-    const item = Array.isArray(response.data) ? response.data[0] : undefined;
-    if (!isRecord(item)) throw new ProviderRequestError('image provider returned no image');
-    if (typeof item.url === 'string') {
-      const downloaded = await this.http.request({ url: item.url, method: 'GET', signal: options.signal });
-      return { data: downloaded.body, mime: downloaded.headers['content-type'] ?? 'image/png' };
-    }
-    return { ...binaryBytes(item.b64_json, 'image/png'), mime: 'image/png' };
-  }
-  async edit(_prompt: string, _image: BinaryData, _options: { mime?: string; signal?: AbortSignal } = {}): Promise<GeneratedImage> {
-    throw new ImageEditUnsupportedError('configured image provider does not expose a safe edit endpoint');
-  }
-  async inspectHealth(): Promise<HealthStatus> { return this.health('image'); }
-}
-
-export class BuiltinTtsProvider extends BuiltinProvider implements TTSProvider {
-  readonly name = this.config.provider;
-  readonly configured = Boolean(this.config.baseUrl && this.config.model && this.config.secretRef);
-  async synthesize(text: string, options: TTSOptions = {}): Promise<SynthesizedAudio> {
-    if (!this.configured) throw new ProviderNotConfiguredError('tts');
-    const response = await requestBytes(this.http, { url: endpoint(this.config.baseUrl, '/v1/audio/speech'), method: 'POST', signal: options.signal, body: { model: this.model, input: text, voice: options.voice ?? 'alloy', ...(options.instructions ? { instructions: options.instructions } : {}), ...(options.speed ? { speed: options.speed } : {}), response_format: 'mp3' } }, this.secret);
-    return { data: response.body, mime: response.mime || 'audio/mpeg', format: 'mp3' };
-  }
-  async inspectHealth(): Promise<HealthStatus> { return this.health('tts'); }
 }
 
 function numberValue(value: unknown): number | undefined { return typeof value === 'number' ? value : undefined; }

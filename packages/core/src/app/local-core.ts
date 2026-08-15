@@ -4,7 +4,7 @@ import type { MediaPlatform } from '../platform/media.js';
 import type { HttpPlatform } from '../platform/http.js';
 import { ConfigRepository, JobRepo, LifeCityRepo, LifeClockRepo, LifeRepo, LifeV2Repo, LocationRepo, MediaRepo, MemoryRepo, MessageRepo, MetricsRepo, MomentRepo, ReplyBatchRepo, SettingsRepo, StickerRepo, SummaryRepo, ThoughtRepo, VoiceRepo, WeatherRepo, type MediaRow, type ProviderConfig, type Sticker } from '../db/index.js';
 import type { ChatProvider } from '../providers/types.js';
-import type { ConfiguredProviders } from '../providers/builtin.js';
+import type { ConfiguredProviders } from '../providers/provider-factory.js';
 import { createWebSearch, DOUBAO_SEARCH_DEFAULT_URL, TAVILY_SEARCH_DEFAULT_URL } from '../providers/web-search.js';
 import { OpenMeteoWeatherProvider, summarizeForecast, type WeatherForecastSummary } from '../providers/weather-provider.js';
 import type { MemoryProvider } from '../memory/types.js';
@@ -172,7 +172,7 @@ export class LocalCore implements LocalCoreApi {
     this.media = options.mediaStore ? new LocalMediaResolver(this.mediaRepo, options.mediaStore) : undefined;
     this.personaReferences = new PersonaReferenceService(this.settingsRepo, this.mediaRepo);
     this.configuredProviders = options.http
-      ? async () => (await import('../providers/builtin.js')).createConfiguredProviders(options.http!, this.configRepo)
+      ? async () => (await import('../providers/provider-factory.js')).createConfiguredProviders(options.http!, this.configRepo)
       : undefined;
     const localMemoryProvider = new LocalMemoryProvider({
       store: new SqliteLocalMemoryStore(this.memoryRepo),
@@ -236,7 +236,7 @@ export class LocalCore implements LocalCoreApi {
       batches: this.batchesRepo,
       memory: this.memoryProvider,
       provider: options.chatProvider,
-      providerFactory: options.chatProviderFactory ?? (options.http ? async () => (await import('../providers/builtin.js')).createConfiguredProviders(options.http!, this.configRepo).then((providers) => providers.chat) : undefined),
+      providerFactory: options.chatProviderFactory ?? (options.http ? async () => (await import('../providers/provider-factory.js')).createConfiguredProviders(options.http!, this.configRepo).then((providers) => providers.chat) : undefined),
       webSearch: options.http ? () => createWebSearch(options.http!, this.configRepo) : null,
       toolRuntime: options.toolRuntime,
       contextBuilder: this.contextBuilder,

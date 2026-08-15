@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ConfigRepository, ProviderConfig } from '../db/config.repo.js';
 import type { HttpPlatform } from '../platform/http.js';
-import { createConfiguredProviders } from './builtin.js';
+import { createConfiguredProviders } from './provider-factory.js';
 import { BuiltinImageProvider as ProtocolAwareImageProvider } from './media-providers.js';
 
 const imageConfig: ProviderConfig = {

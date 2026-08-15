@@ -52,3 +52,59 @@ describe('public provider factory image protocol routing', () => {
     });
   });
 });
+
+describe('summary and director slots', () => {
+  const chatConfig: ProviderConfig = {
+    capability: 'chat',
+    provider: 'openai-compatible',
+    baseUrl: 'https://chat.example.test/v1',
+    model: 'chat-model',
+    secretRef: 'provider.chat.key',
+    enabled: true,
+    options: {},
+    createdAt: '2026-08-16T00:00:00.000Z',
+    updatedAt: '2026-08-16T00:00:00.000Z'
+  };
+  const directorConfig: ProviderConfig = {
+    ...chatConfig,
+    capability: 'director',
+    model: 'director-model',
+    secretRef: 'provider.director.key'
+  };
+
+  it('falls back to chat when summary/director slots are unconfigured', async () => {
+    const config = {
+      getProvider: async (capability: ProviderConfig['capability']) => capability === 'chat' ? chatConfig : undefined
+    } as unknown as ConfigRepository;
+
+    const providers = await createConfiguredProviders(new FakeHttp(), config);
+
+    expect(providers.summary).toBe(providers.chat);
+    expect(providers.director).toBe(providers.chat);
+  });
+
+  it('prefers an independently configured director over the chat fallback', async () => {
+    const config = {
+      getProvider: async (capability: ProviderConfig['capability']) =>
+        capability === 'chat' ? chatConfig : capability === 'director' ? directorConfig : undefined
+    } as unknown as ConfigRepository;
+
+    const providers = await createConfiguredProviders(new FakeHttp(), config);
+
+    expect(providers.director).not.toBe(providers.chat);
+    expect(providers.director?.configured).toBe(true);
+    expect(providers.summary).toBe(providers.chat);
+  });
+
+  it('stays null without any chat-capable provider', async () => {
+    const config = {
+      getProvider: async () => undefined
+    } as unknown as ConfigRepository;
+
+    const providers = await createConfiguredProviders(new FakeHttp(), config);
+
+    expect(providers.chat).toBeNull();
+    expect(providers.summary).toBeNull();
+    expect(providers.director).toBeNull();
+  });
+});

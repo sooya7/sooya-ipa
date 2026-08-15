@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { HttpPlatform, HttpRequest, HttpResponse, HttpResponseHead } from '../platform/http.js';
 import type { ProviderConfig } from '../db/config.repo.js';
-import { BuiltinChatProvider, BuiltinTtsProvider } from './builtin.js';
+import { BuiltinChatProvider } from './builtin.js';
+import { BuiltinTtsProvider } from './media-providers.js';
 
 class FakeHttp implements HttpPlatform {
   readonly requests: HttpRequest[] = [];
