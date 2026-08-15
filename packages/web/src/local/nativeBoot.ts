@@ -1,6 +1,7 @@
 import { Capacitor } from '@capacitor/core';
 import { LocalCore, SERVER_REFERENCE_IMAGES, installReplyFeatureRuntime, rollbackBuiltinStickerImport, seedBuiltinStickersOnce, seedServerPersonaOnce } from '@sooya/core/app';
-import { createConfiguredProviders } from '@sooya/core/providers';import type { LocalDatabase, DatabaseValue, DatabaseIntegrityResult, DatabaseBackupResult, RunResult } from '@sooya/core/platform';
+import { createConfiguredProviders } from '@sooya/core/providers';
+import type { LocalDatabase, DatabaseValue, DatabaseIntegrityResult, DatabaseBackupResult, RunResult } from '@sooya/core/platform';
 import type { SecretsPlatform } from '@sooya/core/platform';
 import type { MediaPlatform, MediaRecord, MediaSaveRequest } from '@sooya/core/platform';
 import type { HttpPlatform, HttpRequest, HttpResponse, HttpResponseHead } from '@sooya/core/platform';
@@ -10,6 +11,7 @@ import { ToolCallRuntime, ToolPolicy, ToolRegistry } from '@sooya/core/tools';
 import { migrateDatabase } from '@sooya/core/app';
 import { installSooyaClient } from '../lib/sooyaClient.js';
 import { LocalSooyaClient } from './LocalSooyaClient.js';
+import { NativeLocalCore } from './NativeLocalCore.js';
 import { probeNotificationCapabilities } from './notificationCapabilities.js';
 import { DEFAULT_OTA_MANIFEST_URL, prepareOtaUpdater, type LocalOtaUpdater, type NativeReleaseInfo } from './otaUpdater.js';
 import { BUILTIN_STICKERS, BuiltinStickerMedia, afterAppReady } from './builtinStickers.js';
@@ -179,7 +181,7 @@ export async function installNativeLocalCore(): Promise<boolean> {
   const secrets = new CapacitorSecrets();
   const http = new CapacitorHttp();
   nativeBuiltinMedia = mediaStore;
-  const core = new LocalCore({ db, secrets, mediaStore, http, mcp: new CapacitorMcp(), toolRegistry: registry, toolPolicy: policy, toolRuntime: runtime });
+  const core = new NativeLocalCore({ db, secrets, mediaStore, http, mcp: new CapacitorMcp(), toolRegistry: registry, toolPolicy: policy, toolRuntime: runtime });
   await ensureNativeCompanionState(core);
   await seedServerPersonaOnce(core.settingsRepo);
   installReplyFeatureRuntime({
