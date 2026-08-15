@@ -1,0 +1,79 @@
+name: Temporary model provisional-save hotfix
+
+on:
+  push:
+    branches: [fix/model-discovery-provisional-save]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/model-discovery-provisional-save
+          fetch-depth: 0
+      - name: Patch provisional model save and add regression test
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('packages/core/src/app/local-core.ts')
+          source = path.read_text()
+
+          old_guard = "if (!provider || !baseUrl || !model) continue;"
+          new_guard = "if (!provider || !baseUrl) continue;"
+          if source.count(old_guard) != 1:
+              raise SystemExit(f'expected one model save guard, found {source.count(old_guard)}')
+          source = source.replace(old_guard, new_guard, 1)
+
+          old_set = """await this.configRepo.setProvider({
+          capability: slot,
+          provider,
+          baseUrl,
+          model,
+          secretRef,
+          options: modelOptionsFrom(raw)
+        } as never);"""
+          new_set = """await this.configRepo.setProvider({
+          capability: slot,
+          provider,
+          baseUrl,
+          model,
+          secretRef,
+          enabled: Boolean(model),
+          options: modelOptionsFrom(raw)
+        } as never);"""
+          if source.count(old_set) != 1:
+              raise SystemExit(f'expected one model setProvider block, found {source.count(old_set)}')
+          source = source.replace(old_set, new_set, 1)
+          path.write_text(source)
+
+          test = Path('packages/core/src/app/model-admin-save-contract.test.ts')
+          test.write_text("""import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+
+describe('native model admin provisional save', () => {
+  it('persists provider/base URL/secret before a model is selected without enabling runtime use', () => {
+    const source = readFileSync(path.resolve('src/app/local-core.ts'), 'utf8');
+    expect(source).toContain('if (!provider || !baseUrl) continue;');
+    expect(source).not.toContain('if (!provider || !baseUrl || !model) continue;');
+    expect(source).toContain('enabled: Boolean(model),');
+  });
+});
+""")
+          PY
+      - name: Remove temporary workflow
+        run: rm .github/workflows/_temp-model-provisional-fix.yml
+      - name: Commit final hotfix
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add packages/core/src/app/local-core.ts packages/core/src/app/model-admin-save-contract.test.ts .github/workflows/_temp-model-provisional-fix.yml
+          git commit -m "fix(models): preserve connection config before discovery"
+          git push origin HEAD:fix/model-discovery-provisional-save
