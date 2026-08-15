@@ -13,6 +13,7 @@ import { LocalSooyaClient } from './LocalSooyaClient.js';
 import { probeNotificationCapabilities } from './notificationCapabilities.js';
 import { DEFAULT_OTA_MANIFEST_URL, prepareOtaUpdater, type LocalOtaUpdater, type NativeReleaseInfo } from './otaUpdater.js';
 import { BUILTIN_STICKERS, BuiltinStickerMedia, afterAppReady } from './builtinStickers.js';
+import { ensureNativeCompanionState } from './nativePresenceBootstrap.js';
 
 interface NativePluginCall { call<T = Record<string, unknown>>(method: string, options: Record<string, unknown>): Promise<T>; }
 type TransactionOperation = { type: 'execute' | 'run' | 'query'; sql: string; values?: DatabaseValue[] };
@@ -179,6 +180,7 @@ export async function installNativeLocalCore(): Promise<boolean> {
   const http = new CapacitorHttp();
   nativeBuiltinMedia = mediaStore;
   const core = new LocalCore({ db, secrets, mediaStore, http, mcp: new CapacitorMcp(), toolRegistry: registry, toolPolicy: policy, toolRuntime: runtime });
+  await ensureNativeCompanionState(core);
   await seedServerPersonaOnce(core.settingsRepo);
   installReplyFeatureRuntime({
     media: core.media!,
@@ -191,6 +193,7 @@ export async function installNativeLocalCore(): Promise<boolean> {
   void probeNotificationCapabilities(core);
   nativeOtaCore = core;
   void wireNativeLifecycle(core).catch((error) => console.warn('Native lifecycle wiring is unavailable', error));
+  void core.onAppActive().catch((error) => console.warn('Native initial Life/weather refresh failed', error));
   try { nativeOtaUpdater = await prepareOtaUpdater(core, await getNativeReleaseInfo()); }
   catch (error) { nativeOtaUpdater = null; console.warn('OTA updater is unavailable; LocalCore will continue without OTA', error); }
   return true;

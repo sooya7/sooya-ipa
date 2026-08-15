@@ -252,7 +252,13 @@ export class LocalCore implements LocalCoreApi {
   /** Foreground: recover interrupted jobs before the scheduler drains them. */
   async onAppActive(): Promise<void> {
     await this.jobsRepo.recoverStuck();
-    await this.lifeCatchUp.catchUp().catch(() => undefined);
+    const caught = await this.lifeCatchUp.catchUp().catch(() => null);
+    if (caught) this.events.emit('life.updated', { activity: caught.state.current.activity });
+    const cachedWeather = await this.weatherRepo.latest('active').catch(() => undefined);
+    const weatherAgeMs = cachedWeather ? (this.options.now?.() ?? new Date()).getTime() - Date.parse(cachedWeather.observed_at) : Number.POSITIVE_INFINITY;
+    if (!cachedWeather || !Number.isFinite(weatherAgeMs) || weatherAgeMs > 30 * 60_000) await this.refreshWeather().catch(() => undefined);
+    const presence = await this.presence().catch(() => null);
+    if (presence) this.events.emit('world.updated', { presence });
     await this.momentComposer.compose().catch(() => undefined);
     await this.replies.recover();
     void this.memorySync?.syncOnce().catch(() => undefined);
@@ -517,11 +523,15 @@ export class LocalCore implements LocalCoreApi {
     try {
       const locationState = await this.locationsRepo.currentState();
       const location = locationState ? await this.locationsRepo.get(locationState.location_id) : undefined;
-      if (!location?.name) return { ok: false, snapshot: null, error: '没有可用的当前位置' };
+      const activeCity = await this.lifeCitiesRepo.activeCity();
+      const cityName = location?.city ?? activeCity?.name ?? location?.name;
+      const country = location?.country ?? activeCity?.country ?? '中国';
+      if (!cityName) return { ok: false, snapshot: null, error: '没有可用的当前位置' };
       const provider = new OpenMeteoWeatherProvider(this.options.http);
-      const snapshot = await provider.current({ city: location.name, country: '中国' });
+      const snapshot = await provider.current({ city: cityName, country });
       await this.weatherRepo.save({
-        location_key: snapshot.locationKey,
+        // Header/presence reads the logical active slot rather than the provider's geocode key.
+        location_key: 'active',
         observed_at: snapshot.observedAt,
         condition: snapshot.condition,
         temperature_c: snapshot.temperatureC ?? null,
@@ -620,14 +630,17 @@ export class LocalCore implements LocalCoreApi {
     try {
       const locationState = await this.locationsRepo.currentState();
       const location = locationState ? await this.locationsRepo.get(locationState.location_id) : undefined;
-      if (!location?.name) return null;
+      const activeCity = await this.lifeCitiesRepo.activeCity();
+      const cityName = location?.city ?? activeCity?.name ?? location?.name;
+      const country = location?.country ?? activeCity?.country ?? '中国';
+      if (!cityName) return null;
       const now = this.options.now?.() ?? new Date();
-      const cached = this.forecastCache.get(location.name);
+      const cached = this.forecastCache.get(cityName);
       if (!force && cached && now.getTime() - cached.fetchedAt < 30 * 60_000) return cached.summary;
       const provider = new OpenMeteoWeatherProvider(this.options.http);
-      const forecast = await provider.forecast({ city: location.name, country: '中国' });
+      const forecast = await provider.forecast({ city: cityName, country });
       const summary = summarizeForecast(forecast.periods, forecast.generatedAt, forecast.provider, now);
-      this.forecastCache.set(location.name, { summary, fetchedAt: now.getTime() });
+      this.forecastCache.set(cityName, { summary, fetchedAt: now.getTime() });
       return summary;
     } catch {
       return null;
