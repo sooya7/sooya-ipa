@@ -46,15 +46,16 @@ jobs:
           from pathlib import Path
           path = Path('packages/core/src/app/local-core.ts')
           source = path.read_text()
-          old_guard = "if (!provider || !baseUrl || !model) continue;"
+          old_guard = "if (!provider || !baseUrl || !model) { if (provider === 'none') await this.configRepo.removeProvider(capability); continue; }"
+          new_guard = "if (!provider || !baseUrl) { if (provider === 'none') await this.configRepo.removeProvider(capability); continue; }"
           if source.count(old_guard) != 1:
               raise SystemExit(f'expected one model save guard, found {source.count(old_guard)}')
-          source = source.replace(old_guard, "if (!provider || !baseUrl) continue;", 1)
-          old_tail = "          secretRef,\n          options: modelOptionsFrom(raw)"
-          new_tail = "          secretRef,\n          enabled: Boolean(model),\n          options: modelOptionsFrom(raw)"
-          if source.count(old_tail) != 1:
-              raise SystemExit(f'expected one model setProvider tail, found {source.count(old_tail)}')
-          source = source.replace(old_tail, new_tail, 1)
+          source = source.replace(old_guard, new_guard, 1)
+          old_set = "await this.configRepo.setProvider({ capability, provider, model, baseUrl, secretRef, options: modelOptionsFrom(raw) });"
+          new_set = "await this.configRepo.setProvider({ capability, provider, model, baseUrl, secretRef, enabled: Boolean(model), options: modelOptionsFrom(raw) });"
+          if source.count(old_set) != 1:
+              raise SystemExit(f'expected one model setProvider call, found {source.count(old_set)}')
+          source = source.replace(old_set, new_set, 1)
           path.write_text(source)
           test_source = (
               "import { describe, expect, it } from 'vitest';\n"
@@ -64,9 +65,9 @@ jobs:
               "describe('native model admin provisional save', () => {\n"
               "  it('persists connection details before a model is selected without enabling runtime use', () => {\n"
               "    const source = readFileSync(path.resolve('src/app/local-core.ts'), 'utf8');\n"
-              "    expect(source).toContain('if (!provider || !baseUrl) continue;');\n"
-              "    expect(source).not.toContain('if (!provider || !baseUrl || !model) continue;');\n"
-              "    expect(source).toContain('enabled: Boolean(model),');\n"
+              "    expect(source).toContain(\"if (!provider || !baseUrl) { if (provider === 'none') await this.configRepo.removeProvider(capability); continue; }\");\n"
+              "    expect(source).not.toContain(\"if (!provider || !baseUrl || !model) { if (provider === 'none') await this.configRepo.removeProvider(capability); continue; }\");\n"
+              "    expect(source).toContain('enabled: Boolean(model)');\n"
               "  });\n"
               "});\n"
           )
