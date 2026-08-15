@@ -40,26 +40,16 @@ interface RestoreResult {
 type DatabaseRow = Record<string, unknown>;
 
 interface PreservedLocalState {
-  // Hybrid memory is phone-local state synchronized with Ombre; the server
-  // migration archive deliberately contains no memory facts.
   memories: DatabaseRow[];
   syncState: DatabaseRow[];
   syncOutbox: DatabaseRow[];
   syncCursors: DatabaseRow[];
   tombstones: DatabaseRow[];
   localMemoryReceipts: DatabaseRow[];
-
-  // Built-in sticker binaries live in the IPA web bundle, not Media/objects.
-  // Preserve their SQLite rows so user meaning/favorites/use counters survive
-  // instead of resetting to the bundled defaults after a server migration.
   builtinStickerMedia: DatabaseRow[];
   builtinStickers: DatabaseRow[];
   builtinStickerSearch: DatabaseRow[];
   builtinStickerMarkers: DatabaseRow[];
-
-  // These tables describe the IPA runtime, not server business data. Their
-  // Keychain values live outside SQLite and survive the restore, so the DB
-  // references/configuration must survive as well.
   mcpServers: DatabaseRow[];
   mcpPolicies: DatabaseRow[];
   secretRefs: DatabaseRow[];
@@ -144,8 +134,6 @@ export async function importFullBackup(selected: PickedFullBackup, password?: st
     restore = await database.call<RestoreResult>('restore', { name: prepared.restoreName });
 
     if (localDb && preservedLocal) {
-      // Server snapshots currently stop at schema v35. Bring the restored copy
-      // to the current IPA schema before putting phone-local state back.
       await migrateDatabase(localDb);
       await restoreLocalState(localDb, preservedLocal);
     }
@@ -192,8 +180,6 @@ async function captureLocalState(db: CapacitorDatabase): Promise<PreservedLocalS
 }
 
 async function restoreLocalState(db: CapacitorDatabase, state: PreservedLocalState): Promise<void> {
-  // The migration archive intentionally contains no server memory facts. Restore
-  // the phone's local copy, including unsynced outbox/conflict/cursor state.
   await clearTables(db, [
     'memory_sync_outbox', 'memory_sync_state', 'memory_sync_cursors', 'memory_tombstones',
     'local_memory_receipts', 'memories'
@@ -205,9 +191,6 @@ async function restoreLocalState(db: CapacitorDatabase, state: PreservedLocalSta
   await insertRows(db, 'memory_sync_cursors', state.syncCursors);
   await insertRows(db, 'memory_tombstones', state.tombstones);
 
-  // The server export has no sticker rows. Restore the IPA's current built-in
-  // state, including semantic edits/favorites/counters and the seed marker. The
-  // associated binary assets remain available from the bundled asset paths.
   await db.run('DELETE FROM sticker_semantics_fts');
   await db.run('DELETE FROM stickers');
   await db.run("DELETE FROM media WHERE kind='sticker'");
@@ -217,9 +200,6 @@ async function restoreLocalState(db: CapacitorDatabase, state: PreservedLocalSta
   await insertRows(db, 'sticker_semantics_fts', state.builtinStickerSearch);
   await insertRows(db, 'settings', state.builtinStickerMarkers);
 
-  // Preserve all IPA-local provider/MCP/OTA preferences, not just Ombre. The
-  // corresponding Keychain secrets are outside the SQLite file and were never
-  // touched by the server migration restore.
   await clearTables(db, [
     'mcp_tool_policies', 'mcp_servers', 'secret_refs', 'provider_configs',
     'app_preferences', 'notification_capabilities', 'local_update_state',
@@ -231,7 +211,6 @@ async function restoreLocalState(db: CapacitorDatabase, state: PreservedLocalSta
   await insertRows(db, 'provider_configs', state.providerConfigs);
   await insertRows(db, 'app_preferences', state.appPreferences);
   await insertRows(db, 'notification_capabilities', state.notificationCapabilities);
-  await insertRows(db, 'local_updateState', []);
   await insertRows(db, 'local_update_state', state.localUpdateState);
   await insertRows(db, 'local_backup_metadata', state.localBackupMetadata);
 
