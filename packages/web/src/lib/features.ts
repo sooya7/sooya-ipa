@@ -162,6 +162,13 @@ async function request<T>(path: string, options: { method?: string; body?: unkno
   return parsed as T;
 }
 
+function blobFromBase64(dataBase64: string, mime = 'application/octet-stream'): Blob {
+  const binary = atob(dataBase64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return new Blob([bytes], { type: mime });
+}
+
 /** Raw-binary GET that adapts to the local in-process channel: LocalCore
  * answers { dataBase64 | builtinPath }, the server answers the file itself. */
 async function rawData<T>(path: string): Promise<T> {
@@ -174,10 +181,7 @@ async function rawData<T>(path: string): Promise<T> {
       return (await response.blob()) as T;
     }
     if (!value.dataBase64) throw new Error('参考图不存在');
-    const binary = atob(value.dataBase64);
-    const bytes = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-    return new Blob([bytes], { type: value.mime ?? 'application/octet-stream' }) as T;
+    return blobFromBase64(value.dataBase64, value.mime) as T;
   }
   return await request<T>(path, { raw: true });
 }
@@ -255,8 +259,19 @@ export const featureApi = {
     await request('/api/admin/voice', { method: 'PUT', body });
     return request<Record<string, any>>('/api/admin/voice');
   },
-  /** 语音试听：模型配置 → 语音合成 使用；Fish 与 OpenAI/Volc 同样可用。 */
-  previewVoice: (text: string, emotion: string) => request<Blob>('/api/admin/voice/preview', { method: 'POST', body: { text, emotion }, raw: true }),
+  /** 语音试听：服务器拿 raw 音频；IPA 通过 LocalCore 返回 base64 再还原 Blob。 */
+  previewVoice: async (text: string, emotion: string): Promise<Blob> => {
+    const local = currentSooyaClient();
+    if (local?.adminRequest) {
+      const value = await local.adminRequest<{ dataBase64?: string; mime?: string; format?: string }>('/api/admin/voice/preview', {
+        method: 'POST',
+        body: { text, emotion }
+      });
+      if (!value.dataBase64) throw new Error('语音试听没有返回音频');
+      return blobFromBase64(value.dataBase64, value.mime ?? 'audio/mpeg');
+    }
+    return await request<Blob>('/api/admin/voice/preview', { method: 'POST', body: { text, emotion }, raw: true });
+  },
 
   life: () => request<LifePanelData>('/api/admin/life'),
   createLifePlan: (body: { title: string; kind: string; plannedStart?: string | null; plannedEnd?: string | null; priority?: number }) =>
