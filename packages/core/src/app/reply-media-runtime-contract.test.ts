@@ -26,6 +26,19 @@ describe('reply media runtime contract', () => {
     expect(source).toContain("const stage = pipeline?.stage ?? input.stage;");
   });
 
+  it('retires the active generation before completed events and memory post-processing', async () => {
+    const source = await readFile(new URL('./reply-coordinator.ts', import.meta.url), 'utf8');
+    const completedBatch = source.indexOf('this.options.batches.complete(batchId, assistant.id, revision)');
+    const retired = source.indexOf('this.active.delete(batchId)', completedBatch);
+    const completedEvent = source.indexOf("this.options.emit('reply.completed'", completedBatch);
+    const memoryCommit = source.indexOf('void this.commitMemory(', completedBatch);
+
+    expect(completedBatch).toBeGreaterThan(-1);
+    expect(retired).toBeGreaterThan(completedBatch);
+    expect(completedEvent).toBeGreaterThan(retired);
+    expect(memoryCommit).toBeGreaterThan(completedEvent);
+  });
+
   it('tells the model that only Runtime owns media execution status', async () => {
     const source = await readFile(new URL('./reply-coordinator.ts', import.meta.url), 'utf8');
 
