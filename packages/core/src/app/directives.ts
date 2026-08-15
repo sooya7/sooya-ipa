@@ -1,4 +1,6 @@
 /** Two-way multimedia directive protocol shared by the local reply runtime. */
+import { parseVoiceIntent } from './voice/intent.js';
+
 export interface UserDirectives {
   wantSticker?: boolean;
   wantImage?: boolean;
@@ -6,6 +8,8 @@ export interface UserDirectives {
   selfieIntent?: boolean;
   wantVoice?: boolean;
   voiceOnly?: boolean;
+  /** The user explicitly asked to have existing text read aloud. */
+  readAloud?: boolean;
   stickerOnly?: boolean;
   noSticker?: boolean;
   noVoice?: boolean;
@@ -16,9 +20,6 @@ const STICKER_PATTERNS = [/发(?:个|一个|张|一张)?(?:.{0,12})?表情/u, /�
 const STICKER_ONLY_PATTERNS = [/只发表情/u, /光发表情/u, /只要表情/u, /sticker only/iu];
 const ANOTHER_STICKER_PATTERNS = [/换(?:一)?个表情/u, /再来(?:一)?个表情/u, /换个表情包/u, /another sticker/iu, /换一张/u];
 const NO_STICKER_PATTERNS = [/不要(?:发)?表情/u, /别发表情/u, /不用表情/u, /no sticker/iu, /别斗图/u];
-const VOICE_PATTERNS = [/用语音(?:说|讲|回|发)?/u, /语音(?:说|回复|回答|讲)/u, /发(?:个|条|段)?语音/u, /读出来/u, /念(?:出来|一下)/u, /voice message/iu, /say it (?:out loud|aloud)/iu];
-const VOICE_ONLY_PATTERNS = [/只发语音/u, /只要语音/u, /只用语音/u, /光发语音/u, /voice only/iu];
-const NO_VOICE_PATTERNS = [/不要(?:发)?语音/u, /别发语音/u, /不用语音/u, /no voice/iu];
 const IMAGE_PATTERNS = [
   /(?:生成|画|做|来|给我).{0,6}(?:一)?(?:张|幅|个)?(?:图片?|画|插画|海报)/u,
   /生成图/u, /画(?:一)?(?:张|幅)/u, /自拍/u, /拍(?:一)?(?:张|个)(?:照|相|自拍)?/u,
@@ -62,9 +63,13 @@ export function parseUserDirectives(text: string): UserDirectives {
   else if (has(ANOTHER_STICKER_PATTERNS)) { directives.wantSticker = true; directives.anotherSticker = true; }
   else if (has(STICKER_ONLY_PATTERNS)) { directives.wantSticker = true; directives.stickerOnly = true; }
   else if (has(STICKER_PATTERNS)) directives.wantSticker = true;
-  if (has(NO_VOICE_PATTERNS)) directives.noVoice = true;
-  else if (has(VOICE_ONLY_PATTERNS)) { directives.wantVoice = true; directives.voiceOnly = true; }
-  else if (has(VOICE_PATTERNS)) directives.wantVoice = true;
+  // Voice intent comes from the shared voice/intent rule set so "用语音回我"
+  // (voice_reply) and "把这段念出来" (read_aloud) stay separate decisions.
+  const voiceIntent = parseVoiceIntent(value);
+  if (voiceIntent === 'no_voice') directives.noVoice = true;
+  else if (voiceIntent === 'voice_only') { directives.wantVoice = true; directives.voiceOnly = true; }
+  else if (voiceIntent === 'voice_reply') directives.wantVoice = true;
+  else if (voiceIntent === 'read_aloud') { directives.wantVoice = true; directives.readAloud = true; }
   if (has(IMAGE_PATTERNS)) {
     directives.wantImage = true;
     const genericAssistantPhoto = GENERIC_ASSISTANT_PHOTO_RE.test(value);

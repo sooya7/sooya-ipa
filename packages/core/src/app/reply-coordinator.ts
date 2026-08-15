@@ -12,6 +12,7 @@ import type { MediaDirector } from './media-director.js';
 import { fallbackImagePrompt } from './media-director.js';
 import { StaleGenerationError } from './stale-generation.js';
 import { parseUserDirectives, StreamingDirectiveFilter, stripModelDirectives, type ModelDirectives, type UserDirectives } from './directives.js';
+import { mergeVoiceDirectives, type VoiceIntent } from './voice/intent.js';
 import { buildImageFallbackPrompt, stripModelMediaExecutionClaims } from './reply-media-policy.js';
 import { decideWebSearch } from './web-search-policy.js';
 
@@ -95,6 +96,12 @@ export class ReplyCoordinator {
       const latestUser = [...sourceMessages].reverse().find((message) => message.role === 'user');
       if (!latestUser) throw new Error('reply batch has no user message');
       const userDirectives = parseUserDirectives(textOf(latestUser));
+      // Batch-wide voice intent: every user message of this batch is parsed in
+      // order and the last explicit directive wins, so "用语音回我" followed by
+      // "你今天在干嘛" keeps voice enabled (server parity for batch merges).
+      const userVoiceIntent: VoiceIntent = mergeVoiceDirectives(
+        sourceMessages.filter((message) => message.role === 'user').map((message) => ({ text: textOf(message) }))
+      ).intent;
       const recent = await this.options.messages.recent(32);
       const context = this.options.contextBuilder ? await this.options.contextBuilder.build({ recent, latestUser }) : { system: await this.systemPrompt(latestUser), turns: await this.buildTurns(recent, latestUser) };
       const request: ChatRequest = { system: appendDirectiveProtocol(context.system), messages: context.turns, maxTokens: 2048, temperature: 0.7, signal: controller.signal };
@@ -168,7 +175,7 @@ export class ReplyCoordinator {
       const stripped = stripModelDirectives(rawText || result.text || '');
       const rawSemanticText = stripped.text || visibleText.trim();
       const semanticText = stripModelMediaExecutionClaims(rawSemanticText, Boolean(userDirectives.wantImage || userDirectives.wantVoice));
-      const directives = mergeDirectives(userDirectives, stripped.directives, buildImageFallbackPrompt(userDirectives, recent, latestUser));
+      const directives = mergeDirectives(userDirectives, stripped.directives, buildImageFallbackPrompt(userDirectives, recent, latestUser), userVoiceIntent);
       visibleText = directives.voiceOnly || directives.stickerOnly ? '' : semanticText;
       const media = await this.appendRequestedMedia(assistantId, semanticText, directives, controller.signal, { batchId, revision, sourceMessages });
       if (!visibleText.trim() && media.appended === 0 && media.imageAttempted && media.imageFailed) visibleText = IMAGE_FAILURE_FALLBACK_TEXT;
@@ -434,12 +441,16 @@ export class ReplyCoordinator {
 }
 
 interface MediaAppendResult { appended: number; imageAttempted: boolean; imageFailed: boolean; }
-interface EffectiveDirectives extends ModelDirectives { noSticker?: boolean; noVoice?: boolean; requiredImage?: boolean; }
-function mergeDirectives(user: UserDirectives, model: ModelDirectives, fallbackImagePrompt: string | null): EffectiveDirectives {
-  const directives: EffectiveDirectives = { ...model, noSticker: user.noSticker, noVoice: user.noVoice, requiredImage: user.wantImage || undefined };
+interface EffectiveDirectives extends ModelDirectives { noSticker?: boolean; noVoice?: boolean; requiredImage?: boolean; readAloud?: boolean; }
+function mergeDirectives(user: UserDirectives, model: ModelDirectives, fallbackImagePrompt: string | null, userVoiceIntent: VoiceIntent): EffectiveDirectives {
+  const directives: EffectiveDirectives = { ...model, noSticker: user.noSticker, noVoice: user.noVoice, requiredImage: user.wantImage || undefined, readAloud: user.readAloud || undefined };
   if (!user.noSticker && user.wantSticker && !directives.stickers?.length) { directives.sticker = 'auto'; directives.stickers = ['auto']; }
-  if (!user.noVoice && user.wantVoice) directives.voice = true;
-  if (user.voiceOnly) { directives.voice = true; directives.voiceOnly = true; }
+  // Batch-derived voice intent outranks the latest-message-only flags; the
+  // model marker alone can never hide text (voiceOnly requires the user).
+  if (userVoiceIntent === 'no_voice' || user.noVoice) { directives.voice = false; directives.voiceOnly = false; directives.readAloud = false; }
+  else if (userVoiceIntent === 'voice_only') { directives.voice = true; directives.voiceOnly = true; }
+  else if (userVoiceIntent === 'voice_reply' || userVoiceIntent === 'read_aloud') { directives.voice = true; directives.readAloud = userVoiceIntent === 'read_aloud' || undefined; }
+  else if (!user.noVoice && user.wantVoice) directives.voice = true;
   if (user.stickerOnly) { directives.stickerOnly = true; directives.stickers ||= ['auto']; }
   if (user.wantImage && !directives.imagePrompt && !directives.selfImagePrompt) {
     const prompt = user.imagePrompt?.trim() || fallbackImagePrompt?.trim() || '一张与当前对话相关的自然生活照片';
