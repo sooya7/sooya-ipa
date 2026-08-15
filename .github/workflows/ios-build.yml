@@ -50,26 +50,11 @@ jobs:
           if source.count(old_guard) != 1:
               raise SystemExit(f'expected one model save guard, found {source.count(old_guard)}')
           source = source.replace(old_guard, "if (!provider || !baseUrl) continue;", 1)
-          old_set = """await this.configRepo.setProvider({
-          capability: slot,
-          provider,
-          baseUrl,
-          model,
-          secretRef,
-          options: modelOptionsFrom(raw)
-        } as never);"""
-          new_set = """await this.configRepo.setProvider({
-          capability: slot,
-          provider,
-          baseUrl,
-          model,
-          secretRef,
-          enabled: Boolean(model),
-          options: modelOptionsFrom(raw)
-        } as never);"""
-          if source.count(old_set) != 1:
-              raise SystemExit(f'expected one model setProvider block, found {source.count(old_set)}')
-          source = source.replace(old_set, new_set, 1)
+          old_tail = "          secretRef,\n          options: modelOptionsFrom(raw)"
+          new_tail = "          secretRef,\n          enabled: Boolean(model),\n          options: modelOptionsFrom(raw)"
+          if source.count(old_tail) != 1:
+              raise SystemExit(f'expected one model setProvider tail, found {source.count(old_tail)}')
+          source = source.replace(old_tail, new_tail, 1)
           path.write_text(source)
           test_source = (
               "import { describe, expect, it } from 'vitest';\n"
