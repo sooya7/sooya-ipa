@@ -15,6 +15,7 @@ import {
   BuiltinTtsProvider,
   ProviderRequestError
 } from '@sooya/core/providers';
+import { nativeModelProbeTimeoutLabel, nativeModelProbeTimeoutMs } from './modelProbeTimeout.js';
 
 type NativeProviderConfig = ConstructorParameters<typeof BuiltinChatProvider>[1];
 
@@ -94,8 +95,12 @@ export async function probeNativeModel(
     throw new Error('这个模型没有声明支持读图，先把“声明支持读图”改成“是”再测');
   }
 
+  const probeTimeoutMs = nativeModelProbeTimeoutMs(configured, capability);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error('连接测试超过 30 秒还没有结果')), 30_000);
+  const timer = setTimeout(
+    () => controller.abort(new Error(`连接测试超过 ${nativeModelProbeTimeoutLabel(probeTimeoutMs)}还没有结果`)),
+    probeTimeoutMs
+  );
   const startedAt = Date.now();
   try {
     if (capability === 'image') {
