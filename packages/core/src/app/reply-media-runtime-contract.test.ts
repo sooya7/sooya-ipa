@@ -2,13 +2,16 @@ import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 
 describe('reply media runtime contract', () => {
-  it('makes explicit image intent mandatory and propagates real image failures', async () => {
+  it('keeps explicit image intent mandatory without making image failures fatal', async () => {
     const source = await readFile(new URL('./reply-coordinator.ts', import.meta.url), 'utf8');
 
     expect(source).toContain('requiredImage: user.wantImage || undefined');
-    expect(source).toContain("throw new Error('image provider is not configured')");
-    expect(source).toContain('if (directives.requiredImage) throw error;');
+    expect(source).toContain("throw new Error('provider returned an empty reply')");
     expect(source).toContain('buildImageFallbackPrompt(userDirectives, recent, latestUser)');
+    // The old behavior (image error -> throw -> whole reply failed) must stay gone.
+    expect(source).not.toContain('if (directives.requiredImage) throw error;');
+    expect(source).toContain('IMAGE_FAILURE_FALLBACK_TEXT');
+    expect(source).toContain("this.failImage(result, messageId, context, { stage: stageOf(error, 'generation')");
   });
 
   it('emits image generation lifecycle before the real provider call', async () => {
@@ -19,7 +22,8 @@ describe('reply media runtime contract', () => {
     expect(started).toBeGreaterThan(-1);
     expect(generated).toBeGreaterThan(started);
     expect(source).toContain("this.options.emit('reply.media.created', { batchId, revision, messageId, type: 'image'");
-    expect(source).toContain("this.options.emit('reply.media.failed', { batchId, revision, messageId, type: 'image'");
+    expect(source).toContain("this.options.emit('reply.media.failed'");
+    expect(source).toContain("const stage = pipeline?.stage ?? input.stage;");
   });
 
   it('tells the model that only Runtime owns media execution status', async () => {

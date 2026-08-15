@@ -13,11 +13,16 @@ import {
   BuiltinImageProvider,
   BuiltinRerankProvider,
   BuiltinTtsProvider,
+  ImagePipelineError,
   ProviderRequestError
 } from '@sooya/core/providers';
 import { nativeModelProbeTimeoutLabel, nativeModelProbeTimeoutMs } from './modelProbeTimeout.js';
 
 type NativeProviderConfig = ConstructorParameters<typeof BuiltinChatProvider>[1];
+
+/** One selected selfie reference for the native admin selfie probe. */
+export interface NativeProbeReferenceImage { data: Uint8Array; mime: string; framing?: string; }
+export type NativeProbeReferenceLoader = (hint?: string) => Promise<NativeProbeReferenceImage[]>;
 
 export interface NativeModelTestResult {
   ok: true;
@@ -26,6 +31,10 @@ export interface NativeModelTestResult {
   model?: string;
   latencyMs: number;
   detail: string;
+  /** Image-only diagnostics: pipeline mode and selected reference framing. */
+  mode?: 'text-to-image' | 'selfie';
+  stage?: string;
+  framing?: string;
 }
 
 export interface NativeVoicePreviewResult {
@@ -47,11 +56,13 @@ const VISION_PROBE_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC0lEQVR42mNk+A8A
 export class NativeLocalCore extends LocalCore {
   private readonly probeHttp: HttpPlatform;
   private readonly probeMcp?: McpPlatform;
+  private readonly probeReferenceImages?: NativeProbeReferenceLoader;
 
-  constructor(options: LocalCoreOptions & { http: HttpPlatform }) {
+  constructor(options: LocalCoreOptions & { http: HttpPlatform; referenceImages?: NativeProbeReferenceLoader }) {
     super(options);
     this.probeHttp = options.http;
     this.probeMcp = options.mcp;
+    this.probeReferenceImages = options.referenceImages;
   }
 
   override async adminRequest<T = unknown>(path: string, options: LocalAdminRequestOptions = {}): Promise<T> {
@@ -93,7 +104,11 @@ export class NativeLocalCore extends LocalCore {
     if (!configured) throw new Error('这个能力还没配全（接口协议、地址、模型名、密钥缺一不可）');
 
     const body = isRecord(options.body) ? options.body : {};
-    return await probeNativeModel(this.probeHttp, configured, capability, { forceImage: body.force === true }) as T;
+    return await probeNativeModel(this.probeHttp, configured, capability, {
+      forceImage: body.force === true,
+      selfie: body.mode === 'selfie',
+      referenceImages: this.probeReferenceImages
+    }) as T;
   }
 }
 
@@ -121,7 +136,7 @@ export async function probeNativeModel(
   http: HttpPlatform,
   configured: NativeProviderConfig,
   capability: ModelCapabilitySlot,
-  options: { forceImage?: boolean } = {}
+  options: { forceImage?: boolean; selfie?: boolean; referenceImages?: NativeProbeReferenceLoader } = {}
 ): Promise<NativeModelTestResult> {
   if (!configured.enabled || !configured.baseUrl || !configured.model || !configured.secretRef) {
     throw new Error('这个能力还没配全（接口协议、地址、模型名、密钥缺一不可）');
@@ -143,14 +158,24 @@ export async function probeNativeModel(
   try {
     if (capability === 'image') {
       const provider = new BuiltinImageProvider(http, configured);
-      const image = await provider.generate('生成一张简单的抽象色块测试图', { size: '1024x1024', signal: controller.signal });
+      const selfie = options.selfie === true;
+      const prompt = selfie ? '生成一张 SOOYA 的正面自然生活自拍（连接测试）' : '生成一张简单的抽象色块测试图';
+      const references = selfie ? await options.referenceImages?.(prompt) ?? [] : [];
+      const framing = references[0]?.framing;
+      // No hardcoded size here: the provider owns the wire protocol. Anuma
+      // omits size entirely; OpenAI-compatible protocols read saved options.
+      const image = await provider.generate(prompt, { signal: controller.signal, ...(references.length ? { referenceImages: references } : {}) });
       return {
         ok: true,
         slot: capability,
         provider: provider.name,
         model: configured.model || undefined,
         latencyMs: Date.now() - startedAt,
-        detail: `已收到 ${Math.max(1, Math.round(image.data.byteLength / 1024))} KB ${image.mime} 图片`
+        detail: selfie
+          ? `自拍链路正常：参考图 ${framing ?? '无'}，已收到 ${Math.max(1, Math.round(image.data.byteLength / 1024))} KB ${image.mime} 图片`
+          : `已收到 ${Math.max(1, Math.round(image.data.byteLength / 1024))} KB ${image.mime} 图片`,
+        mode: selfie ? 'selfie' : 'text-to-image',
+        ...(framing ? { framing } : {})
       };
     }
 
@@ -231,6 +256,11 @@ export async function probeNativeModel(
       detail: chars ? `模型回了 ${chars} 个字` : '接口通了，但这次没有返回文本（可能被最大输出 token 截断）'
     };
   } catch (error) {
+    if (capability === 'image') {
+      const pipelineStage = error instanceof ImagePipelineError ? error.stage : 'generation';
+      const status = error instanceof ProviderRequestError ? error.status : error instanceof ImagePipelineError ? error.status : undefined;
+      throw new Error(`图片${options.selfie === true ? '自拍链路' : '生成'}失败 · 阶段：${imageStageLabel(pipelineStage)}${status ? ` · HTTP ${status}` : ''} · ${modelProbeError(error, Date.now() - startedAt, controller.signal.aborted)}`);
+    }
     throw new Error(modelProbeError(error, Date.now() - startedAt, controller.signal.aborted));
   } finally {
     clearTimeout(timer);
@@ -248,6 +278,18 @@ function modelProbeError(error: unknown, latencyMs: number, aborted: boolean): s
   }
   if (/JSON 探针/u.test(detail)) return `${detail}${suffix}`;
   return `连不上接口地址：${detail}${suffix}`;
+}
+
+function imageStageLabel(stage: string): string {
+  const labels: Record<string, string> = {
+    reference_select: '参考图选择',
+    reference_read: '参考图读取',
+    reference_upload: '参考图上传',
+    generation: '图片生成',
+    download: '图片下载',
+    media_save: '图片保存'
+  };
+  return labels[stage] ?? stage;
 }
 
 function hasDirectorProbe(text: string): boolean {

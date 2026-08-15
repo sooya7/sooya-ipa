@@ -335,6 +335,10 @@ export interface ModelTestResult {
   model?: string;
   latencyMs: number;
   detail: string;
+  /** Native image probes return which pipeline was exercised. */
+  mode?: 'text-to-image' | 'selfie';
+  framing?: string;
+  stage?: string;
 }
 
 export interface AdminJob {
@@ -523,6 +527,8 @@ export const adminApi = {
     ),
   testModel: (slot: ModelSlot, forceImage = false) =>
     adminRequest<ModelTestResult>(`/api/admin/models/${encodeURIComponent(slot)}/test`, { method: 'POST', body: forceImage ? { force: true } : {} }),
+  testSelfieImage: () =>
+    adminRequest<ModelTestResult>('/api/admin/models/image/test', { method: 'POST', body: { force: true, mode: 'selfie' } }),
   testWebSearch: (provider: AdminWebSearchProvider, query: string) =>
     adminRequest<WebSearchTestResult>('/api/admin/models/web-search/test', { method: 'POST', body: { provider, query } }),
   saveModelPresets: (presets: ModelPreset[]) =>

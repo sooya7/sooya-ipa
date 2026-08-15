@@ -7,7 +7,7 @@ export interface ReplyFeatureRuntime {
   stickers?: StickerRepo;
   imageProvider?: () => Promise<ImageProvider | null>;
   ttsProvider?: () => Promise<TTSProvider | null>;
-  referenceImages?: () => Promise<Array<{ data: Uint8Array; mime: string }>>;
+  referenceImages?: (hint?: string) => Promise<Array<{ data: Uint8Array; mime: string }>>;
 }
 
 let installed: ReplyFeatureRuntime | null = null;

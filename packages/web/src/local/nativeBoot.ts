@@ -1,6 +1,6 @@
 import { Capacitor } from '@capacitor/core';
-import { LocalCore, SERVER_REFERENCE_IMAGES, installReplyFeatureRuntime, rollbackBuiltinStickerImport, seedBuiltinStickersOnce, seedServerPersonaOnce } from '@sooya/core/app';
-import { createConfiguredProviders } from '@sooya/core/providers';
+import { LocalCore, REFERENCE_FRAMINGS, SERVER_REFERENCE_IMAGES, installReplyFeatureRuntime, rollbackBuiltinStickerImport, seedBuiltinStickersOnce, seedServerPersonaOnce } from '@sooya/core/app';
+import { createConfiguredProviders, ImagePipelineError } from '@sooya/core/providers';
 import type { LocalDatabase, DatabaseValue, DatabaseIntegrityResult, DatabaseBackupResult, RunResult } from '@sooya/core/platform';
 import type { SecretsPlatform } from '@sooya/core/platform';
 import type { MediaPlatform, MediaRecord, MediaSaveRequest } from '@sooya/core/platform';
@@ -181,7 +181,7 @@ export async function installNativeLocalCore(): Promise<boolean> {
   const secrets = new CapacitorSecrets();
   const http = new CapacitorHttp();
   nativeBuiltinMedia = mediaStore;
-  const core = new NativeLocalCore({ db, secrets, mediaStore, http, mcp: new CapacitorMcp(), toolRegistry: registry, toolPolicy: policy, toolRuntime: runtime });
+  const core = new NativeLocalCore({ db, secrets, mediaStore, http, mcp: new CapacitorMcp(), toolRegistry: registry, toolPolicy: policy, toolRuntime: runtime, referenceImages: loadServerReferenceImages });
   await ensureNativeCompanionState(core);
   await seedServerPersonaOnce(core.settingsRepo);
   installReplyFeatureRuntime({
@@ -219,29 +219,65 @@ export async function notifyNativeAppReady(): Promise<void> {
   await nativeOtaReady;
 }
 
-async function loadServerReferenceImages(): Promise<Array<{ data: Uint8Array; mime: string }>> {
-  const images: Array<{ data: Uint8Array; mime: string }> = [];
+export type NativeReferenceFraming = 'front' | 'full-body' | 'side';
+export interface NativeReferenceImage { data: Uint8Array; mime: string; framing: NativeReferenceFraming; }
+
+/**
+ * Server-verified framing selection: side/profile wins, then full-body,
+ * then front. Chat passes the image prompt as a hint; unknown hints use
+ * front so the selfie pipeline always has a safe default.
+ */
+export function selectReferenceFraming(hint?: string): NativeReferenceFraming {
+  const value = (hint ?? '').trim().toLocaleLowerCase();
+  if (/(?:侧脸|侧颜|侧面|侧着|侧身|profile|\bside\b)/iu.test(value)) return 'side';
+  if (/(?:全身|站立|standing|full\s*body|head\s*to\s*toe)/iu.test(value)) return 'full-body';
+  return 'front';
+}
+
+async function loadServerReferenceImages(hint?: string): Promise<NativeReferenceImage[]> {
+  const images: NativeReferenceImage[] = [];
   const core = nativeOtaCore;
   if (!core) return images;
-  // User-uploaded slot images win; missing slots fall back to the bundled
-  // assets — the management page and the generation runtime share the same
-  // source of truth (PersonaReferenceService).
-  const slots = await core.personaReferences.activeSlots();
-  for (const [framing, mediaId] of Object.entries(slots) as Array<[keyof typeof slots, string | null]>) {
-    if (mediaId) {
-      const read = await core.media?.read(mediaId).catch(() => null);
-      if (read) { images.push({ data: read.data, mime: read.record.mime }); continue; }
-    }
-    const builtin = SERVER_REFERENCE_IMAGES[['front', 'full-body', 'side'].indexOf(framing)] ?? null;
-    if (!builtin) continue;
-    try {
-      const response = await fetch(builtin, { cache: 'force-cache' });
-      if (!response.ok) continue;
-      const mime = response.headers.get('content-type')?.split(';')[0]?.trim() || 'image/png';
-      images.push({ data: new Uint8Array(await response.arrayBuffer()), mime });
-    } catch { /* a missing optional reference does not break chat */ }
+  // Server parity: select ONE framing from the prompt, read that one image
+  // (user upload wins, then bundled asset), then fall back to front. The
+  // management page and chat runtime share PersonaReferenceService.
+  let slots: Record<NativeReferenceFraming, string | null>;
+  try {
+    slots = await core.personaReferences.activeSlots();
+  } catch (error) {
+    throw new ImagePipelineError(
+      'reference_read',
+      error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500)
+    );
+  }
+  const preferred = selectReferenceFraming(hint);
+  const candidates = preferred === 'front' ? ['front'] as const : [preferred, 'front'] as const;
+  for (const framing of candidates) {
+    const image = await readReferenceSlot(core, slots, framing);
+    if (image) { images.push(image); break; }
   }
   return images;
+}
+
+async function readReferenceSlot(
+  core: LocalCore,
+  slots: Record<NativeReferenceFraming, string | null>,
+  framing: NativeReferenceFraming
+): Promise<NativeReferenceImage | null> {
+  const mediaId = slots[framing] ?? null;
+  if (mediaId) {
+    const read = await core.media?.read(mediaId).catch(() => null);
+    if (read) return { data: read.data, mime: read.record.mime, framing };
+  }
+  const builtin = SERVER_REFERENCE_IMAGES[REFERENCE_FRAMINGS.indexOf(framing)] ?? null;
+  if (!builtin) return null;
+  try {
+    const response = await fetch(builtin, { cache: 'force-cache' });
+    if (!response.ok) return null;
+    const mime = response.headers.get('content-type')?.split(';')[0]?.trim() || 'image/png';
+    return { data: new Uint8Array(await response.arrayBuffer()), mime, framing };
+  } catch { /* a missing optional reference does not break chat */ }
+  return null;
 }
 
 async function wireNativeLifecycle(core: LocalCore): Promise<void> {

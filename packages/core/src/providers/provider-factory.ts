@@ -25,11 +25,10 @@ export interface ConfiguredProviders {
 }
 
 /**
- * The admin/migration model stores the vendor identity separately from the
- * wire protocol. Media adapters historically keyed only off `provider`, which
- * made a persisted `{ provider: 'anuma', options.protocol: 'anuma-input-images' }`
- * silently fall back to the OpenAI images endpoint. Normalize only the runtime
- * copy so the saved/admin-facing provider identity remains stable.
+ * Compatibility normalization for callers that consume the returned provider
+ * name. BuiltinImageProvider now resolves `options.protocol` itself via
+ * imageProtocol(), so routing correctness no longer depends on this copy; it
+ * only keeps the saved/admin-facing provider identity stable.
  */
 function runtimeImageConfig(config: ProviderConfig): ProviderConfig {
   const protocol = typeof config.options.protocol === 'string' ? config.options.protocol.trim() : '';
