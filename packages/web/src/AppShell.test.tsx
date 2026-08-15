@@ -25,7 +25,8 @@ vi.mock('./App.js', () => ({
     return active ? <div data-testid="chat">chat<div
       data-testid="scroller"
       ref={(node) => {
-        if (!node) return;
+        if (!node || node.dataset.mockScrollReady === 'true') return;
+        node.dataset.mockScrollReady = 'true';
         Object.defineProperty(node, 'scrollHeight', { configurable: true, value: 1200 });
         Object.defineProperty(node, 'clientHeight', { configurable: true, value: 300 });
         node.scrollTop = 111;
