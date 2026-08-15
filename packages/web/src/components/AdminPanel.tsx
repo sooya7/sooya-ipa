@@ -473,7 +473,13 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
     if (!models || selected === 'webSearch') return;
     try {
       const typed = keyDraft.trim();
-      const r = await adminApi.updateModels({ [selected]: { ...config, ...(typed ? { apiKey: typed } : {}) } });
+      const nextConfig: Record<string, unknown> = { ...config, ...(typed ? { apiKey: typed } : {}) };
+      if (selected === 'tts' && nextConfig.provider !== 'volc-tts') {
+        delete nextConfig.resourceId;
+        delete nextConfig.emotionMode;
+        delete nextConfig.emotionScale;
+      }
+      const r = await adminApi.updateModels({ [selected]: nextConfig });
       setModels(r.models);
       setKeyDraft('');
       // The old verdict was about the config that was just replaced.
@@ -485,7 +491,7 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
     }
   };
 
-  /** 语音试听：走 /api/admin/voice/preview，Fish 与 OpenAI/Volc 同样可用。 */
+  /** 语音试听：走 /api/admin/voice/preview，Fish 与 OpenAI 协议均可用。 */
   const previewVoice = async () => {
     setPreviewing(true);
     try {
@@ -686,22 +692,6 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
             </select>
           </label>
           <label>最大重试次数<input type="number" min="0" max="5" value={String(config.maxRetries ?? '')} onChange={(e) => update('maxRetries', Number(e.target.value))} /></label>
-          <label className="admin-form-wide">
-            情绪投递方式
-            <select value={String(config.emotionMode ?? 'auto')} onChange={(e) => update('emotionMode', e.target.value)}>
-              <option value="auto">自动（按音色 ID 判断，推荐）</option>
-              <option value="instruction">自然语言指令（豆包 2.0「指令遵循」音色）</option>
-              <option value="enum">emotion 枚举（仅「多情感」音色，ID 带 _emo_）</option>
-              <option value="off">不传情绪</option>
-            </select>
-            <small>两种音色家族收情绪的方式不一样。自动模式看音色 ID 里有没有 <code>_emo_</code>，换音色就自动跟着切。</small>
-          </label>
-          <label className="admin-form-wide">
-            Resource-Id（仅火山官方协议）
-            <input value={String(config.resourceId ?? '')} placeholder="seed-tts-2.0" onChange={(e) => update('resourceId', e.target.value)} />
-            <small>它同时决定模型版本和计费商品。官方说明：语音模型不支持通过 Auto 或控制台切换，必须在这里指定。</small>
-          </label>
-          <label>情绪强度（仅枚举方式，1~5）<input type="number" step="1" min="1" max="5" value={String(config.emotionScale ?? 4)} onChange={(e) => update('emotionScale', Number(e.target.value))} /></label>
         </>}
         {selected === 'tts' && config.provider === 'fish' && <>
           <label className="admin-form-wide">
@@ -1442,4 +1432,3 @@ export default function AdminPanel({ initialTab = 'overview' }: { initialTab?: T
     </main>
   );
 }
-
