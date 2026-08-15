@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { adminRequest } from '../../lib/admin.js';
+import { currentOtaUpdater } from '../../local/otaUpdater.js';
 import { FullBackupCard } from './FullBackupCard.js';
 
 export const DEFAULT_OTA_MANIFEST_URL = 'https://sooya.icu/ota/stable.json';
@@ -32,10 +33,20 @@ function versionText(value: string | null | undefined): string {
   return value || '暂无';
 }
 
+function updateResultText(reason: string | undefined): string {
+  if (reason === 'already-current') return '当前已经是最新 OTA 版本';
+  if (reason === 'release-blocked') return '该 OTA 版本已被设备阻止，请先检查最近错误';
+  if (reason === 'updater-unavailable') return '当前环境不支持 IPA OTA 更新';
+  if (reason === 'no-pending-update') return '没有等待安装的 OTA 更新';
+  if (reason === 'already-active') return '新版本已经切换，正在完成状态确认';
+  return reason || '没有发现可安装的 OTA 更新';
+}
+
 export function OtaDiagnosticsCard({ onNotice }: { onNotice: (message: string) => void }) {
   const [data, setData] = useState<OtaStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [updating, setUpdating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [manifestUrl, setManifestUrl] = useState(DEFAULT_OTA_MANIFEST_URL);
 
@@ -59,7 +70,7 @@ export function OtaDiagnosticsCard({ onNotice }: { onNotice: (message: string) =
   const status = useMemo(() => {
     if (state.last_error) return { text: '异常', className: 'is-warn' };
     if (state.blocked_web_version) return { text: '已阻止版本', className: 'is-warn' };
-    if (state.pending_web_version) return { text: '等待冷启动应用', className: 'is-ready' };
+    if (state.pending_web_version) return { text: '已下载，待安装', className: 'is-ready' };
     if (state.current_web_version) return { text: '已启用', className: 'is-ready' };
     return { text: '未验证', className: 'is-muted' };
   }, [state.blocked_web_version, state.current_web_version, state.last_error, state.pending_web_version]);
@@ -84,6 +95,35 @@ export function OtaDiagnosticsCard({ onNotice }: { onNotice: (message: string) =
     }
   };
 
+  const updateNow = async () => {
+    const next = manifestUrl.trim();
+    if (!/^https:\/\//iu.test(next)) {
+      onNotice('OTA Manifest 地址必须使用 HTTPS');
+      return;
+    }
+    const updater = currentOtaUpdater();
+    if (!updater) {
+      onNotice('当前环境没有可用的 IPA OTA 更新器');
+      return;
+    }
+    setUpdating(true);
+    try {
+      const checked = await updater.checkAndDownload(next);
+      if (checked.downloaded || checked.reason === 'already-pending') {
+        onNotice('OTA 已下载，正在立即切换版本…');
+        const applied = await updater.applyPendingNow();
+        if (!applied.applied) onNotice(updateResultText(applied.reason));
+      } else {
+        onNotice(updateResultText(checked.reason));
+      }
+      await load();
+    } catch (cause) {
+      onNotice(cause instanceof Error ? cause.message : 'OTA 手动更新失败');
+    } finally {
+      setUpdating(false);
+    }
+  };
+
   return (
     <>
       <FullBackupCard onNotice={onNotice} />
@@ -92,7 +132,7 @@ export function OtaDiagnosticsCard({ onNotice }: { onNotice: (message: string) =
           <div>
             <span className="admin-card-kicker">OTA DIAGNOSTICS</span>
             <h2>OTA 状态</h2>
-            <p>查看设备是否已经检查、下载和应用 Web Bundle。下载完成后需要彻底退出 App 再冷启动一次。</p>
+            <p>可手动检查并立即安装 Web Bundle。安装时 App 会自动重新载入，不需要彻底退出再打开。</p>
           </div>
           <span className={`admin-status-chip ${status.className}`}>{loading ? '读取中' : status.text}</span>
         </div>
@@ -132,8 +172,9 @@ export function OtaDiagnosticsCard({ onNotice }: { onNotice: (message: string) =
         {state.last_error && <p className="admin-inline-error" role="status">最近错误：{state.last_error}</p>}
 
         <div className="admin-actions" style={{ marginTop: 12 }}>
-          <button type="button" onClick={() => void load()} disabled={loading}>{loading ? '刷新中…' : '刷新状态'}</button>
-          <button type="button" onClick={() => void save()} disabled={saving}>{saving ? '保存中…' : data?.manifestUrl ? '保存地址' : '写入默认地址'}</button>
+          <button type="button" onClick={() => void updateNow()} disabled={updating || loading}>{updating ? '正在检查并安装…' : '检查并立即安装'}</button>
+          <button type="button" onClick={() => void load()} disabled={loading || updating}>{loading ? '刷新中…' : '刷新状态'}</button>
+          <button type="button" onClick={() => void save()} disabled={saving || updating}>{saving ? '保存中…' : data?.manifestUrl ? '保存地址' : '写入默认地址'}</button>
         </div>
       </article>
     </>
