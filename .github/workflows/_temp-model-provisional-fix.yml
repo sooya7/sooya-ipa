@@ -2,14 +2,16 @@ name: Temporary model provisional-save hotfix
 
 on:
   push:
-    branches: [fix/model-discovery-provisional-save]
+    branches:
+      - 'fix/model-discovery-provisional-save'
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   patch:
-    if: github.actor != 'github-actions[bot]'
+    if: ${{ github.actor != 'github-actions[bot]' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,8 +74,8 @@ describe('native model admin provisional save', () => {
         run: rm .github/workflows/_temp-model-provisional-fix.yml
       - name: Commit final hotfix
         run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add packages/core/src/app/local-core.ts packages/core/src/app/model-admin-save-contract.test.ts .github/workflows/_temp-model-provisional-fix.yml
-          git commit -m "fix(models): preserve connection config before discovery"
+          git commit -m 'fix(models): preserve connection config before discovery'
           git push origin HEAD:fix/model-discovery-provisional-save
