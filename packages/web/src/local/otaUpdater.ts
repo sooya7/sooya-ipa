@@ -22,6 +22,8 @@ interface OtaStateRow {
   blocked_web_version?: string | null;
 }
 
+type OtaCheckResult = { checked: boolean; downloaded: boolean; releaseId?: string; reason?: string };
+
 export const DEFAULT_OTA_MANIFEST_URL = 'https://sooya.icu/ota/stable.json';
 
 interface UpdaterBundleInfo {
@@ -36,25 +38,46 @@ interface UpdaterPlugin {
   current?: () => Promise<{ bundle?: UpdaterBundleInfo | null }>;
 }
 
+let activeOtaUpdater: LocalOtaUpdater | null = null;
+
+export function currentOtaUpdater(): LocalOtaUpdater | null {
+  return activeOtaUpdater;
+}
+
 /** Integrity-gated OTA coordinator. Swift/native changes are still IPA-only;
  * this class only ever hands a verified web bundle to CapacitorUpdater. */
 export class LocalOtaUpdater {
   private readonly plugin: UpdaterPlugin | null;
+  private checkInFlight: Promise<OtaCheckResult> | null = null;
 
   constructor(private readonly core: LocalCore, private readonly releaseInfo: NativeReleaseInfo) {
     const plugins = (Capacitor as unknown as { Plugins?: Record<string, unknown> }).Plugins ?? {};
     this.plugin = (plugins.CapacitorUpdater as UpdaterPlugin | undefined) ?? null;
+    activeOtaUpdater = this;
   }
 
   async notifyReady(): Promise<void> {
     await this.plugin?.notifyAppReady?.();
     const now = new Date().toISOString();
-    // A failed cold-boot set leaves the pending release blocked. Never let the
-    // ready callback accidentally promote that release or clear its blacklist.
+    // A failed set leaves the pending release blocked. Never let the ready
+    // callback accidentally promote that release or clear its blacklist.
     await this.core.database.run(`UPDATE local_update_state SET current_web_version=COALESCE(pending_web_version,current_web_version),last_good_web_version=COALESCE(pending_web_version,last_good_web_version),last_good_bundle_id=COALESCE(pending_bundle_id,last_good_bundle_id),pending_web_version=NULL,pending_bundle_id=NULL,pending_manifest_json=NULL,failed_web_version=NULL,blocked_web_version=NULL,last_applied_at=?,last_error=NULL,updated_at=? WHERE id=1 AND blocked_web_version IS NULL`, [now, now]).catch(() => undefined);
   }
 
-  async checkAndDownload(manifestUrl: string): Promise<{ checked: boolean; downloaded: boolean; releaseId?: string; reason?: string }> {
+  async checkAndDownload(manifestUrl: string): Promise<OtaCheckResult> {
+    // Startup also performs a background check. Reuse that exact request when
+    // the user taps the manual button instead of downloading the same bundle twice.
+    if (this.checkInFlight) return await this.checkInFlight;
+    const run = this.performCheckAndDownload(manifestUrl);
+    this.checkInFlight = run;
+    try {
+      return await run;
+    } finally {
+      if (this.checkInFlight === run) this.checkInFlight = null;
+    }
+  }
+
+  private async performCheckAndDownload(manifestUrl: string): Promise<OtaCheckResult> {
     if (!manifestUrl || !this.plugin?.download) return { checked: false, downloaded: false, reason: 'updater-unavailable' };
     try {
       const response = await fetch(manifestUrl, { cache: 'no-store' });
@@ -87,8 +110,10 @@ export class LocalOtaUpdater {
     }
   }
 
-  /** Apply only a bundle persisted by checkAndDownload, during cold boot. */
-  async applyPendingOnColdBoot(): Promise<{ applied: boolean; releaseId?: string; reason?: string }> {
+  /** Apply a verified pending bundle immediately. CapacitorUpdater.set() is a
+   * terminal operation and reloads the WebView itself, so callers do not need
+   * to kill or reopen the app manually. */
+  async applyPendingNow(): Promise<{ applied: boolean; releaseId?: string; reason?: string }> {
     if (!this.plugin?.set) return { applied: false, reason: 'updater-unavailable' };
     const state = await this.readState();
     if (!state.pending_web_version || !state.pending_bundle_id) return { applied: false, reason: 'no-pending-update' };
@@ -123,10 +148,17 @@ export class LocalOtaUpdater {
     }
   }
 
-  /** Compatibility entry point: download is deliberately decoupled from apply. */
+  /** Kept for startup compatibility; the same guarded operation is also safe
+   * to invoke from the manual update button while the app is running. */
+  async applyPendingOnColdBoot(): Promise<{ applied: boolean; releaseId?: string; reason?: string }> {
+    return await this.applyPendingNow();
+  }
+
+  /** Compatibility entry point: startup still downloads in the background and
+   * leaves application to either cold boot or the explicit manual button. */
   async checkAndApply(manifestUrl: string): Promise<{ checked: boolean; applied: boolean; releaseId?: string; reason?: string }> {
     const result = await this.checkAndDownload(manifestUrl);
-    return { checked: result.checked, applied: false, releaseId: result.releaseId, reason: result.downloaded ? 'pending-cold-boot' : result.reason };
+    return { checked: result.checked, applied: false, releaseId: result.releaseId, reason: result.downloaded ? 'pending-manual-apply' : result.reason };
   }
 
   private async readState(): Promise<OtaStateRow> {
