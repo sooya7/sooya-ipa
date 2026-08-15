@@ -2,7 +2,7 @@ import { Capacitor } from '@capacitor/core';
 import { Share } from '@capacitor/share';
 import { LATEST_SCHEMA_VERSION, migrateDatabase } from '@sooya/core/app';
 import type { DatabaseValue } from '@sooya/core/platform';
-import { CapacitorDatabase } from './nativeBoot.js';
+import { CapacitorDatabase, CapacitorSecrets } from './nativeBoot.js';
 
 interface NativePluginCall {
   call<T = Record<string, unknown>>(method: string, options: Record<string, unknown>): Promise<T>;
@@ -31,6 +31,7 @@ interface PreparedFullImport {
   schemaVersion: number;
   mediaIncluded: boolean;
   secretsIncluded: boolean;
+  importedSecretCount?: number;
 }
 
 interface RestoreResult {
@@ -59,6 +60,16 @@ interface PreservedLocalState {
   localUpdateState: DatabaseRow[];
   localBackupMetadata: DatabaseRow[];
 }
+
+interface ServerMigrationSecretsPayload {
+  version: 1;
+  providerKeys: Record<string, string>;
+  webSearchKeys: Record<string, string>;
+  mcpTokens: Record<string, string>;
+}
+
+const SERVER_MIGRATION_SECRETS_KEY = 'migration:server-secrets:v1';
+const PROVIDER_SECRET_CAPABILITIES = new Set(['chat', 'vision', 'summary', 'director', 'embedding', 'image', 'tts', 'rerank']);
 
 function nativePlugin(name: string): NativePluginCall {
   const plugins = (Capacitor as unknown as { Plugins?: Record<string, unknown> }).Plugins ?? {};
@@ -109,6 +120,11 @@ export async function pickFullBackup(): Promise<PickedFullBackup | null> {
  * phone's business data, while IPA-local runtime configuration, built-in
  * sticker state and hybrid memory state survive. Server memories/stickers are
  * intentionally absent from the migration package.
+ *
+ * New server migration packages may also stage selected API keys in the
+ * imported SQLite settings table. The Web layer moves those values into the
+ * existing Base 11 Keychain bridge, binds them to the phone's current provider
+ * / MCP rows, then removes the plaintext staging row from SQLite.
  */
 export async function importFullBackup(selected: PickedFullBackup, password?: string): Promise<PreparedFullImport> {
   const archive = nativePlugin('SOOYAArchive');
@@ -116,6 +132,8 @@ export async function importFullBackup(selected: PickedFullBackup, password?: st
   const serverMigration = /^SOOYA-server-to-IPA-/iu.test(selected.displayName);
   const localDb = serverMigration ? new CapacitorDatabase() : null;
   let preservedLocal: PreservedLocalState | null = null;
+  let stagedServerSecrets: ServerMigrationSecretsPayload | null = null;
+  let importedSecretCount = 0;
   let prepared: PreparedFullImport | null = null;
   let restore: RestoreResult | null = null;
 
@@ -135,14 +153,19 @@ export async function importFullBackup(selected: PickedFullBackup, password?: st
 
     if (localDb && preservedLocal) {
       await migrateDatabase(localDb);
+      stagedServerSecrets = await readServerMigrationSecrets(localDb);
       await restoreLocalState(localDb, preservedLocal);
     }
 
     const integrity = await database.call<{ ok?: boolean }>('integrity', {});
     if (integrity.ok !== true) throw new Error('导入后的数据库完整性校验失败');
 
+    if (localDb && stagedServerSecrets) {
+      importedSecretCount = await applyServerMigrationSecrets(localDb, stagedServerSecrets);
+    }
+
     await archive.call('commitFullImport', { importId: prepared.importId });
-    return prepared;
+    return { ...prepared, importedSecretCount };
   } catch (error) {
     if (restore?.preRestoreBackupFileName) {
       await database.call('restore', { name: restore.preRestoreBackupFileName }).catch(() => undefined);
@@ -217,6 +240,86 @@ async function restoreLocalState(db: CapacitorDatabase, state: PreservedLocalSta
   try { await db.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')"); } catch { /* derived index; startup can rebuild later */ }
 }
 
+async function readServerMigrationSecrets(db: CapacitorDatabase): Promise<ServerMigrationSecretsPayload | null> {
+  const rows = await db.query<{ value_json: string }>('SELECT value_json FROM settings WHERE key=?', [SERVER_MIGRATION_SECRETS_KEY]);
+  const raw = rows[0]?.value_json;
+  if (!raw) return null;
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { throw new Error('服务器迁移包中的 API Key 记录无法解析'); }
+  if (!isRecord(parsed) || parsed.version !== 1) throw new Error('服务器迁移包中的 API Key 记录版本不受支持');
+  return {
+    version: 1,
+    providerKeys: stringRecord(parsed.providerKeys),
+    webSearchKeys: stringRecord(parsed.webSearchKeys),
+    mcpTokens: stringRecord(parsed.mcpTokens)
+  };
+}
+
+async function applyServerMigrationSecrets(db: CapacitorDatabase, payload: ServerMigrationSecretsPayload): Promise<number> {
+  const secrets = new CapacitorSecrets();
+  let imported = 0;
+
+  for (const [capability, value] of Object.entries(payload.providerKeys)) {
+    if (!PROVIDER_SECRET_CAPABILITIES.has(capability) || !validSecret(value)) continue;
+    const rows = await db.query<{ secret_ref: string | null }>('SELECT secret_ref FROM provider_configs WHERE capability=?', [capability]);
+    const existingRef = rows[0]?.secret_ref?.trim() ?? '';
+    const ref = existingRef || `provider.${capability}.key`;
+    await secrets.set(ref, value);
+    await upsertSecretRef(db, ref, 'provider-api-key', { capability, source: 'server-migration' });
+    if (rows.length > 0 && !existingRef) await db.run('UPDATE provider_configs SET secret_ref=?,updated_at=? WHERE capability=?', [ref, new Date().toISOString(), capability]);
+    imported += 1;
+  }
+
+  const webSearchRow = (await db.query<{ provider: string; secret_ref: string | null; options_json: string }>(
+    "SELECT provider,secret_ref,options_json FROM provider_configs WHERE capability='webSearch'"
+  ))[0];
+  let webSearchOptions = parseRecord(webSearchRow?.options_json);
+  for (const identity of ['doubao', 'tavily'] as const) {
+    const value = payload.webSearchKeys[identity];
+    if (!validSecret(value)) continue;
+    const primary = webSearchRow?.provider === identity;
+    const secondary = webSearchOptions.fallback === identity;
+    const existingRef = primary
+      ? webSearchRow?.secret_ref?.trim() ?? ''
+      : secondary && typeof webSearchOptions.secondarySecretRef === 'string' ? webSearchOptions.secondarySecretRef.trim() : '';
+    const ref = existingRef || `provider.webSearch.${identity}.key`;
+    await secrets.set(ref, value);
+    await upsertSecretRef(db, ref, 'provider-api-key', { capability: 'webSearch', provider: identity, source: 'server-migration' });
+    if (webSearchRow && !existingRef) {
+      if (primary) {
+        await db.run("UPDATE provider_configs SET secret_ref=?,updated_at=? WHERE capability='webSearch'", [ref, new Date().toISOString()]);
+      } else if (secondary) {
+        webSearchOptions = { ...webSearchOptions, secondarySecretRef: ref };
+        await db.run("UPDATE provider_configs SET options_json=?,updated_at=? WHERE capability='webSearch'", [JSON.stringify(webSearchOptions), new Date().toISOString()]);
+      }
+    }
+    imported += 1;
+  }
+
+  for (const [serverId, value] of Object.entries(payload.mcpTokens)) {
+    if (!validIdentifierSegment(serverId) || !validSecret(value)) continue;
+    const rows = await db.query<{ secret_ref: string | null }>('SELECT secret_ref FROM mcp_servers WHERE id=?', [serverId]);
+    const existingRef = rows[0]?.secret_ref?.trim() ?? '';
+    const ref = existingRef || `mcp.${serverId}.token`;
+    await secrets.set(ref, value);
+    await upsertSecretRef(db, ref, 'mcp-token', { serverId, source: 'server-migration' });
+    if (rows.length > 0 && !existingRef) await db.run('UPDATE mcp_servers SET secret_ref=?,auth_type=?,updated_at=? WHERE id=?', [ref, 'bearer', new Date().toISOString(), serverId]);
+    imported += 1;
+  }
+
+  await db.run('DELETE FROM settings WHERE key=?', [SERVER_MIGRATION_SECRETS_KEY]);
+  return imported;
+}
+
+async function upsertSecretRef(db: CapacitorDatabase, ref: string, kind: string, meta: Record<string, unknown>): Promise<void> {
+  const timestamp = new Date().toISOString();
+  await db.run(
+    `INSERT INTO secret_refs(ref,kind,configured,created_at,updated_at,meta_json) VALUES(?,?,?,?,?,?)
+     ON CONFLICT(ref) DO UPDATE SET kind=excluded.kind,configured=1,updated_at=excluded.updated_at,meta_json=excluded.meta_json`,
+    [ref, kind, 1, timestamp, timestamp, JSON.stringify(meta)]
+  );
+}
+
 async function clearTables(db: CapacitorDatabase, tables: string[]): Promise<void> {
   for (const table of tables) {
     assertIdentifier(table);
@@ -243,4 +346,26 @@ function assertIdentifier(value: string): void {
 function asDatabaseValue(value: unknown): DatabaseValue {
   if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint' || typeof value === 'boolean' || value instanceof Uint8Array || value instanceof ArrayBuffer) return value;
   throw new Error(`无法恢复的数据库值类型：${Object.prototype.toString.call(value)}`);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stringRecord(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string' && validSecret(entry[1])));
+}
+
+function parseRecord(value: string | undefined): Record<string, unknown> {
+  if (!value) return {};
+  try { const parsed = JSON.parse(value) as unknown; return isRecord(parsed) ? parsed : {}; } catch { return {}; }
+}
+
+function validSecret(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= 64 * 1024;
+}
+
+function validIdentifierSegment(value: string): boolean {
+  return /^[A-Za-z0-9_-]{1,64}$/u.test(value);
 }
