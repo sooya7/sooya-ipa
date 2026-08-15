@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { CreateMediaInput, MediaRow } from '../db/media.repo.js';
 import type { MediaPlatform, MediaRecord } from '../platform/media.js';
 import { LocalMediaResolver, type MediaLocationRow } from './media-resolver.js';
 
@@ -26,9 +27,34 @@ function backingStore(): MediaPlatform & { calls: Array<{ op: 'read' | 'remove' 
   };
 }
 
+function generatedRow(input: CreateMediaInput): MediaRow {
+  return {
+    id: 'media_generated_1',
+    kind: input.kind,
+    rel_path: input.relPath,
+    mime: input.mime,
+    bytes: input.bytes,
+    sha256: input.sha256,
+    width: input.width ?? null,
+    height: input.height ?? null,
+    duration: input.duration ?? null,
+    origin: input.origin,
+    created_at: '2026-08-16T00:00:00.000Z',
+    transcript: input.transcript ?? null,
+    meta_json: JSON.stringify(input.meta ?? {}),
+    deleted_at: null,
+    favorite: 0,
+    tags_json: JSON.stringify(input.tags ?? []),
+    animated: input.animated ? 1 : 0
+  };
+}
+
 function repo(rows: Array<MediaLocationRow | undefined>) {
   const byId = new Map(rows.filter((row): row is MediaLocationRow => row !== undefined).map((row) => [row.id, row]));
-  return { get: vi.fn(async (id: string) => byId.get(id)) };
+  return {
+    get: vi.fn(async (id: string) => byId.get(id)),
+    create: vi.fn(async (input: CreateMediaInput) => generatedRow(input))
+  };
 }
 
 describe('LocalMediaResolver', () => {
@@ -66,11 +92,60 @@ describe('LocalMediaResolver', () => {
     ]);
   });
 
-  it('passes saves through to the backing store (native save returns the UUID)', async () => {
+  it('passes normal uploads through to the backing store (native save returns the UUID)', async () => {
     const backing = backingStore();
-    const resolver = new LocalMediaResolver(repo([]), backing);
+    const catalog = repo([]);
+    const resolver = new LocalMediaResolver(catalog, backing);
     const saved = await resolver.save({ kind: 'image', data: new Uint8Array([1]), mime: 'image/jpeg', name: 'a.jpg' });
     expect(saved.id).toBe('11111111-2222-3333-4444-555555555555');
+    expect(catalog.create).not.toHaveBeenCalled();
     expect(backing.calls).toEqual([{ op: 'save', arg: 'a.jpg' }]);
+  });
+
+  it('registers generated reply media and returns the logical media id used by message_parts', async () => {
+    const backing = backingStore();
+    const catalog = repo([]);
+    const resolver = new LocalMediaResolver(catalog, backing);
+    const saved = await resolver.save({
+      kind: 'image',
+      data: new Uint8Array([1, 2, 3]),
+      mime: 'image/png',
+      name: 'sooya.image',
+      metadata: { generated: true, provider: 'anuma-input-images', prompt: '窗边自拍' }
+    });
+
+    expect(saved.id).toBe('media_generated_1');
+    expect(catalog.create).toHaveBeenCalledTimes(1);
+    expect(catalog.create).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'image',
+      relPath: '11111111-2222-3333-4444-555555555555',
+      mime: 'image/png',
+      bytes: 3,
+      origin: 'generated',
+      meta: { generated: true, provider: 'anuma-input-images', prompt: '窗边自拍', name: 'sooya.image' }
+    }));
+    const createInput = catalog.create.mock.calls[0]?.[0];
+    expect(createInput?.sha256).toMatch(/^[0-9a-f]{64}$/u);
+    expect(backing.calls).toEqual([{ op: 'save', arg: 'sooya.image' }]);
+  });
+
+  it('removes the physical generated file when media row persistence fails', async () => {
+    const backing = backingStore();
+    const catalog = repo([]);
+    catalog.create.mockRejectedValueOnce(new Error('database write failed'));
+    const resolver = new LocalMediaResolver(catalog, backing);
+
+    await expect(resolver.save({
+      kind: 'audio',
+      data: new Uint8Array([1, 2, 3]),
+      mime: 'audio/mpeg',
+      name: 'sooya.mp3',
+      metadata: { generated: true }
+    })).rejects.toThrow('database write failed');
+
+    expect(backing.calls).toEqual([
+      { op: 'save', arg: 'sooya.mp3' },
+      { op: 'remove', arg: '11111111-2222-3333-4444-555555555555' }
+    ]);
   });
 });
