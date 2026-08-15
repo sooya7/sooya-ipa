@@ -23,69 +23,7 @@ on:
       - 'scripts/patch-xcode-project.mjs'
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
-  patch-model-save:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: agent/model-provisional-save
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.14.0
-          cache: npm
-      - run: npm ci
-      - name: Patch provisional model save
-        shell: bash
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          path = Path('packages/core/src/app/local-core.ts')
-          source = path.read_text()
-          old_guard = "if (!provider || !baseUrl || !model) { if (provider === 'none') await this.configRepo.removeProvider(capability); continue; }"
-          new_guard = "if (!provider || !baseUrl) { if (provider === 'none') await this.configRepo.removeProvider(capability); continue; }"
-          if source.count(old_guard) != 1:
-              raise SystemExit(f'expected one model save guard, found {source.count(old_guard)}')
-          source = source.replace(old_guard, new_guard, 1)
-          old_set = "await this.configRepo.setProvider({ capability, provider, model, baseUrl, secretRef, options: modelOptionsFrom(raw) });"
-          new_set = "await this.configRepo.setProvider({ capability, provider, model, baseUrl, secretRef, enabled: Boolean(model), options: modelOptionsFrom(raw) });"
-          if source.count(old_set) != 1:
-              raise SystemExit(f'expected one model setProvider call, found {source.count(old_set)}')
-          source = source.replace(old_set, new_set, 1)
-          path.write_text(source)
-          test_source = (
-              "import { describe, expect, it } from 'vitest';\n"
-              "import { readFileSync } from 'node:fs';\n"
-              "import path from 'node:path';\n"
-              "\n"
-              "describe('native model admin provisional save', () => {\n"
-              "  it('persists connection details before a model is selected without enabling runtime use', () => {\n"
-              "    const source = readFileSync(path.resolve('src/app/local-core.ts'), 'utf8');\n"
-              "    expect(source).toContain(\"if (!provider || !baseUrl) { if (provider === 'none') await this.configRepo.removeProvider(capability); continue; }\");\n"
-              "    expect(source).not.toContain(\"if (!provider || !baseUrl || !model) { if (provider === 'none') await this.configRepo.removeProvider(capability); continue; }\");\n"
-              "    expect(source).toContain('enabled: Boolean(model)');\n"
-              "  });\n"
-              "});\n"
-          )
-          Path('packages/core/src/app/model-admin-save-contract.test.ts').write_text(test_source)
-          PY
-      - name: Run core tests
-        run: npm run test -w @sooya/core
-      - name: Restore normal workflow and commit patch
-        shell: bash
-        run: |
-          git fetch origin main
-          git checkout origin/main -- .github/workflows/ios-build.yml
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add packages/core/src/app/local-core.ts packages/core/src/app/model-admin-save-contract.test.ts .github/workflows/ios-build.yml
-          git commit -m 'fix(models): preserve connection config before discovery'
-          git push origin HEAD:agent/model-provisional-save
-
   build-ipa:
     runs-on: macos-15
     steps:

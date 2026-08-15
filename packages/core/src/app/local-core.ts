@@ -692,12 +692,12 @@ export class LocalCore implements LocalCoreApi {
           const provider = typeof raw.provider === 'string' ? normalizeProvider(raw.provider) : '';
           const model = typeof raw.model === 'string' ? raw.model : '';
           const baseUrl = typeof raw.baseUrl === 'string' ? raw.baseUrl : '';
-          if (!provider || !baseUrl || !model) { if (provider === 'none') await this.configRepo.removeProvider(capability); continue; }
+          if (!provider || !baseUrl) { if (provider === 'none') await this.configRepo.removeProvider(capability); continue; }
           const existing = await this.configRepo.getProvider(capability);
           const submittedKey = typeof raw.apiKey === 'string' ? raw.apiKey.trim() : '';
           const secretRef = typeof raw.secretRef === 'string' && raw.secretRef.trim() ? raw.secretRef.trim() : existing?.secretRef ?? (submittedKey ? `provider.${capability}.key` : null);
           if (this.options.secrets && secretRef && submittedKey) await this.options.secrets.set(secretRef, submittedKey);
-          await this.configRepo.setProvider({ capability, provider, model, baseUrl, secretRef, options: modelOptionsFrom(raw) });
+          await this.configRepo.setProvider({ capability, provider, model, baseUrl, secretRef, enabled: Boolean(model), options: modelOptionsFrom(raw) });
         }
         await this.settingsRepo.set('models', redactModelConfig(input));
       }
