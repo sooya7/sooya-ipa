@@ -52,14 +52,14 @@ export function FullBackupCard({ onNotice }: { onNotice: (message: string) => vo
   const doImport = async () => {
     if (!selected) return;
     const question = serverMigration
-      ? `确认从“${selected.displayName}”迁入服务器数据？\n\n聊天与普通图片、语音、文件会迁入 IPA；手机现有的记忆/Ombre 同步状态、模型与 MCP 配置会保留。迁移包若包含服务器 API Key / Ombre Token，会直接写入本机 Keychain，不要求密码。表情包继续使用 IPA 自带版本。导入前会保留数据库回滚副本。`
+      ? `确认从“${selected.displayName}”迁入服务器数据？\n\n聊天、Life、普通图片/语音/文件和服务器模型配置会迁入 IPA；服务器模型会覆盖手机当前对应模型槽位。手机现有的记忆/Ombre 同步状态与 MCP 配置会保留。迁移包若包含服务器 API Key / Ombre Token，会直接写入本机 Keychain，不要求密码。表情包继续使用 IPA 自带版本。导入前会保留数据库回滚副本。`
       : `确认从“${selected.displayName}”恢复全部内容？\n\n当前数据库与媒体会先保留回滚副本，成功后 App 将重新载入。`;
     if (!window.confirm(question)) return;
     setBusy('import');
     try {
       const result = await importFullBackup(selected, serverMigration ? undefined : importPassword);
       onNotice(serverMigration
-        ? `服务器数据已迁入（源 schema ${result.schemaVersion}${result.importedSecretCount ? `，写入 ${result.importedSecretCount} 个密钥` : ''}），正在重新载入…`
+        ? `服务器数据已迁入（源 schema ${result.schemaVersion}${result.importedModelCount ? `，迁入 ${result.importedModelCount} 个模型配置` : ''}${result.importedSecretCount ? `，写入 ${result.importedSecretCount} 个密钥` : ''}），正在重新载入…`
         : `完整备份已恢复（schema ${result.schemaVersion}），正在重新载入…`);
       setSelected(null);
       window.setTimeout(() => window.location.reload(), 250);
@@ -99,7 +99,7 @@ export function FullBackupCard({ onNotice }: { onNotice: (message: string) => vo
           </label>
         )}
         <p className="admin-muted" style={{ margin: 0 }}>
-          这里是 IPA 自己导出完整备份时的规则：默认不写 Keychain，勾选后使用密码加密。服务器 → IPA 迁移包是另一条简化链路，可直接携带服务器 API Key，不要求密码。
+          这里是 IPA 自己导出完整备份时的规则：默认不写 Keychain，勾选后使用密码加密。服务器 → IPA 迁移包是另一条简化链路，会携带服务器模型配置和 API Key，不要求密码。
         </p>
         <div className="admin-actions">
           <button type="button" onClick={() => void doExport()} disabled={busy !== null}>
@@ -116,7 +116,7 @@ export function FullBackupCard({ onNotice }: { onNotice: (message: string) => vo
           <div>
             <strong className="admin-breakable">{selected.displayName}</strong>
             <small style={{ display: 'block' }}>{readableBytes(selected.bytes)}</small>
-            {serverMigration && <small style={{ display: 'block' }}>服务器 → IPA 迁移包：不迁服务器记忆和表情包，保留本机模型/MCP 配置；包内 API Key 会直接写入本机 Keychain。</small>}
+            {serverMigration && <small style={{ display: 'block' }}>服务器 → IPA 迁移包：迁入服务器模型配置和 API Key；不迁服务器记忆和表情包，保留本机 MCP/Ombre 运行状态。</small>}
           </div>
           {!serverMigration && (
             <label style={{ display: 'grid', gap: 6 }}>
