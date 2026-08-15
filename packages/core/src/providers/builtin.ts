@@ -141,7 +141,7 @@ export class BuiltinChatProvider extends BuiltinProvider implements ChatProvider
         ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
         ...(request.jsonMode ? { response_format: { type: 'json_object' } } : {}),
         ...(request.tools?.length ? { tools: request.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })) } : {}),
-        ...(request.toolChoice ? { tool_choice: request.toolChoice === 'none' ? 'none' : request.toolChoice === 'auto' ? 'auto' : { type: 'function', function: { name: request.toolChoice.name } } : {})
+        ...(request.toolChoice ? { tool_choice: request.toolChoice === 'none' ? 'none' : request.toolChoice === 'auto' ? 'auto' : { type: 'function', function: { name: request.toolChoice.name } } } : {})
       }
     }, (event) => {
       if (event.data.trim() === '[DONE]') return;
