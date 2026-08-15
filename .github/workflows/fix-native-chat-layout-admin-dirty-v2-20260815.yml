@@ -1,0 +1,109 @@
+name: Fix native chat layout and admin dirty state v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-native-chat-layout-admin-dirty-v2-20260815.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+      - name: Apply patch recipe and update safe-area contract
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('.github/workflows/fix-native-chat-layout-admin-dirty-20260815.yml').read_text()
+          marker = '      - name: Apply native layout and scoped dirty-state fixes\n        run: |\n'
+          start = source.index(marker) + len(marker)
+          end = source.index('      - run: npm ci\n', start)
+          lines = source[start:end].splitlines()
+          script = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
+          Path('/tmp/apply-ui-fix.sh').write_text(script)
+          PY
+          bash /tmp/apply-ui-fix.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          Path('packages/web/src/native.css').write_text("""/* Capacitor iOS already applies contentInset=automatic. The native web layer must not add the same top/bottom safe area again. */
+          html.sooya-native {
+            --sooya-safe-top: 0px;
+            --sooya-safe-bottom: 0px;
+          }
+
+          html.sooya-native,
+          html.sooya-native body,
+          html.sooya-native #root {
+            width: 100%;
+            height: 100%;
+            min-height: 0;
+            background: #fff;
+          }
+
+          html.sooya-native body {
+            overflow: hidden;
+          }
+
+          /* Keyboard.resize=body owns the usable iOS viewport; fill that resized body instead of a lagging 100dvh. */
+          html.sooya-native .app {
+            width: 100%;
+            height: 100%;
+            min-height: 0;
+          }
+
+          /* ChatView already performs explicit virtual-list anchoring. Avoid a second WebKit correction pass. */
+          html.sooya-native .messages {
+            overflow-anchor: none;
+            scroll-behavior: auto;
+          }
+          """)
+          Path('packages/web/src/nativeSafeArea.test.ts').write_text("""// Native iOS uses Capacitor contentInset=automatic, while the browser build owns its CSS env() safe area.
+          import { readFile } from 'node:fs/promises';
+          import { describe, expect, it } from 'vitest';
+
+          describe('native safe-area contract', () => {
+            it('does not double-apply the iOS top or bottom safe area', async () => {
+              const styles = await readFile(new URL('./styles.css', import.meta.url), 'utf8');
+              const native = await readFile(new URL('./native.css', import.meta.url), 'utf8');
+              expect(styles.match(/--sooya-safe-top:/g)).toHaveLength(1);
+              expect(native.match(/--sooya-safe-top:/g)).toHaveLength(1);
+              expect(native).toContain('--sooya-safe-top: 0px');
+              expect(native).toContain('--sooya-safe-bottom: 0px');
+              expect(native).not.toContain('--sooya-native-top-fallback');
+              expect(styles).toMatch(/--sooya-safe-top: env\\(safe-area-inset-top, 0px\\)/);
+            });
+
+            it('lets fixed top elements consume the shared variable instead of direct env() lookups', async () => {
+              const files = ['./components/ChatHeader.css', './components/AdminPanel.css', './components/overlays.css'];
+              for (const file of files) {
+                const css = await readFile(new URL(file, import.meta.url), 'utf8');
+                expect(css).not.toMatch(/env\\(safe-area-inset-top/);
+              }
+            });
+          });
+          """)
+          PY
+          git diff --check
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test -w @sooya/web
+      - run: npm run build
+      - name: Commit verified fix
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add packages/web/src/native.css packages/web/src/nativeSafeArea.test.ts packages/web/src/nativeLayout.test.ts packages/web/src/lib/adminDirtyState.ts packages/web/src/components/AdminPanel.tsx packages/web/src/components/FeatureAdminPage.tsx packages/web/src/components/life/LifeContactBoundaryForm.tsx
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix(ui): stabilize native chat layout and scoped save state'
+          git push origin HEAD:main
