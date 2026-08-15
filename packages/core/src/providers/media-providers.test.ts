@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ProviderConfig } from '../db/config.repo.js';
 import type { HttpPlatform, HttpRequest, HttpResponse, HttpResponseHead } from '../platform/http.js';
-import { BuiltinImageProvider, imageProtocol } from './media-providers.js';
+import { BuiltinImageProvider, describeAnumaUploadResponse, imageProtocol } from './media-providers.js';
 import { ImagePipelineError } from './types.js';
 
 const REFERENCE_PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -56,6 +56,27 @@ describe('BuiltinImageProvider Anuma server parity', () => {
     expect(imageProtocol(imageConfig('anuma', { protocol: 'anuma-input-images' }))).toBe('anuma-input-images');
     expect(imageProtocol(imageConfig('anuma-input-images'))).toBe('anuma-input-images');
     expect(imageProtocol(imageConfig('openai-images'))).toBe('openai-images');
+  });
+
+  it('describes upload response structure without leaking URL values', () => {
+    const secretUrl = 'https://cdn.example.test/private/reference.png?token=do-not-leak';
+    const diagnostic = describeAnumaUploadResponse({ success: true, data: { url: secretUrl, id: 'private-id' } });
+
+    expect(diagnostic).toContain('keys=[success,data]');
+    expect(diagnostic).toContain('data=[url,id]');
+    expect(diagnostic).toContain('data.url:https');
+    expect(diagnostic).not.toContain('cdn.example.test');
+    expect(diagnostic).not.toContain('do-not-leak');
+    expect(diagnostic).not.toContain('private-id');
+  });
+
+  it('reports an insecure top-level URL only by field and scheme', () => {
+    const diagnostic = describeAnumaUploadResponse({ url: 'http://10.0.0.1/private?signature=secret' });
+
+    expect(diagnostic).toContain('keys=[url]');
+    expect(diagnostic).toContain('urls=[url:http]');
+    expect(diagnostic).not.toContain('10.0.0.1');
+    expect(diagnostic).not.toContain('signature');
   });
 
   it('routes provider=anuma + options.protocol to /media/upload and /images/generations', async () => {
@@ -152,6 +173,30 @@ describe('BuiltinImageProvider Anuma server parity', () => {
 
     const generationProvider = new BuiltinImageProvider(http422('/images/generations'), imageConfig('anuma-input-images'));
     await expect(generationProvider.generate('自拍')).rejects.toMatchObject({ name: 'ImagePipelineError', stage: 'generation', status: 422 });
+  });
+
+  it('surfaces only safe response-shape diagnostics for invalid upload JSON', async () => {
+    const secretUrl = 'https://cdn.example.test/private/reference.png?token=do-not-leak';
+    const http = new RoutingHttp([
+      {
+        match: (request) => request.url.endsWith('/media/upload'),
+        response: jsonResponse({ success: true, data: { url: secretUrl } })
+      }
+    ]);
+    const provider = new BuiltinImageProvider(http, imageConfig('anuma-input-images'));
+
+    let thrown: unknown;
+    try {
+      await provider.generate('自拍', { referenceImages: [{ data: REFERENCE_PNG, mime: 'image/png' }] });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ImagePipelineError);
+    expect((thrown as Error).message).toContain('keys=[success,data]');
+    expect((thrown as Error).message).toContain('data.url:https');
+    expect((thrown as Error).message).not.toContain('cdn.example.test');
+    expect((thrown as Error).message).not.toContain('do-not-leak');
   });
 });
 
