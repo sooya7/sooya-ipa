@@ -174,8 +174,14 @@ export class ReplyCoordinator {
       await this.options.messages.setStatus(assistantId, 'sent');
       const assistant = await this.options.messages.get(assistantId); if (!assistant) throw new Error('assistant message was not persisted');
       if (!await this.options.batches.complete(batchId, assistant.id, revision)) throw new SupersededReplyError('reply completion lost its revision fence');
+      // The reply is terminal once the batch has committed. Memory extraction is
+      // post-processing and must never keep the reply interruptible: iOS can
+      // transiently report app_inactive while the already-visible reply is
+      // committing memory, which previously rewrote a successful message to
+      // failed and emitted a ghost interruption card.
+      if (this.active.get(batchId)?.controller === controller) this.active.delete(batchId);
       this.options.emit('message.received', { message: assistant }); this.options.emit('reply.completed', { batchId, revision, message: assistant, model: result.model });
-      await this.commitMemory(batchId, revision, latestUser, semanticText, controller.signal).catch((error) => { if (!controller.signal.aborted) this.options.emit('memory.commit.failed', { batchId, revision, error: error instanceof Error ? error.message : String(error) }); });
+      void this.commitMemory(batchId, revision, latestUser, semanticText, controller.signal).catch((error) => { if (!controller.signal.aborted) this.options.emit('memory.commit.failed', { batchId, revision, error: error instanceof Error ? error.message : String(error) }); });
     } catch (error) {
       const superseded = error instanceof SupersededReplyError || controller.signal.aborted;
       if (assistantId) await this.options.messages.setStatus(assistantId, 'failed', superseded ? 'superseded' : errorMessage(error)).catch(() => undefined);
