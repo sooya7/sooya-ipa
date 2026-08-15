@@ -3,7 +3,7 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { LocalOtaUpdater } from './otaUpdater.js';
 
-describe('OTA cold-boot contract', () => {
+describe('OTA apply contract', () => {
   it('does not call terminal set() when the pending bundle is already active', async () => {
     const set = vi.fn(async () => undefined);
     const updater = Object.create(LocalOtaUpdater.prototype) as LocalOtaUpdater;
@@ -49,5 +49,20 @@ describe('OTA cold-boot contract', () => {
     const setIndex = source.indexOf('this.plugin.set({ id: state.pending_bundle_id })');
     expect(currentIndex).toBeGreaterThan(-1);
     expect(setIndex).toBeGreaterThan(currentIndex);
+  });
+
+  it('exposes the same guarded apply path for a manual in-app update', () => {
+    const source = readFileSync(path.resolve('src/local/otaUpdater.ts'), 'utf8');
+    expect(source).toContain('let activeOtaUpdater: LocalOtaUpdater | null = null;');
+    expect(source).toContain('export function currentOtaUpdater()');
+    expect(source).toContain('async applyPendingNow()');
+    expect(source).toContain('return await this.applyPendingNow();');
+  });
+
+  it('deduplicates a startup OTA check and a simultaneous manual check', () => {
+    const source = readFileSync(path.resolve('src/local/otaUpdater.ts'), 'utf8');
+    expect(source).toContain('private checkInFlight: Promise<OtaCheckResult> | null = null;');
+    expect(source).toContain('if (this.checkInFlight) return await this.checkInFlight;');
+    expect(source).toContain('private async performCheckAndDownload');
   });
 });
