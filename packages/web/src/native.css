@@ -29,3 +29,5 @@ html.sooya-native .messages {
   overflow-anchor: none;
   scroll-behavior: auto;
 }
+
+/* OTA publication marker: this web-only change intentionally ships without a native-base bump. */
