@@ -113,6 +113,21 @@ function diagnosticUrlScheme(value: string): string | null {
   }
 }
 
+function anumaUploadHttpsUrl(response: unknown): string | null {
+  const candidate = typeof response === 'string'
+    ? response.trim()
+    : isRecord(response) && typeof response.url === 'string'
+      ? response.url.trim()
+      : '';
+  if (!candidate) return null;
+  try {
+    const parsed = new URL(candidate);
+    return parsed.protocol === 'https:' ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Privacy-safe description of an upload response. It deliberately reports
  * only object key names, candidate field paths and URL schemes. It never
@@ -122,7 +137,10 @@ export function describeAnumaUploadResponse(response: unknown): string {
   if (!isRecord(response)) {
     if (Array.isArray(response)) return `type=array; length=${response.length}`;
     if (response === null) return 'type=null';
-    if (typeof response === 'string') return `type=string; length=${response.length}`;
+    if (typeof response === 'string') {
+      const scheme = diagnosticUrlScheme(response.trim());
+      return `type=string; length=${response.length}${scheme ? `; scheme=${scheme}` : ''}`;
+    }
     return `type=${typeof response}`;
   }
 
@@ -343,7 +361,9 @@ export class BuiltinImageProvider implements ImageProvider {
     } catch (error) {
       throw pipelineError('reference_upload', error);
     }
-    if (!isRecord(response) || typeof response.url !== 'string' || !response.url.startsWith('https://')) {
+
+    const returned = anumaUploadHttpsUrl(response);
+    if (!returned) {
       const diagnostic = describeAnumaUploadResponse(response);
       throw pipelineError('reference_upload', new ImageReferenceError(
         'reference_upload_invalid_response',
@@ -351,7 +371,7 @@ export class BuiltinImageProvider implements ImageProvider {
         `anuma reference upload did not return an HTTPS URL (${diagnostic})`
       ));
     }
-    return response.url;
+    return returned;
   }
 
   /** Parse and materialize an OpenAI-compatible image response. */
