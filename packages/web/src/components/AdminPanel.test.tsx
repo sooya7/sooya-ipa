@@ -289,6 +289,47 @@ describe('AdminPanel 子页首屏', () => {
     expect(container.querySelectorAll('[data-testid="admin-dashboard"]')).toHaveLength(1);
   });
 
+  it('批量编辑接口协议和地址后保存不会把协议覆盖回未配置', async () => {
+    window.history.replaceState(null, '', '/admin/models');
+    adminMocks.models.mockResolvedValueOnce({
+      models: {
+        chat: { provider: 'none', model: '', baseUrl: '', apiKeyConfigured: false }
+      }
+    } as never);
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(<AdminPanel initialTab="models" />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const labels = [...container.querySelectorAll('label')];
+    const protocol = labels.find((item) => item.textContent?.trim().startsWith('接口协议'))!.querySelector('select') as HTMLSelectElement;
+    const baseUrl = labels.find((item) => item.textContent?.trim().startsWith('接口地址'))!.querySelector('input') as HTMLInputElement;
+    await act(async () => {
+      const selectSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!;
+      selectSetter.call(protocol, 'openai-compatible');
+      protocol.dispatchEvent(new Event('change', { bubbles: true }));
+      const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+      inputSetter.call(baseUrl, 'https://gateway.test/v1');
+      baseUrl.dispatchEvent(new Event('input', { bubbles: true }));
+      baseUrl.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    const saveButton = [...container.querySelectorAll('button')].find((item) => item.textContent?.includes('保存模型配置'))!;
+    await act(async () => { saveButton.click(); await Promise.resolve(); });
+
+    expect(adminMocks.updateModels).toHaveBeenCalledWith({
+      chat: expect.objectContaining({
+        provider: 'openai-compatible',
+        baseUrl: 'https://gateway.test/v1',
+        model: ''
+      })
+    });
+  });
+
   it('存入模型库走服务器绑定接口，并且未保存的新 key 不会被存入', async () => {
     window.history.replaceState(null, '', '/admin/models');
     container = document.createElement('div');

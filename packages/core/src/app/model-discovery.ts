@@ -57,10 +57,11 @@ export class ModelDiscoveryService {
     try {
       let url = urls[0]!;
       let response = await this.request(url, headers, row?.secretRef ?? null, secretHeader, secretPrefix, controller.signal);
-      // NewAPI exposes its frontend model list at /api/models; only fall back
-      // when the standard route is genuinely absent.
-      if ((response.status === 404 || response.status === 405) && urls[1]) {
-        url = urls[1]!;
+      // Providers differ on whether callers paste the API root, /v1, or a full
+      // inference endpoint. Walk the normalized candidates only when the current
+      // endpoint is genuinely absent; auth/rate-limit failures remain authoritative.
+      for (let index = 1; (response.status === 404 || response.status === 405) && index < urls.length; index += 1) {
+        url = urls[index]!;
         response = await this.request(url, headers, row?.secretRef ?? null, secretHeader, secretPrefix, controller.signal);
       }
       if (response.status < 200 || response.status >= 300) {
@@ -96,17 +97,34 @@ export class ModelDiscoveryService {
 }
 
 function discoveryUrls(rawBase: string): string[] {
-  let base = rawBase.replace(/\/+$/u, '');
-  // Operators often paste the image-generation endpoint from the provider docs.
-  base = base.replace(/\/(?:images\/(?:generations|edits))$/iu, '');
-  const primary = base.endsWith('/models') ? base : `${base}/models`;
-  const urls = [primary];
+  let base = rawBase.trim().replace(/\/+$/u, '');
+  // Operators often paste a full inference endpoint from provider docs. Normalize
+  // those back to the API root before looking for the model-list endpoint.
+  base = base.replace(/\/(?:chat\/completions|responses|embeddings|rerank|audio\/speech|images\/(?:generations|edits))$/iu, '');
+  const urls: string[] = [];
+  const push = (value: string) => { if (value && !urls.includes(value)) urls.push(value); };
+
+  if (/\/models$/iu.test(base)) {
+    push(base);
+    return urls;
+  }
+
   try {
     const parsed = new URL(base);
-    if (!base.endsWith('/models') && /\/v1$/iu.test(parsed.pathname)) {
-      urls.push(`${parsed.origin}/api/models`);
+    const path = parsed.pathname.replace(/\/+$/u, '');
+    if (!path) {
+      // A bare host is most commonly an OpenAI-compatible API root. Prefer the
+      // standard /v1 endpoint, while retaining legacy /models and NewAPI fallback.
+      push(`${parsed.origin}/v1/models`);
+      push(`${parsed.origin}/models`);
+      push(`${parsed.origin}/api/models`);
+    } else {
+      push(`${base}/models`);
+      if (/\/v1$/iu.test(path)) push(`${parsed.origin}/api/models`);
     }
-  } catch { /* invalid base: keep the single primary url */ }
+  } catch {
+    push(`${base}/models`);
+  }
   return urls;
 }
 

@@ -55,6 +55,19 @@ describe('ModelDiscoveryService', () => {
     });
   });
 
+  it('normalizes bare hosts and pasted inference endpoints to /v1/models', async () => {
+    for (const baseUrl of ['https://gateway.test', 'https://gateway.test/v1/chat/completions', 'https://gateway.test/v1/responses']) {
+      const urls: string[] = [];
+      const service = new ModelDiscoveryService(fakeHttp((input) => {
+        urls.push(input.url);
+        return { status: 200, body: JSON.stringify({ data: [{ id: 'gpt-4o' }] }) };
+      }), repo(fakeConfig({ baseUrl })) as ConfigRepository);
+      const result = await service.discover('chat');
+      expect(result.ok).toBe(true);
+      expect(urls[0]).toBe('https://gateway.test/v1/models');
+    }
+  });
+
   it('falls back to NewAPI /api/models on 404 and parses the grouped shape', async () => {
     const urls: string[] = [];
     const service = new ModelDiscoveryService(fakeHttp((input) => {

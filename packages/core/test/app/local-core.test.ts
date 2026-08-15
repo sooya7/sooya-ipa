@@ -489,6 +489,23 @@ describe('LocalCore webSearch integration', () => {
     }
   });
 
+  it('persists provider connection details before a model is selected', async () => {
+    const core = new LocalCore({ db, secrets });
+    await core.adminRequest('/api/admin/models', {
+      method: 'PUT',
+      body: { chat: { provider: 'openai-compatible', baseUrl: 'https://chat.test/v1', model: '', apiKey: 'chat-key' } }
+    });
+
+    const read = await core.adminRequest<{ models: Record<string, unknown> }>('/api/admin/models');
+    const chat = read.models.chat as Record<string, unknown>;
+    expect(chat.provider).toBe('openai-compatible');
+    expect(chat.baseUrl).toBe('https://chat.test/v1');
+    expect(chat.model).toBe('');
+    expect(chat.apiKeyConfigured).toBe(true);
+    await expect(secrets.get('provider.chat.key')).resolves.toBe('chat-key');
+    await expect(core.configRepo.getProvider('chat')).resolves.toMatchObject({ enabled: false });
+  });
+
   it('routes discovery through the real upstream request', async () => {
     const recorded: { requests: Array<{ url: string; secretRef: string | null }> } = { requests: [] };
     const http: HttpPlatform = {

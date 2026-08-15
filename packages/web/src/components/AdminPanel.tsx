@@ -456,10 +456,13 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
 
   const config = (models?.[selected] ?? {}) as Record<string, unknown>;
   const discoveryUnsupported = config.provider === 'anuma-input-images';
-  const update = (key: string, value: unknown) => setModels((prev) => ({
-    ...(prev ?? {}),
-    [selected]: { ...config, [key]: value }
-  }));
+  const update = (key: string, value: unknown) => setModels((prev) => {
+    const latest = (prev?.[selected] ?? {}) as Record<string, unknown>;
+    return {
+      ...(prev ?? {}),
+      [selected]: { ...latest, [key]: value }
+    };
+  });
 
   const save = async () => {
     if (!models || selected === 'webSearch') return;
