@@ -1,6 +1,6 @@
 {
-  "nativeVersion": "3.0.0",
-  "bridgeVersion": 3,
+  "nativeVersion": "3.1.0",
+  "bridgeVersion": 5,
   "capabilities": [
     "database.sqlite",
     "keychain.secrets",
@@ -9,6 +9,8 @@
     "http.websocket",
     "media.sandbox",
     "archive.zip",
+    "backup.full",
+    "mcp.native",
     "mcp.transport",
     "oauth.system",
     "notifications.local",
