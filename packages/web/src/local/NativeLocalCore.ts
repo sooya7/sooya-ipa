@@ -28,7 +28,14 @@ export interface NativeModelTestResult {
   detail: string;
 }
 
+export interface NativeVoicePreviewResult {
+  dataBase64: string;
+  mime: string;
+  format: string;
+}
+
 const PROBE_TEXT = '你好';
+const PREVIEW_TEXT = '你好呀，我刚刚想到你了。';
 const VISION_PROBE_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
 
 /**
@@ -63,6 +70,18 @@ export class NativeLocalCore extends LocalCore {
       return await super.adminRequest<T>(path, options);
     }
 
+    // Browser/server preview returns raw audio bytes. Native LocalCore has no
+    // HTTP response body to hand to <audio>, so synthesize through the same
+    // native provider/Keychain path and return a JSON-safe base64 envelope.
+    if (url.pathname === '/api/admin/voice/preview' && method === 'POST') {
+      const configured = await this.configRepo.getProvider('tts');
+      if (!configured) throw new Error('这个能力还没配全（接口协议、地址、模型名、密钥缺一不可）');
+      const body = isRecord(options.body) ? options.body : {};
+      const text = typeof body.text === 'string' ? body.text : PREVIEW_TEXT;
+      const emotion = typeof body.emotion === 'string' ? body.emotion : undefined;
+      return await synthesizeNativeVoicePreview(this.probeHttp, configured, text, emotion) as T;
+    }
+
     const match = url.pathname.match(/^\/api\/admin\/models\/([^/]+)\/test$/u);
     if (!match || method !== 'POST') return await super.adminRequest<T>(path, options);
 
@@ -76,6 +95,25 @@ export class NativeLocalCore extends LocalCore {
     const body = isRecord(options.body) ? options.body : {};
     return await probeNativeModel(this.probeHttp, configured, capability, { forceImage: body.force === true }) as T;
   }
+}
+
+/** Native preview transport: real provider request in, JSON-safe audio out. */
+export async function synthesizeNativeVoicePreview(
+  http: HttpPlatform,
+  configured: NativeProviderConfig,
+  text: string,
+  emotion?: string
+): Promise<NativeVoicePreviewResult> {
+  if (!configured.enabled || !configured.baseUrl || !configured.model || !configured.secretRef) {
+    throw new Error('这个能力还没配全（接口协议、地址、模型名、密钥缺一不可）');
+  }
+  const provider = new BuiltinTtsProvider(http, configured);
+  const audio = await provider.synthesize(text.trim() || PREVIEW_TEXT, { emotion });
+  return {
+    dataBase64: bytesToBase64(audio.data),
+    mime: audio.mime,
+    format: audio.format
+  };
 }
 
 /** Execute one minimal real provider request using the saved native config. */
@@ -230,6 +268,15 @@ function base64ToBytes(value: string): Uint8Array {
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
   return bytes;
+}
+
+function bytesToBase64(value: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < value.length; offset += chunkSize) {
+    binary += String.fromCharCode(...value.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
