@@ -1,0 +1,98 @@
+name: Fix native life publishing v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-native-life-publishing-20260815-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+      - name: Apply native life publishing fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          core_path = Path('packages/core/src/app/local-core.ts')
+          source = core_path.read_text()
+
+          def replace_once(old: str, new: str) -> None:
+              global source
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one match, got {count}: {old[:120]!r}')
+              source = source.replace(old, new, 1)
+
+          replace_once(
+              "import { MomentComposer } from '../moments/composer.js';\n",
+              "import { MomentComposer } from '../moments/composer.js';\nimport { MomentPolicy } from '../moments/moment-policy.js';\n",
+          )
+          replace_once(
+              "    await this.momentComposer.compose().catch(() => undefined);\n    await this.replies.recover();",
+              "    await this.composeMomentsIfEnabled().catch(() => undefined);\n    await this.replies.recover();",
+          )
+          replace_once(
+              "  /** Background: persist WAL state so the database survives suspension. */\n",
+              """  private async localLifeSettings(): Promise<LocalLifeSettings> {\n    const stored = await this.settingsRepo.get<Record<string, unknown>>('lifeSettings', defaultLifeSettings());\n    return normalizeLocalLifeSettings(stored);\n  }\n\n  /** Native IPA has no deployment env gate. The saved admin switch is the source of truth. */\n  private async composeMomentsIfEnabled(): Promise<void> {\n    const settings = await this.localLifeSettings();\n    const now = this.options.now?.() ?? new Date();\n    if (!settings.reachOut || settings.maxReachOutsPerDay <= 0 || isSilentLifeHour(now, settings)) return;\n    await this.momentComposer.compose(now, new MomentPolicy({\n      dailyCap: settings.maxReachOutsPerDay,\n      minGapMs: settings.quietGapMinutes * 60_000\n    }));\n  }\n\n  /** Background: persist WAL state so the database survives suspension. */\n""",
+          )
+
+          replace_once(
+              """    if (route === '/api/admin/life' && method === 'GET') {\n      const snapshot = await this.life();\n      const settings = await this.settingsRepo.get('lifeSettings', defaultLifeSettings());\n      return { snapshot, log: await this.lifeRepo.recent(100), plans: await this.lifeRepo.listPlans(), events: await this.lifeRepo.events(100), proactive: [], reachOut: { reach: false, reason: 'local proactive messaging is disabled', candidate: null, sharedLastDay: 0, lastUserAt: null, lastAssistantAt: null, enabledByDeployment: false }, settings } as T;\n    }\n""",
+              """    if (route === '/api/admin/life' && method === 'GET') {\n      const snapshot = await this.life();\n      const settings = await this.localLifeSettings();\n      const now = this.options.now?.() ?? new Date();\n      const reason = !settings.reachOut\n        ? 'disabled'\n        : settings.maxReachOutsPerDay <= 0\n          ? 'daily_cap'\n          : isSilentLifeHour(now, settings)\n            ? 'silent_hours'\n            : 'ok';\n      return {\n        snapshot,\n        log: await this.lifeRepo.recent(100),\n        plans: await this.lifeRepo.listPlans(),\n        events: await this.lifeRepo.events(100),\n        proactive: [],\n        reachOut: {\n          reach: reason === 'ok',\n          reason,\n          candidate: null,\n          sharedLastDay: 0,\n          lastUserAt: null,\n          lastAssistantAt: null,\n          enabledByDeployment: true\n        },\n        settings\n      } as T;\n    }\n""",
+          )
+
+          replace_once(
+              """    if (route === '/api/admin/life/settings' && (method === 'PUT' || method === 'PATCH')) {\n      const settings = { ...defaultLifeSettings(), ...(await this.settingsRepo.get('lifeSettings', defaultLifeSettings())), ...body, reachOut: false, proactiveMode: 'disabled' };\n      await this.settingsRepo.set('lifeSettings', settings);\n      return { settings } as T;\n    }\n""",
+              """    if (route === '/api/admin/life/settings' && (method === 'PUT' || method === 'PATCH')) {\n      const current = await this.localLifeSettings();\n      const settings = normalizeLocalLifeSettings({ ...current, ...body });\n      await this.settingsRepo.set('lifeSettings', settings);\n      if (settings.reachOut) await this.composeMomentsIfEnabled().catch(() => undefined);\n      return { settings } as T;\n    }\n""",
+          )
+
+          replace_once(
+              """function defaultLifeSettings(): Record<string, unknown> {\n  return { reachOut: false, quietGapMinutes: 240, maxReachOutsPerDay: 0, silentFrom: 23, silentTo: 8, tzOffsetMinutes: 480, proactiveMode: 'disabled' };\n}\n""",
+              """type LocalProactiveMode = 'auto' | 'text' | 'text_sticker' | 'voice' | 'image';\ninterface LocalLifeSettings {\n  [key: string]: unknown;\n  reachOut: boolean;\n  quietGapMinutes: number;\n  maxReachOutsPerDay: number;\n  silentFrom: number;\n  silentTo: number;\n  tzOffsetMinutes: number;\n  proactiveMode: LocalProactiveMode;\n}\n\nfunction defaultLifeSettings(): LocalLifeSettings {\n  return { reachOut: false, quietGapMinutes: 240, maxReachOutsPerDay: 2, silentFrom: 23, silentTo: 8, tzOffsetMinutes: 480, proactiveMode: 'auto' };\n}\n\nfunction normalizeLocalLifeSettings(value: Record<string, unknown>): LocalLifeSettings {\n  const defaults = defaultLifeSettings();\n  const legacyDisabled = value.proactiveMode === 'disabled';\n  const proactiveMode = value.proactiveMode === 'auto' || value.proactiveMode === 'text' || value.proactiveMode === 'text_sticker' || value.proactiveMode === 'voice' || value.proactiveMode === 'image'\n    ? value.proactiveMode\n    : defaults.proactiveMode;\n  const number = (raw: unknown, fallback: number, min: number, max: number): number =>\n    typeof raw === 'number' && Number.isFinite(raw) ? Math.max(min, Math.min(max, Math.trunc(raw))) : fallback;\n  const savedCap = number(value.maxReachOutsPerDay, defaults.maxReachOutsPerDay, 0, 20);\n  return {\n    reachOut: value.reachOut === true,\n    quietGapMinutes: number(value.quietGapMinutes, defaults.quietGapMinutes, 5, 1440),\n    maxReachOutsPerDay: legacyDisabled && savedCap === 0 ? defaults.maxReachOutsPerDay : savedCap,\n    silentFrom: number(value.silentFrom, defaults.silentFrom, 0, 23),\n    silentTo: number(value.silentTo, defaults.silentTo, 0, 23),\n    tzOffsetMinutes: number(value.tzOffsetMinutes, defaults.tzOffsetMinutes, -840, 840),\n    proactiveMode\n  };\n}\n\nfunction isSilentLifeHour(now: Date, settings: Pick<LocalLifeSettings, 'silentFrom' | 'silentTo' | 'tzOffsetMinutes'>): boolean {\n  if (settings.silentFrom === settings.silentTo) return false;\n  const shifted = new Date(now.getTime() + settings.tzOffsetMinutes * 60_000);\n  const hour = shifted.getUTCHours();\n  return settings.silentFrom < settings.silentTo\n    ? hour >= settings.silentFrom && hour < settings.silentTo\n    : hour >= settings.silentFrom || hour < settings.silentTo;\n}\n""",
+          )
+          core_path.write_text(source)
+
+          composer_path = Path('packages/core/src/moments/composer.ts')
+          composer = composer_path.read_text()
+          old = "  async compose(now = (this.options.now ?? (() => new Date()))()): Promise<MomentComposeResult> {\n"
+          new = "  async compose(now = (this.options.now ?? (() => new Date()))(), policy = this.options.policy ?? new MomentPolicy()): Promise<MomentComposeResult> {\n"
+          if composer.count(old) != 1:
+              raise SystemExit('MomentComposer compose signature changed unexpectedly')
+          composer = composer.replace(old, new, 1)
+          old = "    const selected = (this.options.policy ?? new MomentPolicy()).select(candidates, existing, now, true);\n"
+          new = "    const selected = policy.select(candidates, existing, now, true);\n"
+          if composer.count(old) != 1:
+              raise SystemExit('MomentComposer policy selection changed unexpectedly')
+          composer_path.write_text(composer.replace(old, new, 1))
+
+          Path('packages/core/src/app/native-life-publishing-contract.test.ts').write_text("""import { describe, expect, it } from 'vitest';\nimport { readFileSync } from 'node:fs';\nimport path from 'node:path';\n\ndescribe('native Life publishing contract', () => {\n  it('uses the persisted IPA switch instead of a deployment env hard-disable', () => {\n    const source = readFileSync(path.resolve('src/app/local-core.ts'), 'utf8');\n    expect(source).toContain('enabledByDeployment: true');\n    expect(source).toContain("const settings = normalizeLocalLifeSettings({ ...current, ...body });");\n    expect(source).not.toContain("reachOut: false, proactiveMode: 'disabled'");\n    expect(source).not.toContain("reason: 'local proactive messaging is disabled'");\n  });\n\n  it('gates native Moment composition with the saved cap, gap and silent hours', () => {\n    const source = readFileSync(path.resolve('src/app/local-core.ts'), 'utf8');\n    expect(source).toContain('private async composeMomentsIfEnabled()');\n    expect(source).toContain('dailyCap: settings.maxReachOutsPerDay');\n    expect(source).toContain('minGapMs: settings.quietGapMinutes * 60_000');\n    expect(source).toContain('isSilentLifeHour(now, settings)');\n    expect(source).toContain('await this.composeMomentsIfEnabled().catch(() => undefined);');\n  });\n\n  it('migrates the old impossible-to-enable IPA default to a usable local default', () => {\n    const source = readFileSync(path.resolve('src/app/local-core.ts'), 'utf8');\n    expect(source).toContain('maxReachOutsPerDay: 2');\n    expect(source).toContain("proactiveMode: 'auto'");\n    expect(source).toContain('legacyDisabled && savedCap === 0 ? defaults.maxReachOutsPerDay : savedCap');\n  });\n});\n""")
+          PY
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Targeted core tests
+        run: npm run test -w @sooya/core -- src/app/native-life-publishing-contract.test.ts src/moments/moment-policy.test.ts
+      - name: Commit verified fix and remove staging workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/fix-native-life-publishing-20260815.yml .github/workflows/fix-native-life-publishing-20260815-v2.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add packages/core/src/app/local-core.ts packages/core/src/moments/composer.ts packages/core/src/app/native-life-publishing-contract.test.ts
+          git commit -m 'fix(native): enable local life publishing controls'
+          git push origin HEAD:main
