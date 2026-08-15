@@ -18,7 +18,7 @@ export const SLOT_LABELS: Record<ModelSlot, string> = {
   rerank: '记忆重排'
 };
 
-/** Providers the server accepts, narrowed per slot so the form cannot offer a mismatch. */
+/** Providers the panel offers, narrowed per slot so the form cannot offer a mismatch. */
 export const SLOT_PROVIDERS: Record<ModelSlot, string[]> = {
   chat: ['openai-chat', 'openai-responses', 'anthropic-messages', 'openai-compatible'],
   vision: ['openai-chat', 'openai-responses', 'anthropic-messages', 'openai-compatible'],
@@ -26,7 +26,7 @@ export const SLOT_PROVIDERS: Record<ModelSlot, string[]> = {
   director: ['openai-chat', 'openai-responses', 'anthropic-messages', 'openai-compatible'],
   embedding: ['openai-embeddings', 'openai-compatible'],
   image: ['openai-images', 'anuma-input-images', 'openai-compatible'],
-  tts: ['openai-tts', 'volc-tts', 'fish', 'openai-compatible'],
+  tts: ['openai-tts', 'fish', 'openai-compatible'],
   rerank: ['openai-rerank', 'openai-compatible']
 };
 
@@ -40,7 +40,8 @@ export const PROVIDER_LABELS: Record<string, string> = {
   'openai-images': 'OpenAI Images',
   'anuma-input-images': 'Anuma input_images 图生图',
   'openai-tts': 'OpenAI TTS',
-  'volc-tts': '火山引擎语音合成（官方协议）',
+  // Kept only so an old saved config can still be named instead of rendering a raw slug.
+  'volc-tts': '火山引擎语音合成（旧配置兼容）',
   'fish': 'Fish Audio（S2.x 官方协议）',
   'openai-rerank': 'Rerank（SiliconFlow/Jina 协议）'
 };
@@ -202,4 +203,3 @@ export function presetsBySlot(list: ModelPreset[]): Array<[ModelSlot, ModelPrese
     .map((slot) => [slot, list.filter((item) => item.slot === slot)] as [ModelSlot, ModelPreset[]])
     .filter(([, items]) => items.length > 0);
 }
-
