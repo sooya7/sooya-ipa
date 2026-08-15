@@ -30,4 +30,20 @@ html.sooya-native .messages {
   scroll-behavior: auto;
 }
 
+/* The body is intentionally locked for the chat, but admin pages historically
+ * scrolled with the document. Give admin its own native touch scroller so the
+ * chat lock does not freeze the management UI. */
+html.sooya-native .admin-page {
+  height: 100%;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+html.sooya-native .admin-page.admin-v2,
+html.sooya-native .admin-page .admin-shell {
+  min-height: 100%;
+}
+
 /* OTA publication marker: this web-only change intentionally ships without a native-base bump. */
