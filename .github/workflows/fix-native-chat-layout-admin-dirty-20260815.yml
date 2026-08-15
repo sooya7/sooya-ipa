@@ -1,0 +1,192 @@
+name: Fix native chat layout and admin dirty state
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-native-chat-layout-admin-dirty-20260815.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+      - name: Apply native layout and scoped dirty-state fixes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f'missing expected snippet in {path}: {old[:120]!r}')
+              p.write_text(text.replace(old, new, 1))
+
+          Path('packages/web/src/native.css').write_text('''/* Native iOS uses Capacitor/WKWebView contentInset=automatic.\n * Do not add the CSS safe-area insets a second time: doing both produced the\n * blank strip above the header and the oversized gap below the composer. */\n:root {\n  --sooya-safe-top: env(safe-area-inset-top, 0px);\n  --sooya-safe-bottom: env(safe-area-inset-bottom, 0px);\n  --sooya-safe-left: env(safe-area-inset-left, 0px);\n  --sooya-safe-right: env(safe-area-inset-right, 0px);\n}\n\nhtml.sooya-native {\n  --sooya-safe-top: 0px;\n  --sooya-safe-bottom: 0px;\n}\n\nhtml.sooya-native,\nhtml.sooya-native body,\nhtml.sooya-native #root {\n  width: 100%;\n  height: 100%;\n  min-height: 0;\n  background: #fff;\n}\n\nhtml.sooya-native body {\n  overflow: hidden;\n}\n\n/* Keyboard.resize=body changes the native viewport height. 100dvh can lag behind\n * that resize in WKWebView, so the native chat must fill the resized body instead. */\nhtml.sooya-native .app {\n  width: 100%;\n  height: 100%;\n  min-height: 0;\n}\n\n/* ChatView already owns scroll anchoring and virtual-list corrections. Disable\n * WebKit's second anchoring pass and CSS smooth scrolling so image/keyboard\n * reflows do not tug the conversation in two directions. */\nhtml.sooya-native .messages {\n  overflow-anchor: none;\n  scroll-behavior: auto;\n}\n''')
+
+          helper = Path('packages/web/src/lib/adminDirtyState.ts')
+          helper.write_text('''export const ADMIN_SAVED_EVENT = 'sooya:admin-saved';\n\nexport type AdminSavedDetail = { scope: string };\n\n/** Clear only the form section that actually finished saving. */\nexport function notifyAdminSaved(scope: string): void {\n  if (typeof window === 'undefined') return;\n  window.dispatchEvent(new CustomEvent<AdminSavedDetail>(ADMIN_SAVED_EVENT, { detail: { scope } }));\n}\n''')
+
+          ap = 'packages/web/src/components/AdminPanel.tsx'
+          replace_once(ap,
+            "import { OtaDiagnosticsCard } from './admin/OtaDiagnosticsCard.js';\n",
+            "import { OtaDiagnosticsCard } from './admin/OtaDiagnosticsCard.js';\nimport { ADMIN_SAVED_EVENT, notifyAdminSaved, type AdminSavedDetail } from '../lib/adminDirtyState.js';\n")
+          replace_once(ap,
+            "      setPersona(r.persona);\n      onNotice('人设已保存');",
+            "      setPersona(r.persona);\n      notifyAdminSaved('persona');\n      onNotice('人设已保存');")
+          replace_once(ap,
+            '<form className="admin-form-card" data-testid="admin-persona-form" onSubmit={save}>',
+            '<form className="admin-form-card" data-testid="admin-persona-form" data-admin-dirty-scope="persona" onSubmit={save}>')
+          replace_once(ap,
+            "      setBehavior(await adminApi.updateVoiceBehavior({ enabled: behavior.enabled, maxVoiceSeconds: behavior.maxVoiceSeconds }));\n      onNotice('语音行为已保存');",
+            "      setBehavior(await adminApi.updateVoiceBehavior({ enabled: behavior.enabled, maxVoiceSeconds: behavior.maxVoiceSeconds }));\n      notifyAdminSaved('voice-behavior');\n      onNotice('语音行为已保存');")
+          replace_once(ap,
+            '<section className="admin-form-card" data-testid="voice-behavior-settings">',
+            '<section className="admin-form-card" data-testid="voice-behavior-settings" data-admin-dirty-scope="voice-behavior">')
+          replace_once(ap,
+            "      setDraft(null);\n      setEditingId(null);\n      onNotice(message);",
+            "      setDraft(null);\n      setEditingId(null);\n      if (message === '预设已更新' || message === '预设已添加') notifyAdminSaved('model-library');\n      onNotice(message);")
+          replace_once(ap,
+            '<section className="admin-model-library" data-testid="admin-model-library">',
+            '<section className="admin-model-library" data-testid="admin-model-library" data-admin-dirty-scope="model-library">')
+          replace_once(ap,
+            "      onApplied(result.models);\n      onNotice(`已把「${preset.name}」指派给${SLOT_LABELS[preset.slot]}`);",
+            "      onApplied(result.models);\n      notifyAdminSaved('models-config');\n      onNotice(`已把「${preset.name}」指派给${SLOT_LABELS[preset.slot]}`);")
+          replace_once(ap,
+            "function ModelsPanel({ onNotice, onSaved }: { onNotice: (v: string) => void; onSaved: () => void }) {",
+            "function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {")
+          replace_once(ap,
+            "      onSaved();\n      onNotice(typed ? '模型配置与密钥已保存' : '模型配置已保存');",
+            "      notifyAdminSaved('models-config');\n      onNotice(typed ? '模型配置与密钥已保存' : '模型配置已保存');")
+          replace_once(ap,
+            '            onSaved={(next) => { setModels(next); onSaved(); }}',
+            "            onSaved={(next) => { setModels(next); notifyAdminSaved('models-config'); }}")
+          replace_once(ap,
+            '<div className="admin-form-card">\n        {selected === \'webSearch\' ? <>',
+            '<div className="admin-form-card" data-admin-dirty-scope="models-config">\n        {selected === \'webSearch\' ? <>')
+          replace_once(ap,
+            '<section className="admin-card admin-form-wide" data-testid="admin-tts-preview">',
+            '<section className="admin-card admin-form-wide" data-testid="admin-tts-preview" data-admin-dirty-ignore="true">')
+          replace_once(ap,
+            "      onNotice(`已保存「${sticker.name}」的语义`);\n      await onDone();",
+            "      onNotice(`已保存「${sticker.name}」的语义`);\n      await onDone();\n      notifyAdminSaved(`sticker:${sticker.id}`);")
+          replace_once(ap,
+            '<div className="admin-sticker-row" data-testid={`admin-sticker-${sticker.id}`}>',
+            '<div className="admin-sticker-row" data-testid={`admin-sticker-${sticker.id}`} data-admin-dirty-scope={`sticker:${sticker.id}`}>')
+          replace_once(ap,
+            "  const [dirty, setDirty] = useState(false);\n  const dirtyRef = useRef(false);",
+            "  const [dirty, setDirty] = useState(false);\n  const dirtyRef = useRef(false);\n  const dirtyScopesRef = useRef<Set<string>>(new Set());")
+          replace_once(ap,
+            "  const setDirtyState = useCallback((value: boolean) => {\n    dirtyRef.current = value;\n    setDirty(value);\n  }, []);",
+            "  const setDirtyState = useCallback((value: boolean) => {\n    if (!value) dirtyScopesRef.current.clear();\n    else if (dirtyScopesRef.current.size === 0) dirtyScopesRef.current.add('page');\n    dirtyRef.current = value;\n    setDirty(value);\n  }, []);\n\n  const markDirtyScope = useCallback((scope: string) => {\n    dirtyScopesRef.current.add(scope);\n    dirtyRef.current = true;\n    setDirty(true);\n  }, []);\n\n  const clearDirtyScope = useCallback((scope: string) => {\n    dirtyScopesRef.current.delete(scope);\n    const next = dirtyScopesRef.current.size > 0;\n    dirtyRef.current = next;\n    setDirty(next);\n  }, []);\n\n  useEffect(() => {\n    const onSaved = (event: Event) => {\n      const detail = (event as CustomEvent<AdminSavedDetail>).detail;\n      if (detail?.scope) clearDirtyScope(detail.scope);\n    };\n    window.addEventListener(ADMIN_SAVED_EVENT, onSaved);\n    return () => window.removeEventListener(ADMIN_SAVED_EVENT, onSaved);\n  }, [clearDirtyScope]);")
+          replace_once(ap,
+            '? <ModelsPanel onNotice={setNotice} onSaved={() => setDirtyState(false)} />',
+            '? <ModelsPanel onNotice={setNotice} />')
+          replace_once(ap,
+            "    <main className=\"admin-page admin-v2\" data-testid=\"admin-dashboard\" data-dirty={dirty || undefined} onInputCapture={(event) => {\n      const target = event.target as HTMLInputElement;\n      if (target instanceof HTMLInputElement && target.type === 'file') return;\n      if (target.closest('.admin-content-management, .admin-mcp-page')) return;\n      setDirtyState(true);\n    }} onSubmitCapture={() => setDirtyState(false)}>",
+            "    <main className=\"admin-page admin-v2\" data-testid=\"admin-dashboard\" data-dirty={dirty || undefined} onInputCapture={(event) => {\n      const target = event.target as HTMLElement;\n      if (target instanceof HTMLInputElement && target.type === 'file') return;\n      if (target.closest('.admin-content-management, .admin-mcp-page, [data-admin-dirty-ignore]')) return;\n      const scope = target.closest<HTMLElement>('[data-admin-dirty-scope]')?.dataset.adminDirtyScope ?? 'page';\n      markDirtyScope(scope);\n    }}>")
+
+          fp = 'packages/web/src/components/FeatureAdminPage.tsx'
+          replace_once(fp,
+            "import { useAuthenticatedMedia, type AuthenticatedMediaState } from '../lib/useAuthenticatedMedia.js';\n",
+            "import { useAuthenticatedMedia, type AuthenticatedMediaState } from '../lib/useAuthenticatedMedia.js';\nimport { notifyAdminSaved } from '../lib/adminDirtyState.js';\n")
+          replace_once(fp,
+            '<section className="admin-form-card" data-testid="storage-settings">',
+            '<section className="admin-form-card" data-testid="storage-settings" data-admin-dirty-scope="storage-policy">')
+          replace_once(fp,
+            "featureApi.updateStorage(policy).then(() => { void load(); onNotice('存储策略已保存'); })",
+            "featureApi.updateStorage(policy).then(() => { void load(); notifyAdminSaved('storage-policy'); onNotice('存储策略已保存'); })")
+
+          life = 'packages/web/src/components/life/LifeContactBoundaryForm.tsx'
+          replace_once(life,
+            "import { contactBoundaryPayload } from '../../lib/lifeObservation.js';\n",
+            "import { contactBoundaryPayload } from '../../lib/lifeObservation.js';\nimport { notifyAdminSaved } from '../../lib/adminDirtyState.js';\n")
+          replace_once(life,
+            "      setDirty(false);\n      onNotice('动态设置已保存');",
+            "      setDirty(false);\n      notifyAdminSaved('life-boundaries');\n      onNotice('动态设置已保存');")
+          replace_once(life,
+            '<form id="life-boundaries-panel" className="life-boundary-form" onSubmit={(event) => void submit(event)}>',
+            '<form id="life-boundaries-panel" className="life-boundary-form" data-admin-dirty-scope="life-boundaries" onSubmit={(event) => void submit(event)}>')
+
+          test = 'packages/web/src/components/AdminPanel.test.tsx'
+          marker = "  it('联网搜索位于现有模型配置的能力列表中', async () => {"
+          addition = r'''  it('同一页多个编辑区只清除真正保存成功的那一块', async () => {
+    window.history.replaceState(null, '', '/admin/persona');
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(<AdminPanel initialTab="persona" />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const dashboard = container.querySelector('[data-testid="admin-dashboard"]')!;
+    const personaName = container.querySelector('[data-testid="admin-persona-form"] input') as HTMLInputElement;
+    const voiceSeconds = container.querySelector('[data-testid="voice-behavior-settings"] input[type="number"]') as HTMLInputElement;
+    const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+    await act(async () => {
+      inputSetter.call(personaName, 'SOOYA 2');
+      personaName.dispatchEvent(new Event('input', { bubbles: true }));
+      personaName.dispatchEvent(new Event('change', { bubbles: true }));
+      inputSetter.call(voiceSeconds, '40');
+      voiceSeconds.dispatchEvent(new Event('input', { bubbles: true }));
+      voiceSeconds.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(dashboard.getAttribute('data-dirty')).toBe('true');
+
+    const saveVoice = [...container.querySelectorAll('button')].find((item) => item.textContent?.includes('保存语音行为'))!;
+    await act(async () => { saveVoice.click(); await Promise.resolve(); await Promise.resolve(); });
+    expect(dashboard.getAttribute('data-dirty')).toBe('true');
+
+    const savePersona = [...container.querySelectorAll('button')].find((item) => item.textContent?.includes('保存人设'))!;
+    await act(async () => { savePersona.click(); await Promise.resolve(); await Promise.resolve(); });
+    expect(dashboard.hasAttribute('data-dirty')).toBe(false);
+  });
+
+'''
+          p = Path(test)
+          text = p.read_text()
+          if marker not in text:
+              raise SystemExit('AdminPanel test insertion marker missing')
+          p.write_text(text.replace(marker, addition + marker, 1))
+
+          Path('packages/web/src/nativeLayout.test.ts').write_text(r'''// @vitest-environment node
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it } from 'vitest';
+
+describe('native iOS chat layout contract', () => {
+  it('lets Capacitor own safe-area insets and fills the resized body', async () => {
+    const css = await readFile(fileURLToPath(new URL('./native.css', import.meta.url)), 'utf8');
+    expect(css).toMatch(/html\.sooya-native\s*\{[\s\S]*--sooya-safe-top:\s*0px;[\s\S]*--sooya-safe-bottom:\s*0px;/u);
+    expect(css).toMatch(/html\.sooya-native \.app\s*\{[\s\S]*height:\s*100%;[\s\S]*min-height:\s*0;/u);
+    expect(css).toMatch(/html\.sooya-native \.messages\s*\{[\s\S]*overflow-anchor:\s*none;[\s\S]*scroll-behavior:\s*auto;/u);
+  });
+});
+''')
+          PY
+          git diff --check
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test -w @sooya/web
+      - run: npm run build
+      - name: Commit verified fix
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add packages/web/src/native.css packages/web/src/nativeLayout.test.ts packages/web/src/lib/adminDirtyState.ts packages/web/src/components/AdminPanel.tsx packages/web/src/components/AdminPanel.test.tsx packages/web/src/components/FeatureAdminPage.tsx packages/web/src/components/life/LifeContactBoundaryForm.tsx
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix(ui): stabilize native chat layout and scoped save state'
+          git push origin HEAD:main
