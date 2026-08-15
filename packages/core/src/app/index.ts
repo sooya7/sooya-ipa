@@ -7,6 +7,7 @@ export type { ReplyCoordinatorOptions } from './reply-coordinator.js';
 export { MediaDirector, fallbackImagePrompt, sanitizeFishText, parseJsonLoose } from './media-director.js';
 export type { VoiceDirectorIntent, VoiceDirectorResult, ImageDirectorIntent, ImageDirectorResult, VoiceDirectorOptions } from './media-director.js';
 export type { DirectorDecoder, DirectorEvent, DirectorRunRequest, DirectorRunResult, DirectorTask } from './director/types.js';
+export { StaleGenerationError } from './stale-generation.js';
 export { installReplyFeatureRuntime, currentReplyFeatureRuntime } from './reply-feature-runtime.js';
 export type { ReplyFeatureRuntime } from './reply-feature-runtime.js';
 export { parseUserDirectives, stripModelDirectives, stripThinking, stripPrivateContextEcho, StreamingDirectiveFilter } from './directives.js';

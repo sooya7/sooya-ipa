@@ -14,16 +14,20 @@ describe('reply media runtime contract', () => {
     expect(source).toContain("this.failImage(result, messageId, context, { stage: stageOf(error, 'generation')");
   });
 
-  it('emits image generation lifecycle before the real provider call', async () => {
+  it('emits image generation lifecycle after the director and before the real provider call', async () => {
     const source = await readFile(new URL('./reply-coordinator.ts', import.meta.url), 'utf8');
+    const directorCall = source.indexOf('await this.options.mediaDirector.image(');
     const started = source.indexOf("this.options.emit('reply.image.generating'");
-    const generated = source.indexOf('await provider.generate(imagePrompt');
+    const generated = source.indexOf('await provider.generate(finalImagePrompt');
 
-    expect(started).toBeGreaterThan(-1);
+    expect(directorCall).toBeGreaterThan(-1);
+    expect(started).toBeGreaterThan(directorCall);
     expect(generated).toBeGreaterThan(started);
     expect(source).toContain("this.options.emit('reply.media.created', { batchId, revision, messageId, type: 'image'");
     expect(source).toContain("this.options.emit('reply.media.failed'");
-    expect(source).toContain("const stage = pipeline?.stage ?? input.stage;");
+    expect(source).toContain('const stage = pipeline?.stage ?? input.stage;');
+    // A stale revision after the save must destroy the orphan instead of attaching it.
+    expect(source).toContain('runtime.media.destroy?.(record.id)');
   });
 
   it('retires the active generation before completed events and memory post-processing', async () => {

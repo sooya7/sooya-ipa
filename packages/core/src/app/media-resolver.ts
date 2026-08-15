@@ -11,6 +11,7 @@ export interface MediaLocationRow {
 type MediaCatalog = {
   get(id: string): Promise<MediaLocationRow | undefined>;
   create(input: CreateMediaInput): Promise<MediaRow>;
+  delete(id: string): Promise<boolean>;
 };
 
 /**
@@ -47,6 +48,7 @@ export class LocalMediaResolver implements MediaPlatform {
         width: saved.width ?? null,
         height: saved.height ?? null,
         duration: saved.durationSec ?? null,
+        transcript: request.transcript ?? null,
         origin: 'generated',
         meta: {
           ...(request.metadata ?? {}),
@@ -81,6 +83,20 @@ export class LocalMediaResolver implements MediaPlatform {
     const row = await this.repo.get(id);
     if (!row) return false;
     return await this.backing.remove(row.origin === 'builtin' ? row.id : row.rel_path);
+  }
+
+  /**
+   * Orphan cleanup for generated artifacts that lost their revision race
+   * after save(): remove() only deletes the physical file (gallery trash
+   * flows still own the row), so a stale-but-persisted media needs both the
+   * backing file and the catalog row gone before the error propagates.
+   */
+  async destroy(id: string): Promise<boolean> {
+    const row = await this.repo.get(id);
+    if (!row) return false;
+    await this.backing.remove(row.origin === 'builtin' ? row.id : row.rel_path).catch(() => false);
+    await this.repo.delete(id).catch(() => undefined);
+    return true;
   }
 }
 

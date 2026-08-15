@@ -53,7 +53,8 @@ function repo(rows: Array<MediaLocationRow | undefined>) {
   const byId = new Map(rows.filter((row): row is MediaLocationRow => row !== undefined).map((row) => [row.id, row]));
   return {
     get: vi.fn(async (id: string) => byId.get(id)),
-    create: vi.fn(async (input: CreateMediaInput) => generatedRow(input))
+    create: vi.fn(async (input: CreateMediaInput) => generatedRow(input)),
+    delete: vi.fn(async (id: string) => byId.delete(id))
   };
 }
 
@@ -147,5 +148,27 @@ describe('LocalMediaResolver', () => {
       { op: 'save', arg: 'sooya.mp3' },
       { op: 'remove', arg: '11111111-2222-3333-4444-555555555555' }
     ]);
+  });
+
+  it('destroy removes both the backing file and the catalog row (orphan cleanup)', async () => {
+    const backing = backingStore();
+    const catalog = repo([fakeRow()]);
+    const resolver = new LocalMediaResolver(catalog, backing);
+
+    expect(await resolver.destroy('media_1')).toBe(true);
+    expect(backing.calls).toEqual([{ op: 'remove', arg: '11111111-2222-3333-4444-555555555555' }]);
+    expect(catalog.delete).toHaveBeenCalledWith('media_1');
+    expect(await resolver.destroy('media_missing')).toBe(false);
+    expect(catalog.delete).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists the spoken transcript on generated audio rows', async () => {
+    const backing = backingStore();
+    const catalog = repo([]);
+    const resolver = new LocalMediaResolver(catalog, backing);
+
+    await resolver.save({ kind: 'audio', data: new Uint8Array([1]), mime: 'audio/mpeg', name: 'sooya.mp3', transcript: '早点休息', metadata: { generated: true } });
+
+    expect(catalog.create).toHaveBeenCalledWith(expect.objectContaining({ transcript: '早点休息' }));
   });
 });

@@ -1,7 +1,7 @@
 import type { MemoryProvider } from '../memory/types.js';
 import type { MessageRepo } from '../db/message.repo.js';
 import type { ReplyBatchRepo } from '../db/reply-batch.repo.js';
-import { ImagePipelineError, ProviderRequestError, type ChatChunk, type ChatContentPart, type ChatProvider, type ChatRequest, type ChatTurn, type GeneratedImage, type ImagePipelineStage } from '../providers/types.js';
+import { ImageEditUnsupportedError, ImagePipelineError, ProviderRequestError, type ChatChunk, type ChatContentPart, type ChatProvider, type ChatRequest, type ChatTurn, type GeneratedImage, type ImagePipelineStage } from '../providers/types.js';
 import type { ToolCallRuntime } from '../tools/tool-runtime.js';
 import type { ConfiguredWebSearch, WebSearchResult } from '../providers/web-search.js';
 import { formatWebSearchContext, webSearchPartMeta } from '../providers/web-search.js';
@@ -9,6 +9,8 @@ import type { ChatMessage } from './types.js';
 import type { ContextBuilder } from './context-builder.js';
 import { currentReplyFeatureRuntime, type ReplyFeatureRuntime } from './reply-feature-runtime.js';
 import type { MediaDirector } from './media-director.js';
+import { fallbackImagePrompt } from './media-director.js';
+import { StaleGenerationError } from './stale-generation.js';
 import { parseUserDirectives, StreamingDirectiveFilter, stripModelDirectives, type ModelDirectives, type UserDirectives } from './directives.js';
 import { buildImageFallbackPrompt, stripModelMediaExecutionClaims } from './reply-media-policy.js';
 import { decideWebSearch } from './web-search-policy.js';
@@ -168,7 +170,7 @@ export class ReplyCoordinator {
       const semanticText = stripModelMediaExecutionClaims(rawSemanticText, Boolean(userDirectives.wantImage || userDirectives.wantVoice));
       const directives = mergeDirectives(userDirectives, stripped.directives, buildImageFallbackPrompt(userDirectives, recent, latestUser));
       visibleText = directives.voiceOnly || directives.stickerOnly ? '' : semanticText;
-      const media = await this.appendRequestedMedia(assistantId, semanticText, directives, controller.signal, { batchId, revision });
+      const media = await this.appendRequestedMedia(assistantId, semanticText, directives, controller.signal, { batchId, revision, sourceMessages });
       if (!visibleText.trim() && media.appended === 0 && media.imageAttempted && media.imageFailed) visibleText = IMAGE_FAILURE_FALLBACK_TEXT;
       await this.options.messages.updatePart(partId, { text: visibleText });
       if (!visibleText.trim() && media.appended === 0) throw new Error('provider returned an empty reply');
@@ -186,7 +188,7 @@ export class ReplyCoordinator {
       this.options.emit('message.received', { message: assistant }); this.options.emit('reply.completed', { batchId, revision, message: assistant, model: result.model });
       void this.commitMemory(batchId, revision, latestUser, semanticText, controller.signal).catch((error) => { if (!controller.signal.aborted) this.options.emit('memory.commit.failed', { batchId, revision, error: error instanceof Error ? error.message : String(error) }); });
     } catch (error) {
-      const superseded = error instanceof SupersededReplyError || controller.signal.aborted;
+      const superseded = error instanceof SupersededReplyError || error instanceof StaleGenerationError || controller.signal.aborted;
       if (assistantId) await this.options.messages.setStatus(assistantId, 'failed', superseded ? 'superseded' : errorMessage(error)).catch(() => undefined);
       if (superseded) { await this.options.batches.supersede(batchId, revision).catch(() => undefined); this.options.emit('reply.interrupted', { batchId, revision, reason: 'superseded' }); }
       else { const message = errorMessage(error); await this.options.batches.fail(batchId, message, revision, 'provider_failed').catch(() => undefined); this.options.emit('reply.failed', { batchId, revision, error: message.slice(0, 500) }); }
@@ -195,10 +197,10 @@ export class ReplyCoordinator {
 
   async recover(): Promise<void> { const open = await this.options.batches.latestOpen(); if (open) this.schedule(open.id, open.revision); }
 
-  private async appendRequestedMedia(messageId: string, text: string, directives: EffectiveDirectives, signal: AbortSignal, context: { batchId: string; revision: number }): Promise<MediaAppendResult> {
+  private async appendRequestedMedia(messageId: string, text: string, directives: EffectiveDirectives, signal: AbortSignal, context: { batchId: string; revision: number; sourceMessages: ChatMessage[] }): Promise<MediaAppendResult> {
     const result: MediaAppendResult = { appended: 0, imageAttempted: false, imageFailed: false };
     if (signal.aborted) return result;
-    const { batchId, revision } = context;
+    const { batchId, revision, sourceMessages } = context;
     const runtime = this.runtime();
     const imagePrompt = directives.selfImagePrompt ?? directives.imagePrompt;
     if (!runtime) {
@@ -214,42 +216,109 @@ export class ReplyCoordinator {
         if (!provider?.configured) {
           await this.failImage(result, messageId, context, { stage: 'generation', error: new Error('image provider is not configured'), provider: provider?.name, prompt: imagePrompt, selfImage: Boolean(directives.selfImagePrompt) });
         } else {
-          this.options.emit('reply.image.generating', { batchId, revision, messageId, type: 'image', provider: provider.name });
-          let references: Array<{ data: Uint8Array; mime: string }> | undefined;
-          if (directives.selfImagePrompt) {
+          // Image Director: the model's intent becomes a quality prompt before
+          // it reaches the provider (server parity). Editing a user-sent image
+          // skips the director — the user's instruction is already precise.
+          const userImageParts = sourceMessages
+            .filter((message) => message.role === 'user')
+            .flatMap((message) => message.content.filter((part) => part.type === 'image' && part.mediaId).map((part) => part.mediaId!));
+          const editingUserImage = userImageParts.length === 1;
+          const directorIntent = directives.selfImagePrompt ? 'selfie' : 'private snapshot';
+          let finalImagePrompt = imagePrompt;
+          let aspectRatio: string | undefined;
+          if (!editingUserImage && this.options.mediaDirector) {
             try {
-              references = await runtime.referenceImages?.(imagePrompt) ?? [];
+              const expanded = await this.options.mediaDirector.image({ scene: imagePrompt.slice(0, 400), intent: directorIntent }, { signal });
+              if (expanded.prompt.trim()) finalImagePrompt = expanded.prompt.trim();
+              aspectRatio = expanded.aspectRatio;
             } catch (error) {
+              // An aborted/superseded director call must not degrade into a
+              // fallback generation: the reply it belonged to is already gone.
+              if (isInterruption(error, signal)) throw error;
+              finalImagePrompt = fallbackImagePrompt({ scene: imagePrompt.slice(0, 400), intent: directorIntent });
+            }
+          }
+          this.options.emit('reply.image.generating', { batchId, revision, messageId, type: 'image', provider: provider.name, editingUserImage });
+          let references: Array<{ data: Uint8Array; mime: string }> | undefined;
+          let referenceMediaId: string | undefined;
+          if (!editingUserImage && directives.selfImagePrompt) {
+            try {
+              // Framing follows the director-expanded prompt, not the raw
+              // intent: "全身照" only becomes full-body after expansion.
+              references = await runtime.referenceImages?.(finalImagePrompt) ?? [];
+            } catch (error) {
+              if (isInterruption(error, signal)) throw error;
               await this.failImage(result, messageId, context, { stage: stageOf(error, 'reference_read'), error, provider: provider.name, prompt: imagePrompt, selfImage: Boolean(directives.selfImagePrompt) });
               return result;
             }
           }
           const startedAt = Date.now();
           let generated: GeneratedImage;
+          if (editingUserImage) {
+            const read = await runtime.media.read(userImageParts[0]!).catch(() => null);
+            if (!read) {
+              await this.failImage(result, messageId, context, { stage: 'reference_read', error: new Error('参考图不可用，请重新上传后再试'), provider: provider.name, prompt: imagePrompt, selfImage: false });
+              return result;
+            }
+            referenceMediaId = userImageParts[0];
+            try {
+              // Server parity: editing a user-sent image keeps the user's
+              // instruction verbatim; providers without a safe edit endpoint
+              // degrade to a plain text-to-image generation.
+              generated = await provider.edit(finalImagePrompt, read.data, { mime: read.record.mime, signal });
+            } catch (error) {
+              if (isInterruption(error, signal) || !(error instanceof ImageEditUnsupportedError)) throw error;
+              try {
+                generated = await provider.generate(finalImagePrompt, { signal });
+              } catch (generateError) {
+                if (isInterruption(generateError, signal)) throw generateError;
+                await this.failImage(result, messageId, context, { stage: stageOf(generateError, 'generation'), error: generateError, provider: provider.name, elapsedMs: Date.now() - startedAt, prompt: imagePrompt, selfImage: false });
+                return result;
+              }
+            }
+          } else {
+            try {
+              generated = await provider.generate(finalImagePrompt, { signal, ...(references?.length ? { referenceImages: references } : {}) });
+            } catch (error) {
+              if (isInterruption(error, signal)) throw error;
+              await this.failImage(result, messageId, context, {
+                stage: stageOf(error, 'generation'),
+                error,
+                provider: provider.name,
+                elapsedMs: Date.now() - startedAt,
+                referenceCount: references?.length ?? 0,
+                prompt: imagePrompt,
+                selfImage: Boolean(directives.selfImagePrompt)
+              });
+              return result;
+            }
+          }
+          let record: Awaited<ReturnType<typeof runtime.media.save>>;
           try {
-            generated = await provider.generate(imagePrompt, { signal, ...(references?.length ? { referenceImages: references } : {}) });
+            record = await runtime.media.save({ kind: 'image', data: generated.data, mime: generated.mime, name: `sooya-${Date.now()}.image`, metadata: { prompt: imagePrompt, provider: provider.name, generated: true, selfImage: Boolean(directives.selfImagePrompt) } });
           } catch (error) {
-            await this.failImage(result, messageId, context, {
-              stage: stageOf(error, 'generation'),
-              error,
-              provider: provider.name,
-              elapsedMs: Date.now() - startedAt,
-              referenceCount: references?.length ?? 0,
-              prompt: imagePrompt,
-              selfImage: Boolean(directives.selfImagePrompt)
-            });
+            if (isInterruption(error, signal)) throw error;
+            await this.failImage(result, messageId, context, { stage: stageOf(error, 'media_save'), error, provider: provider.name, prompt: imagePrompt, selfImage: Boolean(directives.selfImagePrompt) });
             return result;
           }
+          // Fence after long-running generation: a stale image must never
+          // attach to a reply it no longer belongs to, and the just-saved
+          // artifact must not survive as an orphan (file + catalog row).
+          if (signal.aborted || await this.options.batches.currentRevision(batchId) !== revision) {
+            await runtime.media.destroy?.(record.id).catch(() => undefined);
+            throw new StaleGenerationError('image revision stale before publish');
+          }
           try {
-            const record = await runtime.media.save({ kind: 'image', data: generated.data, mime: generated.mime, name: `sooya-${Date.now()}.image`, metadata: { prompt: imagePrompt, provider: provider.name, generated: true } });
-            await this.options.messages.appendPart(messageId, { type: 'image', mediaId: record.id, meta: { prompt: imagePrompt, generated: true, selfImage: Boolean(directives.selfImagePrompt) } });
+            await this.options.messages.appendPart(messageId, { type: 'image', mediaId: record.id, meta: { prompt: imagePrompt, generated: true, selfImage: Boolean(directives.selfImagePrompt), ...(editingUserImage ? { editedUserImage: true, referenceMediaId } : {}), ...(aspectRatio ? { aspectRatio } : {}) } });
             this.options.emit('reply.media.created', { batchId, revision, messageId, type: 'image', mediaId: record.id, provider: provider.name });
             result.appended += 1;
           } catch (error) {
+            if (isInterruption(error, signal)) throw error;
             await this.failImage(result, messageId, context, { stage: stageOf(error, 'media_save'), error, provider: provider.name, prompt: imagePrompt, selfImage: Boolean(directives.selfImagePrompt) });
           }
         }
       } catch (error) {
+        if (isInterruption(error, signal)) throw error;
         await this.failImage(result, messageId, context, { stage: stageOf(error, 'generation'), error, prompt: imagePrompt, selfImage: Boolean(directives.selfImagePrompt) });
       }
     }
@@ -383,6 +452,15 @@ function mergeDirectives(user: UserDirectives, model: ModelDirectives, fallbackI
 }
 function appendDirectiveProtocol(system: string | undefined): string { return [system ?? '', '你可以在回复中使用私有多媒体标记，标记不会显示给用户：', '[[sticker:情绪或含义]] 发送表情包；[[image:画面描述]] 生成图片；[[image-self:自拍画面描述]] 生成你的自拍；[[voice]] 把本次文字同时转成语音；[[voice-only]] 只发语音；[[sticker-only:含义]] 只发表情包。', '只有确实需要多媒体时才使用标记，不要把标记解释给用户。', '多媒体 Provider 会在你的文本生成结束后由本地 Runtime 执行；你看不到它的配置状态、调用结果或错误。不要声称接口已调用、未配置、失败、成功、回传为空或通道不可用。用户明确要求图片时，只需提供真实画面意图/私有图片标记，绝不要用文字假装已经发图。'].filter(Boolean).join('\n'); }
 class SupersededReplyError extends Error { override name = 'SupersededReplyError'; }
+/** Aborts, revision-fence losses and superseded generations must never be
+ * swallowed into media fallbacks: the reply they belonged to is already gone.
+ * (Director timeouts are deliberately NOT interruptions — they degrade.) */
+function isInterruption(error: unknown, signal?: AbortSignal): boolean {
+  return Boolean(signal?.aborted)
+    || error instanceof StaleGenerationError
+    || error instanceof SupersededReplyError
+    || (error instanceof Error && error.name === 'AbortError');
+}
 function isMessage(value: ChatMessage | undefined): value is ChatMessage { return value !== undefined; }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500); }
 function stageOf(error: unknown, fallback: ImagePipelineStage): ImagePipelineStage { return error instanceof ImagePipelineError ? error.stage : fallback; }
