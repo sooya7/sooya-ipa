@@ -1,5 +1,7 @@
 name: OTA web bundle
 
+# Web-only admin/UI fixes are shipped by this OTA bundle and do not require a native reinstall.
+
 on:
   push:
     branches: [main]
