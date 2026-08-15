@@ -1,6 +1,7 @@
 import { Capacitor } from '@capacitor/core';
 import { Share } from '@capacitor/share';
 import { LATEST_SCHEMA_VERSION, migrateDatabase } from '@sooya/core/app';
+import type { DatabaseValue } from '@sooya/core/platform';
 import { CapacitorDatabase } from './nativeBoot.js';
 
 interface NativePluginCall {
@@ -38,15 +39,27 @@ interface RestoreResult {
 
 type DatabaseRow = Record<string, unknown>;
 
-interface PreservedMemoryState {
+interface PreservedLocalState {
+  // Hybrid memory is phone-local state synchronized with Ombre; the server
+  // migration archive deliberately contains no memory facts.
   memories: DatabaseRow[];
   syncState: DatabaseRow[];
   syncOutbox: DatabaseRow[];
   syncCursors: DatabaseRow[];
   tombstones: DatabaseRow[];
-  ombreServers: DatabaseRow[];
-  ombrePolicies: DatabaseRow[];
-  ombreSecretRefs: DatabaseRow[];
+  localMemoryReceipts: DatabaseRow[];
+
+  // These tables describe the IPA runtime, not server business data. Their
+  // Keychain values live outside SQLite and survive the restore, so the DB
+  // references/configuration must survive as well.
+  mcpServers: DatabaseRow[];
+  mcpPolicies: DatabaseRow[];
+  secretRefs: DatabaseRow[];
+  providerConfigs: DatabaseRow[];
+  appPreferences: DatabaseRow[];
+  notificationCapabilities: DatabaseRow[];
+  localUpdateState: DatabaseRow[];
+  localBackupMetadata: DatabaseRow[];
 }
 
 function nativePlugin(name: string): NativePluginCall {
@@ -94,23 +107,23 @@ export async function pickFullBackup(): Promise<PickedFullBackup | null> {
 
 /**
  * Normal IPA backup restores remain full replacements. A server migration ZIP
- * (SOOYA-server-to-IPA-*.zip) is different: chat/life/media come from the
- * server, while the phone keeps its already-configured Ombre memory state.
- * Server memories are intentionally absent from that archive.
+ * (SOOYA-server-to-IPA-*.zip) is different: server chat/life/media become the
+ * phone's business data, while IPA-local runtime configuration and hybrid
+ * memory state survive. Server memories/stickers are intentionally absent.
  */
 export async function importFullBackup(selected: PickedFullBackup, password?: string): Promise<PreparedFullImport> {
   const archive = nativePlugin('SOOYAArchive');
   const database = nativePlugin('SOOYADatabase');
   const serverMigration = /^SOOYA-server-to-IPA-/iu.test(selected.displayName);
   const localDb = serverMigration ? new CapacitorDatabase() : null;
-  let preservedMemory: PreservedMemoryState | null = null;
+  let preservedLocal: PreservedLocalState | null = null;
   let prepared: PreparedFullImport | null = null;
   let restore: RestoreResult | null = null;
 
   try {
     if (localDb) {
       await localDb.open();
-      preservedMemory = await captureMemoryState(localDb);
+      preservedLocal = await captureLocalState(localDb);
     }
 
     prepared = await archive.call<PreparedFullImport>('prepareFullImport', {
@@ -121,12 +134,11 @@ export async function importFullBackup(selected: PickedFullBackup, password?: st
 
     restore = await database.call<RestoreResult>('restore', { name: prepared.restoreName });
 
-    if (localDb && preservedMemory) {
+    if (localDb && preservedLocal) {
       // Server snapshots currently stop at schema v35. Bring the restored copy
-      // to the current IPA schema before putting the phone's hybrid memory state
-      // back. This also recreates mcp_servers and all v46 sync tables.
+      // to the current IPA schema before putting phone-local state back.
       await migrateDatabase(localDb);
-      await restoreMemoryState(localDb, preservedMemory);
+      await restoreLocalState(localDb, preservedLocal);
     }
 
     const integrity = await database.call<{ ok?: boolean }>('integrity', {});
@@ -147,51 +159,83 @@ export async function importFullBackup(selected: PickedFullBackup, password?: st
   }
 }
 
-async function captureMemoryState(db: CapacitorDatabase): Promise<PreservedMemoryState> {
-  const ombreServers = await db.query<DatabaseRow>("SELECT * FROM mcp_servers WHERE id='ombre'");
+async function captureLocalState(db: CapacitorDatabase): Promise<PreservedLocalState> {
   return {
     memories: await db.query<DatabaseRow>('SELECT * FROM memories'),
     syncState: await db.query<DatabaseRow>('SELECT * FROM memory_sync_state'),
     syncOutbox: await db.query<DatabaseRow>('SELECT * FROM memory_sync_outbox'),
     syncCursors: await db.query<DatabaseRow>('SELECT * FROM memory_sync_cursors'),
     tombstones: await db.query<DatabaseRow>('SELECT * FROM memory_tombstones'),
-    ombreServers,
-    ombrePolicies: await db.query<DatabaseRow>("SELECT * FROM mcp_tool_policies WHERE server_id='ombre'"),
-    ombreSecretRefs: ombreServers.length === 0
-      ? []
-      : await db.query<DatabaseRow>("SELECT * FROM secret_refs WHERE ref IN (SELECT secret_ref FROM mcp_servers WHERE id='ombre' AND secret_ref IS NOT NULL)")
+    localMemoryReceipts: await db.query<DatabaseRow>('SELECT * FROM local_memory_receipts'),
+    mcpServers: await db.query<DatabaseRow>('SELECT * FROM mcp_servers'),
+    mcpPolicies: await db.query<DatabaseRow>('SELECT * FROM mcp_tool_policies'),
+    secretRefs: await db.query<DatabaseRow>('SELECT * FROM secret_refs'),
+    providerConfigs: await db.query<DatabaseRow>('SELECT * FROM provider_configs'),
+    appPreferences: await db.query<DatabaseRow>('SELECT * FROM app_preferences'),
+    notificationCapabilities: await db.query<DatabaseRow>('SELECT * FROM notification_capabilities'),
+    localUpdateState: await db.query<DatabaseRow>('SELECT * FROM local_update_state'),
+    localBackupMetadata: await db.query<DatabaseRow>('SELECT * FROM local_backup_metadata')
   };
 }
 
-async function restoreMemoryState(db: CapacitorDatabase, state: PreservedMemoryState): Promise<void> {
-  // The server migration archive intentionally contains no memory facts. Clear
-  // anything unexpected before restoring the phone's authoritative local copy.
-  await db.run('DELETE FROM memories');
+async function restoreLocalState(db: CapacitorDatabase, state: PreservedLocalState): Promise<void> {
+  // The migration archive intentionally contains no server memory facts. Restore
+  // the phone's local copy, including unsynced outbox/conflict/cursor state.
+  await clearTables(db, [
+    'memory_sync_outbox', 'memory_sync_state', 'memory_sync_cursors', 'memory_tombstones',
+    'local_memory_receipts', 'memories'
+  ]);
   await insertRows(db, 'memories', state.memories);
+  await insertRows(db, 'local_memory_receipts', state.localMemoryReceipts);
   await insertRows(db, 'memory_sync_state', state.syncState);
   await insertRows(db, 'memory_sync_outbox', state.syncOutbox);
   await insertRows(db, 'memory_sync_cursors', state.syncCursors);
   await insertRows(db, 'memory_tombstones', state.tombstones);
 
-  // Keychain values survive database restore. Reinstall only the DB references
-  // and Ombre MCP row/policies that point at those existing native secrets.
-  await db.run("DELETE FROM mcp_tool_policies WHERE server_id='ombre'");
-  await db.run("DELETE FROM mcp_servers WHERE id='ombre'");
-  await insertRows(db, 'secret_refs', state.ombreSecretRefs);
-  await insertRows(db, 'mcp_servers', state.ombreServers);
-  await insertRows(db, 'mcp_tool_policies', state.ombrePolicies);
+  // Preserve all IPA-local provider/MCP/OTA preferences, not just Ombre. The
+  // corresponding Keychain secrets are outside the SQLite file and were never
+  // touched by the server migration restore.
+  await clearTables(db, [
+    'mcp_tool_policies', 'mcp_servers', 'secret_refs', 'provider_configs',
+    'app_preferences', 'notification_capabilities', 'local_update_state',
+    'local_backup_metadata'
+  ]);
+  await insertRows(db, 'secret_refs', state.secretRefs);
+  await insertRows(db, 'mcp_servers', state.mcpServers);
+  await insertRows(db, 'mcp_tool_policies', state.mcpPolicies);
+  await insertRows(db, 'provider_configs', state.providerConfigs);
+  await insertRows(db, 'app_preferences', state.appPreferences);
+  await insertRows(db, 'notification_capabilities', state.notificationCapabilities);
+  await insertRows(db, 'local_update_state', state.localUpdateState);
+  await insertRows(db, 'local_backup_metadata', state.localBackupMetadata);
 
   try { await db.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')"); } catch { /* derived index; startup can rebuild later */ }
+}
+
+async function clearTables(db: CapacitorDatabase, tables: string[]): Promise<void> {
+  for (const table of tables) {
+    assertIdentifier(table);
+    await db.run(`DELETE FROM ${table}`);
+  }
 }
 
 async function insertRows(db: CapacitorDatabase, table: string, rows: DatabaseRow[]): Promise<void> {
   if (rows.length === 0) return;
   const columns = Object.keys(rows[0]!);
   if (columns.length === 0) return;
-  const identifier = /^[a-z_][a-z0-9_]*$/iu;
-  if (!identifier.test(table) || columns.some((column) => !identifier.test(column))) throw new Error('不安全的数据库列名');
+  assertIdentifier(table);
+  for (const column of columns) assertIdentifier(column);
   const sql = `INSERT OR REPLACE INTO ${table} (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`;
   for (const row of rows) {
-    await db.run(sql, columns.map((column) => row[column]) as never[]);
+    await db.run(sql, columns.map((column) => asDatabaseValue(row[column])));
   }
+}
+
+function assertIdentifier(value: string): void {
+  if (!/^[a-z_][a-z0-9_]*$/iu.test(value)) throw new Error('不安全的数据库标识符');
+}
+
+function asDatabaseValue(value: unknown): DatabaseValue {
+  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint' || typeof value === 'boolean' || value instanceof Uint8Array || value instanceof ArrayBuffer) return value;
+  throw new Error(`无法恢复的数据库值类型：${Object.prototype.toString.call(value)}`);
 }
