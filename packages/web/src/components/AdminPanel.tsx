@@ -13,6 +13,7 @@ import { WebSearchModelEditor } from './WebSearchModelEditor.js';
 import { McpAdminPage } from './admin/McpAdminPage.js';
 import { ContentManagementPage } from './admin/ContentManagementPage.js';
 import { OtaDiagnosticsCard } from './admin/OtaDiagnosticsCard.js';
+import { ADMIN_SAVED_EVENT, notifyAdminSaved, type AdminSavedDetail } from '../lib/adminDirtyState.js';
 import {
   interfaceOptions,
   MODEL_SLOTS,
@@ -256,6 +257,7 @@ function PersonaPanel({ onNotice }: { onNotice: (v: string) => void }) {
         language: persona.language
       });
       setPersona(r.persona);
+      notifyAdminSaved('persona');
       onNotice('人设已保存');
     } catch (err) {
       onNotice(errorText(err));
@@ -266,7 +268,7 @@ function PersonaPanel({ onNotice }: { onNotice: (v: string) => void }) {
   if (!persona) return null;
 
   return (
-    <form className="admin-form-card" data-testid="admin-persona-form" onSubmit={save}>
+    <form className="admin-form-card" data-testid="admin-persona-form" data-admin-dirty-scope="persona" onSubmit={save}>
       <PanelHeading title="助手人设" description="这些内容会直接影响助手的身份、语气和回复方式。" />
       <label>名称<input value={persona.name} onChange={(e) => setPersona({ ...persona, name: e.target.value })} /></label>
       <label>状态文字<input value={persona.tagline} onChange={(e) => setPersona({ ...persona, tagline: e.target.value })} /></label>
@@ -293,13 +295,14 @@ function VoiceBehaviorEditor({ onNotice }: { onNotice: (v: string) => void }) {
   const save = async () => {
     try {
       setBehavior(await adminApi.updateVoiceBehavior({ enabled: behavior.enabled, maxVoiceSeconds: behavior.maxVoiceSeconds }));
+      notifyAdminSaved('voice-behavior');
       onNotice('语音行为已保存');
     } catch (e) {
       onNotice(errorText(e));
     }
   };
   return (
-    <section className="admin-form-card" data-testid="voice-behavior-settings">
+    <section className="admin-form-card" data-testid="voice-behavior-settings" data-admin-dirty-scope="voice-behavior">
       <div className="admin-panel-heading"><div><h2>语音行为</h2><p>她什么时候发语音由模型判断与你的使用偏好共同决定；这里只保留最基础的两个开关。音色、接口和语速在「模型配置 → 语音合成」里设置。</p></div></div>
       <label><span>启用语音</span><input type="checkbox" checked={behavior.enabled} onChange={(e) => setBehavior({ ...behavior, enabled: e.target.checked })} /></label>
       <label>单条语音最大长度（秒）<input type="number" min={5} max={120} value={behavior.maxVoiceSeconds} onChange={(e) => setBehavior({ ...behavior, maxVoiceSeconds: Number(e.target.value) })} /></label>
@@ -332,6 +335,7 @@ function ModelLibrary({ onNotice, onApplied, reloadKey = 0 }: { onNotice: (v: st
       setPresets(saved.presets);
       setDraft(null);
       setEditingId(null);
+      if (message === '预设已更新' || message === '预设已添加') notifyAdminSaved('model-library');
       onNotice(message);
     } catch (e) {
       onNotice(errorText(e));
@@ -355,6 +359,7 @@ function ModelLibrary({ onNotice, onApplied, reloadKey = 0 }: { onNotice: (v: st
     try {
       const result = await adminApi.applyModelPreset(preset.id);
       onApplied(result.models);
+      notifyAdminSaved('models-config');
       onNotice(`已把「${preset.name}」指派给${SLOT_LABELS[preset.slot]}`);
     } catch (e) {
       onNotice(errorText(e));
@@ -377,7 +382,7 @@ function ModelLibrary({ onNotice, onApplied, reloadKey = 0 }: { onNotice: (v: st
   const groups = presetsBySlot(presets);
 
   return (
-    <section className="admin-model-library" data-testid="admin-model-library">
+    <section className="admin-model-library" data-testid="admin-model-library" data-admin-dirty-scope="model-library">
       <PanelHeading title="模型库" description="保存模型及其服务器端密钥绑定，指派时一起切换；密钥不会返回浏览器。旧预设仍沿用该能力当前的密钥。" />
       {groups.length === 0 && <p className="admin-muted">还没有预设。把下面的配置填好后点「存入模型库」，就能在不同模型之间随时切换。</p>}
       {groups.map(([slot, items]) => (
@@ -431,7 +436,7 @@ function ModelLibrary({ onNotice, onApplied, reloadKey = 0 }: { onNotice: (v: st
   );
 }
 
-function ModelsPanel({ onNotice, onSaved }: { onNotice: (v: string) => void; onSaved: () => void }) {
+function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
   const [models, setModels] = useState<AdminModels | null>(null);
   const [selected, setSelected] = useState<ModelPanelSelection>('chat');
   const [available, setAvailable] = useState<string[] | null>(null);
@@ -473,7 +478,7 @@ function ModelsPanel({ onNotice, onSaved }: { onNotice: (v: string) => void; onS
       setKeyDraft('');
       // The old verdict was about the config that was just replaced.
       setTestResult(null);
-      onSaved();
+      notifyAdminSaved('models-config');
       onNotice(typed ? '模型配置与密钥已保存' : '模型配置已保存');
     } catch (e) {
       onNotice(errorText(e));
@@ -583,13 +588,13 @@ function ModelsPanel({ onNotice, onSaved }: { onNotice: (v: string) => void; onS
           </button>
         ))}
       </aside>
-      <div className="admin-form-card">
+      <div className="admin-form-card" data-admin-dirty-scope="models-config">
         {selected === 'webSearch' ? <>
           <PanelHeading title="联网搜索" description="配置聊天需要外部实时信息时使用的搜索提供方。" />
           <WebSearchModelEditor
             config={models.webSearch as AdminWebSearchConfig}
             responsesAvailable={String((models.chat as Record<string, unknown> | undefined)?.provider ?? '') === 'openai-responses' && (models.chat as Record<string, unknown> | undefined)?.supportsTools === true}
-            onSaved={(next) => { setModels(next); onSaved(); }}
+            onSaved={(next) => { setModels(next); notifyAdminSaved('models-config'); }}
             onNotice={onNotice}
           />
         </> : <>
@@ -727,7 +732,7 @@ function ModelsPanel({ onNotice, onSaved }: { onNotice: (v: string) => void; onS
           <label>prosodyVolume（0 不增益）<input type="number" step="1" min="-20" max="20" value={String((config as Record<string, unknown>).prosodyVolume ?? 0)} onChange={(e) => update('prosodyVolume', Number(e.target.value))} /></label>
         </>}
         {selected === 'tts' && (
-          <section className="admin-card admin-form-wide" data-testid="admin-tts-preview">
+          <section className="admin-card admin-form-wide" data-testid="admin-tts-preview" data-admin-dirty-ignore="true">
             <div className="admin-card-heading"><h3>语音试听</h3><small>用当前已保存的 TTS 配置试听；Fish 会按所选情绪编译一条安全 cue。</small></div>
             <label>试听文字<textarea value={previewText} onChange={(e) => setPreviewText(e.target.value)} /></label>
             <label>
@@ -847,6 +852,7 @@ function StickerAdminRow({ sticker, onDone, onNotice }: { sticker: AdminSticker;
       await adminApi.updateSticker(sticker.id, { description, userMeaning });
       onNotice(`已保存「${sticker.name}」的语义`);
       await onDone();
+      notifyAdminSaved(`sticker:${sticker.id}`);
     } catch (error) {
       onNotice(errorText(error));
     } finally {
@@ -865,7 +871,7 @@ function StickerAdminRow({ sticker, onDone, onNotice }: { sticker: AdminSticker;
       setBusy(false);
     }
   };
-  return <div className="admin-sticker-row" data-testid={`admin-sticker-${sticker.id}`}>
+  return <div className="admin-sticker-row" data-testid={`admin-sticker-${sticker.id}`} data-admin-dirty-scope={`sticker:${sticker.id}`}>
     <div className="admin-list-row">
       <span><strong>{sticker.name}</strong> · {emotionLabel(sticker.emotion)} · {stickerStatusLabel(sticker.analysisStatus)}{sticker.hasEmbedding ? ' · 已建向量' : ''}</span>
       <span className="admin-actions">
@@ -1223,6 +1229,7 @@ export default function AdminPanel({ initialTab = 'overview' }: { initialTab?: T
   const [tab, setTab] = useState<Tab>(() => tabFromAdminPath(window.location.pathname, initialTab));
   const [dirty, setDirty] = useState(false);
   const dirtyRef = useRef(false);
+  const dirtyScopesRef = useRef<Set<string>>(new Set());
   const [data, setData] = useState<Dashboard | null>(null);
   const [notice, setNotice] = useAutoNotice();
   const [loading, setLoading] = useState(false);
@@ -1239,9 +1246,33 @@ export default function AdminPanel({ initialTab = 'overview' }: { initialTab?: T
   }, []);
 
   const setDirtyState = useCallback((value: boolean) => {
+    if (!value) dirtyScopesRef.current.clear();
+    else if (dirtyScopesRef.current.size === 0) dirtyScopesRef.current.add('page');
     dirtyRef.current = value;
     setDirty(value);
   }, []);
+
+  const markDirtyScope = useCallback((scope: string) => {
+    dirtyScopesRef.current.add(scope);
+    dirtyRef.current = true;
+    setDirty(true);
+  }, []);
+
+  const clearDirtyScope = useCallback((scope: string) => {
+    dirtyScopesRef.current.delete(scope);
+    const next = dirtyScopesRef.current.size > 0;
+    dirtyRef.current = next;
+    setDirty(next);
+  }, []);
+
+  useEffect(() => {
+    const onSaved = (event: Event) => {
+      const detail = (event as CustomEvent<AdminSavedDetail>).detail;
+      if (detail?.scope) clearDirtyScope(detail.scope);
+    };
+    window.addEventListener(ADMIN_SAVED_EVENT, onSaved);
+    return () => window.removeEventListener(ADMIN_SAVED_EVENT, onSaved);
+  }, [clearDirtyScope]);
 
   useEffect(() => {
     const routeTab = tabFromAdminPath(window.location.pathname, initialTab);
@@ -1367,7 +1398,7 @@ export default function AdminPanel({ initialTab = 'overview' }: { initialTab?: T
         : tab === 'life'
             ? <LifeObservationPanel onNotice={setNotice} />
             : tab === 'models'
-                ? <ModelsPanel onNotice={setNotice} onSaved={() => setDirtyState(false)} />
+                ? <ModelsPanel onNotice={setNotice} />
                 : tab === 'mcp'
                   ? <McpAdminPage onNotice={setNotice} />
                 : tab === 'content'
@@ -1378,11 +1409,12 @@ export default function AdminPanel({ initialTab = 'overview' }: { initialTab?: T
 
   return (
     <main className="admin-page admin-v2" data-testid="admin-dashboard" data-dirty={dirty || undefined} onInputCapture={(event) => {
-      const target = event.target as HTMLInputElement;
+      const target = event.target as HTMLElement;
       if (target instanceof HTMLInputElement && target.type === 'file') return;
-      if (target.closest('.admin-content-management, .admin-mcp-page')) return;
-      setDirtyState(true);
-    }} onSubmitCapture={() => setDirtyState(false)}>
+      if (target.closest('.admin-content-management, .admin-mcp-page, [data-admin-dirty-ignore]')) return;
+      const scope = target.closest<HTMLElement>('[data-admin-dirty-scope]')?.dataset.adminDirtyScope ?? 'page';
+      markDirtyScope(scope);
+    }}>
       <div className="admin-shell">
         {!isMobile && <aside className="admin-sidebar">
           <div className="admin-brand"><span className="admin-brand-mark">S</span><span className="admin-brand-copy"><strong>SOOYA</strong><small>管理中心</small></span></div>

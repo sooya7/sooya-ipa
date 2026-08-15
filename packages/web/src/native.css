@@ -1,21 +1,31 @@
-/* Native top safe-area: the installed WebView does NOT reliably lay content
- * out below the status bar / Dynamic Island on iPhone, so the old approach of
- * forcing the safe-top variable to 0px made headers collide with the system UI.
- *
- * One variable rules everywhere: every fixed top element reads the
- * --sooya-safe-top variable (defined in styles.css as env(safe-area-inset-top)).
- * Here we only guarantee a conservative portrait fallback when the WebView
- * reports no inset at all (missing viewport-fit=cover), and zero it out in
- * landscape where the notch moves to the side. Bottom insets stay untouched:
- * they still protect the home indicator / composer. */
-
+/* Capacitor iOS already applies contentInset=automatic. The native web layer must not add the same top/bottom safe area again. */
 html.sooya-native {
-  --sooya-native-top-fallback: 47px;
-  --sooya-safe-top: max(env(safe-area-inset-top, 0px), var(--sooya-native-top-fallback));
+  --sooya-safe-top: 0px;
+  --sooya-safe-bottom: 0px;
 }
 
-@media (orientation: landscape) {
-  html.sooya-native {
-    --sooya-native-top-fallback: 0px;
-  }
+html.sooya-native,
+html.sooya-native body,
+html.sooya-native #root {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: #fff;
+}
+
+html.sooya-native body {
+  overflow: hidden;
+}
+
+/* Keyboard.resize=body owns the usable iOS viewport; fill that resized body instead of a lagging 100dvh. */
+html.sooya-native .app {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ChatView already performs explicit virtual-list anchoring. Avoid a second WebKit correction pass. */
+html.sooya-native .messages {
+  overflow-anchor: none;
+  scroll-behavior: auto;
 }

@@ -3,6 +3,7 @@ import type { AdminPersona } from '../lib/admin.js';
 import { featureApi, type PersonaReference } from '../lib/features.js';
 import { mediaThumbnailPath } from '../lib/authenticatedMedia.js';
 import { useAuthenticatedMedia, type AuthenticatedMediaState } from '../lib/useAuthenticatedMedia.js';
+import { notifyAdminSaved } from '../lib/adminDirtyState.js';
 
 const EMOTION_LABELS: Record<string, string> = { neutral: '中性', happy: '开心', sad: '难过', angry: '生气', gentle: '温柔', sleepy: '困倦', confused: '疑惑' };
 export function emotionLabel(value: string): string {
@@ -241,7 +242,7 @@ export function StorageEditor({ onNotice }: { onNotice: (s: string) => void }) {
   };
   if (!data) return <section className="admin-card">正在读取存储状态…</section>;
   return (
-    <section className="admin-form-card" data-testid="storage-settings">
+    <section className="admin-form-card" data-testid="storage-settings" data-admin-dirty-scope="storage-policy">
       <div className="admin-panel-heading"><div><p>当前媒体 {bytes(data.mediaBytes)}，备份 {bytes(data.backupBytes)}，可用空间 {data.freeBytes == null ? '未知' : bytes(data.freeBytes)}。</p></div></div>
       {data.warning && <div className="admin-inline-error">已达到{data.warning === 'hard' ? '硬' : '软'}限额</div>}
       <label>软限额（MB）<input type="number" value={Math.round(Number(policy.softLimitBytes ?? 0) / 1024 / 1024)} onChange={(event) => setPolicy('softLimitBytes', Number(event.target.value) * 1024 * 1024)} /></label>
@@ -249,7 +250,7 @@ export function StorageEditor({ onNotice }: { onNotice: (s: string) => void }) {
       <label>回收站保留天数<input type="number" value={Number(policy.trashRetentionDays ?? 30)} onChange={(event) => setPolicy('trashRetentionDays', Number(event.target.value))} /></label>
       <label>临时文件保留小时<input type="number" value={Number(policy.tempRetentionHours ?? 24)} onChange={(event) => setPolicy('tempRetentionHours', Number(event.target.value))} /></label>
       <label>备份保留份数<input type="number" value={Number(policy.backupKeep ?? 7)} onChange={(event) => setPolicy('backupKeep', Number(event.target.value))} /></label>
-      <div className="admin-actions"><button type="button" onClick={() => void featureApi.updateStorage(policy).then(() => { void load(); onNotice('存储策略已保存'); }).catch((error) => onNotice(errorText(error)))}>保存策略</button><button type="button" onClick={() => void preview(false)}>预览清理</button><button type="button" className="admin-danger" disabled={!report || report.applied} onClick={() => { if (window.confirm('只会删除预览报告中仍满足安全条件的项目，确认执行？')) void preview(true); }}>执行安全清理</button></div>
+      <div className="admin-actions"><button type="button" onClick={() => void featureApi.updateStorage(policy).then(() => { void load(); notifyAdminSaved('storage-policy'); onNotice('存储策略已保存'); }).catch((error) => onNotice(errorText(error)))}>保存策略</button><button type="button" onClick={() => void preview(false)}>预览清理</button><button type="button" className="admin-danger" disabled={!report || report.applied} onClick={() => { if (window.confirm('只会删除预览报告中仍满足安全条件的项目，确认执行？')) void preview(true); }}>执行安全清理</button></div>
       {report && <CleanupReportView result={report} />}
     </section>
   );

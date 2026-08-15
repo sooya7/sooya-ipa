@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { featureApi, type LifeSettings } from '../../lib/features.js';
 import { contactBoundaryPayload } from '../../lib/lifeObservation.js';
+import { notifyAdminSaved } from '../../lib/adminDirtyState.js';
 
 interface LifeContactBoundaryFormProps {
   initial: LifeSettings;
@@ -35,6 +36,7 @@ export function LifeContactBoundaryForm({ initial, onNotice }: LifeContactBounda
       const result = await featureApi.updateLifeSettings(contactBoundaryPayload(draft));
       setDraft(result.settings);
       setDirty(false);
+      notifyAdminSaved('life-boundaries');
       onNotice('动态设置已保存');
     } catch (cause) {
       onNotice(cause instanceof Error ? cause.message : String(cause));
@@ -56,7 +58,7 @@ export function LifeContactBoundaryForm({ initial, onNotice }: LifeContactBounda
         <span aria-hidden="true">{open ? '−' : '＋'}</span>
       </button>
       {open && (
-        <form id="life-boundaries-panel" className="life-boundary-form" onSubmit={(event) => void submit(event)}>
+        <form id="life-boundaries-panel" className="life-boundary-form" data-admin-dirty-scope="life-boundaries" onSubmit={(event) => void submit(event)}>
           <label>
             <span>允许发动态</span>
             <input name="reachOut" type="checkbox" checked={draft.reachOut} onChange={(event) => change({ reachOut: event.target.checked })} />
