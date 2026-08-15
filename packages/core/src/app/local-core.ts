@@ -31,6 +31,7 @@ import { StickerAnalyzer } from './sticker-analyzer.js';
 import { extractText } from '../util/text-extractor.js';
 import { LocalLifeCatchUp } from '../life/catch-up-service.js';
 import { MomentComposer } from '../moments/composer.js';
+import { MomentPolicy } from '../moments/moment-policy.js';
 import { LATEST_SCHEMA_VERSION } from '../db/migrations.js';
 import type { LocalEvent, LocalEventListener, LocalCoreApi, BootstrapInfo, ChatMessage, LifeState, MessagePage, MediaRef, MessagePart, MessageContext, MessageSearchHit, Moment, StickerInfo, WorldPresence, UploadInputFile, LocalAdminRequestOptions } from './types.js';
 
@@ -259,9 +260,25 @@ export class LocalCore implements LocalCoreApi {
     if (!cachedWeather || !Number.isFinite(weatherAgeMs) || weatherAgeMs > 30 * 60_000) await this.refreshWeather().catch(() => undefined);
     const presence = await this.presence().catch(() => null);
     if (presence) this.events.emit('world.updated', { presence });
-    await this.momentComposer.compose().catch(() => undefined);
+    await this.composeMomentsIfEnabled().catch(() => undefined);
     await this.replies.recover();
     void this.memorySync?.syncOnce().catch(() => undefined);
+  }
+
+  private async localLifeSettings(): Promise<LocalLifeSettings> {
+    const stored = await this.settingsRepo.get<Record<string, unknown>>('lifeSettings', defaultLifeSettings());
+    return normalizeLocalLifeSettings(stored);
+  }
+
+  /** Native IPA has no deployment env gate. The saved admin switch is the source of truth. */
+  private async composeMomentsIfEnabled(): Promise<void> {
+    const settings = await this.localLifeSettings();
+    const now = this.options.now?.() ?? new Date();
+    if (!settings.reachOut || settings.maxReachOutsPerDay <= 0 || isSilentLifeHour(now, settings)) return;
+    await this.momentComposer.compose(now, new MomentPolicy({
+      dailyCap: settings.maxReachOutsPerDay,
+      minGapMs: settings.quietGapMinutes * 60_000
+    }));
   }
 
   /** Background: persist WAL state so the database survives suspension. */
@@ -1076,8 +1093,32 @@ export class LocalCore implements LocalCoreApi {
     }
     if (route === '/api/admin/life' && method === 'GET') {
       const snapshot = await this.life();
-      const settings = await this.settingsRepo.get('lifeSettings', defaultLifeSettings());
-      return { snapshot, log: await this.lifeRepo.recent(100), plans: await this.lifeRepo.listPlans(), events: await this.lifeRepo.events(100), proactive: [], reachOut: { reach: false, reason: 'local proactive messaging is disabled', candidate: null, sharedLastDay: 0, lastUserAt: null, lastAssistantAt: null, enabledByDeployment: false }, settings } as T;
+      const settings = await this.localLifeSettings();
+      const now = this.options.now?.() ?? new Date();
+      const reason = !settings.reachOut
+        ? 'disabled'
+        : settings.maxReachOutsPerDay <= 0
+          ? 'daily_cap'
+          : isSilentLifeHour(now, settings)
+            ? 'silent_hours'
+            : 'ok';
+      return {
+        snapshot,
+        log: await this.lifeRepo.recent(100),
+        plans: await this.lifeRepo.listPlans(),
+        events: await this.lifeRepo.events(100),
+        proactive: [],
+        reachOut: {
+          reach: reason === 'ok',
+          reason,
+          candidate: null,
+          sharedLastDay: 0,
+          lastUserAt: null,
+          lastAssistantAt: null,
+          enabledByDeployment: true
+        },
+        settings
+      } as T;
     }
     if (route === '/api/admin/life/plans' && method === 'GET') return { plans: await this.lifeRepo.listPlans() } as T;
     if (route === '/api/admin/life/plans' && method === 'POST') {
@@ -1091,8 +1132,10 @@ export class LocalCore implements LocalCoreApi {
       return { plan } as T;
     }
     if (route === '/api/admin/life/settings' && (method === 'PUT' || method === 'PATCH')) {
-      const settings = { ...defaultLifeSettings(), ...(await this.settingsRepo.get('lifeSettings', defaultLifeSettings())), ...body, reachOut: false, proactiveMode: 'disabled' };
+      const current = await this.localLifeSettings();
+      const settings = normalizeLocalLifeSettings({ ...current, ...body });
       await this.settingsRepo.set('lifeSettings', settings);
+      if (settings.reachOut) await this.composeMomentsIfEnabled().catch(() => undefined);
       return { settings } as T;
     }
     if (route === '/api/admin/life/tick' && method === 'POST') {
@@ -1311,8 +1354,49 @@ function parseJsonArray(value: string): string[] {
   try { const parsed = JSON.parse(value) as unknown; return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []; } catch { return []; }
 }
 
-function defaultLifeSettings(): Record<string, unknown> {
-  return { reachOut: false, quietGapMinutes: 240, maxReachOutsPerDay: 0, silentFrom: 23, silentTo: 8, tzOffsetMinutes: 480, proactiveMode: 'disabled' };
+type LocalProactiveMode = 'auto' | 'text' | 'text_sticker' | 'voice' | 'image';
+interface LocalLifeSettings {
+  [key: string]: unknown;
+  reachOut: boolean;
+  quietGapMinutes: number;
+  maxReachOutsPerDay: number;
+  silentFrom: number;
+  silentTo: number;
+  tzOffsetMinutes: number;
+  proactiveMode: LocalProactiveMode;
+}
+
+function defaultLifeSettings(): LocalLifeSettings {
+  return { reachOut: false, quietGapMinutes: 240, maxReachOutsPerDay: 2, silentFrom: 23, silentTo: 8, tzOffsetMinutes: 480, proactiveMode: 'auto' };
+}
+
+function normalizeLocalLifeSettings(value: Record<string, unknown>): LocalLifeSettings {
+  const defaults = defaultLifeSettings();
+  const legacyDisabled = value.proactiveMode === 'disabled';
+  const proactiveMode = value.proactiveMode === 'auto' || value.proactiveMode === 'text' || value.proactiveMode === 'text_sticker' || value.proactiveMode === 'voice' || value.proactiveMode === 'image'
+    ? value.proactiveMode
+    : defaults.proactiveMode;
+  const number = (raw: unknown, fallback: number, min: number, max: number): number =>
+    typeof raw === 'number' && Number.isFinite(raw) ? Math.max(min, Math.min(max, Math.trunc(raw))) : fallback;
+  const savedCap = number(value.maxReachOutsPerDay, defaults.maxReachOutsPerDay, 0, 20);
+  return {
+    reachOut: value.reachOut === true,
+    quietGapMinutes: number(value.quietGapMinutes, defaults.quietGapMinutes, 5, 1440),
+    maxReachOutsPerDay: legacyDisabled && savedCap === 0 ? defaults.maxReachOutsPerDay : savedCap,
+    silentFrom: number(value.silentFrom, defaults.silentFrom, 0, 23),
+    silentTo: number(value.silentTo, defaults.silentTo, 0, 23),
+    tzOffsetMinutes: number(value.tzOffsetMinutes, defaults.tzOffsetMinutes, -840, 840),
+    proactiveMode
+  };
+}
+
+function isSilentLifeHour(now: Date, settings: Pick<LocalLifeSettings, 'silentFrom' | 'silentTo' | 'tzOffsetMinutes'>): boolean {
+  if (settings.silentFrom === settings.silentTo) return false;
+  const shifted = new Date(now.getTime() + settings.tzOffsetMinutes * 60_000);
+  const hour = shifted.getUTCHours();
+  return settings.silentFrom < settings.silentTo
+    ? hour >= settings.silentFrom && hour < settings.silentTo
+    : hour >= settings.silentFrom || hour < settings.silentTo;
 }
 
 function stringValue(value: unknown, fallback: string): string { return typeof value === 'string' && value.trim() ? value.trim() : fallback; }

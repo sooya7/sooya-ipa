@@ -13,12 +13,12 @@ export interface MomentComposeResult {
 export class MomentComposer {
   constructor(private readonly options: { life: LifeV2Repo; moments: MomentRepo; provider?: ChatProvider | null | (() => Promise<ChatProvider | null>); policy?: MomentPolicy; now?: () => Date }) {}
 
-  async compose(now = (this.options.now ?? (() => new Date()))()): Promise<MomentComposeResult> {
+  async compose(now = (this.options.now ?? (() => new Date()))(), policy = this.options.policy ?? new MomentPolicy()): Promise<MomentComposeResult> {
     const pending = await this.options.life.pendingCandidates();
     const existingRows = await this.options.moments.list(100);
     const existing: MomentRecord[] = existingRows.map((row) => ({ id: row.id, candidateId: row.candidate_id, topic: row.topic_key ?? row.activity, createdAt: row.created_at }));
     const candidates = pending.map(toCandidate);
-    const selected = (this.options.policy ?? new MomentPolicy()).select(candidates, existing, now, true);
+    const selected = policy.select(candidates, existing, now, true);
     const rejectedIds = new Set(selected.rejected.map((item) => item.id));
     for (const candidate of pending) if (rejectedIds.has(candidate.id)) await this.options.life.updateShareCandidate(candidate.id, { status: 'suppressed' }).catch(() => undefined);
     const created: string[] = [];
