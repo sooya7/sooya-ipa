@@ -11,6 +11,17 @@ describe('reply media runtime contract', () => {
     expect(source).toContain('buildImageFallbackPrompt(userDirectives, recent, latestUser)');
   });
 
+  it('emits image generation lifecycle before the real provider call', async () => {
+    const source = await readFile(new URL('./reply-coordinator.ts', import.meta.url), 'utf8');
+    const started = source.indexOf("this.options.emit('reply.image.generating'");
+    const generated = source.indexOf('await provider.generate(imagePrompt');
+
+    expect(started).toBeGreaterThan(-1);
+    expect(generated).toBeGreaterThan(started);
+    expect(source).toContain("this.options.emit('reply.media.created', { batchId, revision, messageId, type: 'image'");
+    expect(source).toContain("this.options.emit('reply.media.failed', { batchId, revision, messageId, type: 'image'");
+  });
+
   it('tells the model that only Runtime owns media execution status', async () => {
     const source = await readFile(new URL('./reply-coordinator.ts', import.meta.url), 'utf8');
 
