@@ -1,0 +1,273 @@
+name: Fix native header presence 20260815
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-native-presence-20260815.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+      - name: Apply native presence fixes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          core_path = Path('packages/core/src/app/local-core.ts')
+          core = core_path.read_text()
+
+          old_active = """  async onAppActive(): Promise<void> {
+            await this.jobsRepo.recoverStuck();
+            await this.lifeCatchUp.catchUp().catch(() => undefined);
+            await this.momentComposer.compose().catch(() => undefined);
+            await this.replies.recover();
+            void this.memorySync?.syncOnce().catch(() => undefined);
+          }
+          """
+          new_active = """  async onAppActive(): Promise<void> {
+            await this.jobsRepo.recoverStuck();
+            const caught = await this.lifeCatchUp.catchUp().catch(() => null);
+            if (caught) this.events.emit('life.updated', { activity: caught.state.current.activity });
+            const cachedWeather = await this.weatherRepo.latest('active').catch(() => undefined);
+            const weatherAgeMs = cachedWeather ? (this.options.now?.() ?? new Date()).getTime() - Date.parse(cachedWeather.observed_at) : Number.POSITIVE_INFINITY;
+            if (!cachedWeather || !Number.isFinite(weatherAgeMs) || weatherAgeMs > 30 * 60_000) await this.refreshWeather().catch(() => undefined);
+            const presence = await this.presence().catch(() => null);
+            if (presence) this.events.emit('world.updated', { presence });
+            await this.momentComposer.compose().catch(() => undefined);
+            await this.replies.recover();
+            void this.memorySync?.syncOnce().catch(() => undefined);
+          }
+          """
+          if old_active not in core:
+              raise SystemExit('onAppActive target not found')
+          core = core.replace(old_active, new_active, 1)
+
+          old_refresh = """      const locationState = await this.locationsRepo.currentState();
+                const location = locationState ? await this.locationsRepo.get(locationState.location_id) : undefined;
+                if (!location?.name) return { ok: false, snapshot: null, error: '没有可用的当前位置' };
+                const provider = new OpenMeteoWeatherProvider(this.options.http);
+                const snapshot = await provider.current({ city: location.name, country: '中国' });
+                await this.weatherRepo.save({
+                  location_key: snapshot.locationKey,
+          """
+          new_refresh = """      const locationState = await this.locationsRepo.currentState();
+                const location = locationState ? await this.locationsRepo.get(locationState.location_id) : undefined;
+                const activeCity = await this.lifeCitiesRepo.activeCity();
+                const cityName = location?.city ?? activeCity?.name ?? location?.name;
+                const country = location?.country ?? activeCity?.country ?? '中国';
+                if (!cityName) return { ok: false, snapshot: null, error: '没有可用的当前位置' };
+                const provider = new OpenMeteoWeatherProvider(this.options.http);
+                const snapshot = await provider.current({ city: cityName, country });
+                await this.weatherRepo.save({
+                  // Header/presence reads the logical active slot rather than the provider's geocode key.
+                  location_key: 'active',
+          """
+          if old_refresh not in core:
+              raise SystemExit('refreshWeather target not found')
+          core = core.replace(old_refresh, new_refresh, 1)
+
+          old_forecast = """      const locationState = await this.locationsRepo.currentState();
+                const location = locationState ? await this.locationsRepo.get(locationState.location_id) : undefined;
+                if (!location?.name) return null;
+                const now = this.options.now?.() ?? new Date();
+                const cached = this.forecastCache.get(location.name);
+                if (!force && cached && now.getTime() - cached.fetchedAt < 30 * 60_000) return cached.summary;
+                const provider = new OpenMeteoWeatherProvider(this.options.http);
+                const forecast = await provider.forecast({ city: location.name, country: '中国' });
+                const summary = summarizeForecast(forecast.periods, forecast.generatedAt, forecast.provider, now);
+                this.forecastCache.set(location.name, { summary, fetchedAt: now.getTime() });
+          """
+          new_forecast = """      const locationState = await this.locationsRepo.currentState();
+                const location = locationState ? await this.locationsRepo.get(locationState.location_id) : undefined;
+                const activeCity = await this.lifeCitiesRepo.activeCity();
+                const cityName = location?.city ?? activeCity?.name ?? location?.name;
+                const country = location?.country ?? activeCity?.country ?? '中国';
+                if (!cityName) return null;
+                const now = this.options.now?.() ?? new Date();
+                const cached = this.forecastCache.get(cityName);
+                if (!force && cached && now.getTime() - cached.fetchedAt < 30 * 60_000) return cached.summary;
+                const provider = new OpenMeteoWeatherProvider(this.options.http);
+                const forecast = await provider.forecast({ city: cityName, country });
+                const summary = summarizeForecast(forecast.periods, forecast.generatedAt, forecast.provider, now);
+                this.forecastCache.set(cityName, { summary, fetchedAt: now.getTime() });
+          """
+          if old_forecast not in core:
+              raise SystemExit('forecast target not found')
+          core = core.replace(old_forecast, new_forecast, 1)
+          core_path.write_text(core)
+
+          helper = """import type { LocalCore } from '@sooya/core/app';
+
+          type PresenceCore = Pick<LocalCore, 'lifeRepo' | 'lifeCitiesRepo' | 'locationsRepo'>;
+
+          /**
+           * Fresh IPA databases have no server daemon to seed Life/location state.
+           * Preserve migrated state when it exists; only fill the missing native baseline.
+           */
+          export async function ensureNativeCompanionState(core: PresenceCore, now: () => Date = () => new Date()): Promise<void> {
+            const timestamp = now();
+            if (!await core.lifeRepo.current()) {
+              await core.lifeRepo.advance({
+                activity: '在家休息',
+                kind: 'rest',
+                mood: '平静',
+                startedAt: timestamp.toISOString(),
+                endsAt: new Date(timestamp.getTime() + 60 * 60_000).toISOString()
+              }, { recordCompletionEvent: false });
+            }
+
+            const currentState = await core.locationsRepo.currentState();
+            if (currentState && await core.locationsRepo.get(currentState.location_id)) return;
+
+            let location = (await core.locationsRepo.list(true))[0];
+            if (!location) {
+              let city = await core.lifeCitiesRepo.activeCity();
+              if (!city) {
+                // LocalCore's weather adapter currently targets China by default; use a
+                // deterministic first-run city until the user imports/edits Life places.
+                city = await core.lifeCitiesRepo.create({
+                  key: 'native-default-city',
+                  name: '上海',
+                  region: '上海',
+                  country: '中国',
+                  timeZone: 'Asia/Shanghai',
+                  active: true
+                });
+              }
+              location = await core.locationsRepo.create({
+                key: 'native-default-home',
+                name: '家',
+                kind: 'home',
+                cityId: city.id,
+                city: city.name,
+                region: city.region,
+                country: city.country,
+                timeZone: city.time_zone,
+                indoor: true,
+                visitWeight: 10,
+                source: 'builtin'
+              });
+            }
+
+            await core.locationsRepo.setState({
+              locationId: location.id,
+              arrivedAt: timestamp.toISOString(),
+              confidence: 1
+            });
+          }
+          """
+          Path('packages/web/src/local/nativePresenceBootstrap.ts').write_text(helper)
+
+          helper_test = """import { describe, expect, it, vi } from 'vitest';
+          import type { LocalCore } from '@sooya/core/app';
+          import { ensureNativeCompanionState } from './nativePresenceBootstrap.js';
+
+          type PresenceCore = Pick<LocalCore, 'lifeRepo' | 'lifeCitiesRepo' | 'locationsRepo'>;
+
+          function freshCore(): PresenceCore {
+            const city = { id: 'city_1', key: 'native-default-city', name: '上海', region: '上海', country: '中国', time_zone: 'Asia/Shanghai', active: 1, created_at: '', updated_at: '' };
+            const home = { id: 'loc_1', key: 'native-default-home', name: '家', kind: 'home', city_id: city.id, city: city.name, region: city.region, country: city.country, time_zone: city.time_zone, lat: null, lng: null, tags_json: '[]', indoor: 1, visit_weight: 10, source: 'builtin', active: 1, created_at: '', updated_at: '' };
+            return {
+              lifeRepo: { current: vi.fn(async () => undefined), advance: vi.fn(async () => ({ previous: null })) } as unknown as PresenceCore['lifeRepo'],
+              lifeCitiesRepo: { activeCity: vi.fn(async () => undefined), create: vi.fn(async () => city) } as unknown as PresenceCore['lifeCitiesRepo'],
+              locationsRepo: {
+                currentState: vi.fn(async () => undefined),
+                get: vi.fn(async () => undefined),
+                list: vi.fn(async () => []),
+                create: vi.fn(async () => home),
+                setState: vi.fn(async (input) => ({ id: 1, location_id: input.locationId, arrived_at: input.arrivedAt, expected_leave_at: null, source_plan_id: null, source_activity_id: null, confidence: 1, updated_at: input.arrivedAt }))
+              } as unknown as PresenceCore['locationsRepo']
+            };
+          }
+
+          describe('native companion presence bootstrap', () => {
+            it('fills a fresh IPA database with an activity and current home without overwriting later state', async () => {
+              const core = freshCore();
+              await ensureNativeCompanionState(core, () => new Date('2026-08-15T03:00:00.000Z'));
+
+              expect(core.lifeRepo.advance).toHaveBeenCalledWith(expect.objectContaining({ activity: '在家休息', kind: 'rest' }), { recordCompletionEvent: false });
+              expect(core.lifeCitiesRepo.create).toHaveBeenCalledWith(expect.objectContaining({ name: '上海', active: true }));
+              expect(core.locationsRepo.create).toHaveBeenCalledWith(expect.objectContaining({ name: '家', kind: 'home', city: '上海' }));
+              expect(core.locationsRepo.setState).toHaveBeenCalledWith(expect.objectContaining({ locationId: 'loc_1', confidence: 1 }));
+            });
+
+            it('keeps imported Life and location state intact', async () => {
+              const core = freshCore();
+              vi.mocked(core.lifeRepo.current).mockResolvedValue({ activity: '喝咖啡', kind: 'meal', mood: '开心', started_at: '', ends_at: '', updated_at: '', meta_json: '{}' });
+              vi.mocked(core.locationsRepo.currentState).mockResolvedValue({ id: 1, location_id: 'server_place', arrived_at: '', expected_leave_at: null, source_plan_id: null, source_activity_id: null, confidence: 1, updated_at: '' });
+              vi.mocked(core.locationsRepo.get).mockResolvedValue({ id: 'server_place', key: null, name: '咖啡店', kind: 'cafe', city_id: null, city: '成都', region: '四川', country: '中国', time_zone: 'Asia/Shanghai', lat: null, lng: null, tags_json: '[]', indoor: 1, visit_weight: 1, source: 'admin', active: 1, created_at: '', updated_at: '' });
+
+              await ensureNativeCompanionState(core);
+
+              expect(core.lifeRepo.advance).not.toHaveBeenCalled();
+              expect(core.lifeCitiesRepo.create).not.toHaveBeenCalled();
+              expect(core.locationsRepo.create).not.toHaveBeenCalled();
+              expect(core.locationsRepo.setState).not.toHaveBeenCalled();
+            });
+          });
+          """
+          Path('packages/web/src/local/nativePresenceBootstrap.test.ts').write_text(helper_test)
+
+          contract_test = """import { describe, expect, it } from 'vitest';
+          import { readFileSync } from 'node:fs';
+          import path from 'node:path';
+
+          describe('native Life/weather header contract', () => {
+            it('stores refreshed weather in the active slot and refreshes foreground presence', () => {
+              const source = readFileSync(path.resolve('src/app/local-core.ts'), 'utf8');
+              expect(source).toContain("const cityName = location?.city ?? activeCity?.name ?? location?.name;");
+              expect(source).toContain("location_key: 'active'");
+              expect(source).toContain("this.events.emit('life.updated'");
+              expect(source).toContain("this.events.emit('world.updated'");
+            });
+          });
+          """
+          Path('packages/core/src/app/native-presence-contract.test.ts').write_text(contract_test)
+
+          boot_path = Path('packages/web/src/local/nativeBoot.ts')
+          boot = boot_path.read_text()
+          import_target = "import { BUILTIN_STICKERS, BuiltinStickerMedia, afterAppReady } from './builtinStickers.js';\n"
+          import_replacement = import_target + "import { ensureNativeCompanionState } from './nativePresenceBootstrap.js';\n"
+          if import_target not in boot:
+              raise SystemExit('nativeBoot import target not found')
+          boot = boot.replace(import_target, import_replacement, 1)
+
+          create_target = "  const core = new LocalCore({ db, secrets, mediaStore, http, mcp: new CapacitorMcp(), toolRegistry: registry, toolPolicy: policy, toolRuntime: runtime });\n  await seedServerPersonaOnce(core.settingsRepo);\n"
+          create_replacement = "  const core = new LocalCore({ db, secrets, mediaStore, http, mcp: new CapacitorMcp(), toolRegistry: registry, toolPolicy: policy, toolRuntime: runtime });\n  await ensureNativeCompanionState(core);\n  await seedServerPersonaOnce(core.settingsRepo);\n"
+          if create_target not in boot:
+              raise SystemExit('nativeBoot core target not found')
+          boot = boot.replace(create_target, create_replacement, 1)
+
+          lifecycle_target = "  void wireNativeLifecycle(core).catch((error) => console.warn('Native lifecycle wiring is unavailable', error));\n"
+          lifecycle_replacement = lifecycle_target + "  void core.onAppActive().catch((error) => console.warn('Native initial Life/weather refresh failed', error));\n"
+          if lifecycle_target not in boot:
+              raise SystemExit('nativeBoot lifecycle target not found')
+          boot = boot.replace(lifecycle_target, lifecycle_replacement, 1)
+          boot_path.write_text(boot)
+          PY
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test -w @sooya/core
+      - run: npm run test -w @sooya/web
+      - run: npm run build
+      - name: Commit verified fix
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add packages/core/src/app/local-core.ts packages/core/src/app/native-presence-contract.test.ts packages/web/src/local/nativeBoot.ts packages/web/src/local/nativePresenceBootstrap.ts packages/web/src/local/nativePresenceBootstrap.test.ts
+          git rm .github/workflows/fix-native-presence-20260815.yml
+          git commit -m 'fix(native): initialize header life and weather presence'
+          git push origin HEAD:main
