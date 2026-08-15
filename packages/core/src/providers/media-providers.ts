@@ -4,6 +4,7 @@ import type {
   BinaryData,
   GeneratedImage,
   HealthStatus,
+  ImagePipelineStage,
   ImageProvider,
   SynthesizedAudio,
   TTSOptions,
@@ -11,6 +12,7 @@ import type {
 } from './types.js';
 import {
   ImageEditUnsupportedError,
+  ImagePipelineError,
   ImageReferenceError,
   ProviderNotConfiguredError,
   ProviderRequestError
@@ -27,7 +29,6 @@ import {
 
 const IMAGE_REFERENCE_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 const IMAGE_REFERENCE_MAX_BYTES = 10 * 1024 * 1024;
-const IMAGE_REFERENCE_MAX_COUNT = 3;
 
 const FORMAT_MIME: Record<string, string> = {
   mp3: 'audio/mpeg',
@@ -97,13 +98,33 @@ function requestId(): string {
 }
 
 type ImageApiResponse = { data?: Array<{ b64_json?: string; url?: string; mime_type?: string }> };
+type ImageApiItem = NonNullable<ImageApiResponse['data']>[number];
+
+/**
+ * Single source of truth for the image wire protocol. Persisted configs may
+ * keep the vendor identity in `provider` and the wire protocol in
+ * `options.protocol` (for example `provider: 'anuma'` +
+ * `options.protocol: 'anuma-input-images'`); every branch in this provider
+ * must resolve through this function so no caller can route differently.
+ */
+export function imageProtocol(config: ProviderConfig): string {
+  const protocol = typeof config.options.protocol === 'string' ? config.options.protocol.trim() : '';
+  return protocol || config.provider;
+}
+
+function pipelineError(stage: ImagePipelineStage, error: unknown): ImagePipelineError {
+  if (error instanceof ImagePipelineError) return error;
+  const message = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
+  const status = error instanceof ProviderRequestError ? error.status : undefined;
+  return new ImagePipelineError(stage, message, status);
+}
 
 export class BuiltinImageProvider implements ImageProvider {
   readonly name: string;
   readonly configured: boolean;
 
   constructor(private readonly http: HttpPlatform, private readonly config: ProviderConfig) {
-    this.name = config.provider;
+    this.name = imageProtocol(config);
     this.configured = Boolean(config.baseUrl && config.model && config.secretRef);
   }
 
@@ -118,27 +139,32 @@ export class BuiltinImageProvider implements ImageProvider {
     if (!this.configured) throw new ProviderNotConfiguredError('image');
     if (!prompt.trim()) throw new ProviderRequestError('image generation requires a non-empty prompt');
 
-    if (this.config.provider === 'anuma-input-images') {
+    if (imageProtocol(this.config) === 'anuma-input-images') {
       return await this.generateAnuma(prompt, options);
     }
 
-    const response = await requestJson<ImageApiResponse>(
-      this.http,
-      {
-        url: endpoint(this.config.baseUrl, '/v1/images/generations'),
-        method: 'POST',
-        signal: options.signal,
-        timeoutMs: numberOption(this.config, 'timeoutMs'),
-        body: {
-          model: this.config.model,
-          prompt,
-          size: options.size ?? stringOption(this.config, 'size', '1024x1024'),
-          n: 1
-        }
-      },
-      secretFor(this.config)
-    );
-    return await this.materializeImage(response, options.signal);
+    let response: ImageApiResponse;
+    try {
+      response = await requestJson<ImageApiResponse>(
+        this.http,
+        {
+          url: endpoint(this.config.baseUrl, '/v1/images/generations'),
+          method: 'POST',
+          signal: options.signal,
+          timeoutMs: numberOption(this.config, 'timeoutMs'),
+          body: {
+            model: this.config.model,
+            prompt,
+            size: options.size ?? stringOption(this.config, 'size', '1024x1024'),
+            n: 1
+          }
+        },
+        secretFor(this.config)
+      );
+    } catch (error) {
+      throw pipelineError('generation', error);
+    }
+    return await this.materializeOpenAICompatible(response, options.signal);
   }
 
   async edit(
@@ -147,7 +173,7 @@ export class BuiltinImageProvider implements ImageProvider {
     options: { mime?: string; signal?: AbortSignal } = {}
   ): Promise<GeneratedImage> {
     if (!this.configured) throw new ProviderNotConfiguredError('image');
-    if (this.config.provider !== 'anuma-input-images') {
+    if (imageProtocol(this.config) !== 'anuma-input-images') {
       throw new ImageEditUnsupportedError('configured image provider does not expose a safe edit endpoint');
     }
     return await this.generateAnuma(prompt, {
@@ -177,96 +203,120 @@ export class BuiltinImageProvider implements ImageProvider {
     }
   ): Promise<GeneratedImage> {
     const references = options.referenceImages ?? [];
-    if (references.length > IMAGE_REFERENCE_MAX_COUNT) {
-      throw new ImageReferenceError(
-        'too_many_reference_images',
-        `参考图最多 ${IMAGE_REFERENCE_MAX_COUNT} 张`,
-        `anuma supports at most ${IMAGE_REFERENCE_MAX_COUNT} reference images`
-      );
+    const reference = references[0];
+    const inputImages: string[] = [];
+    if (reference) {
+      inputImages.push(await this.uploadAnumaReference(reference.data, reference.mime, options.signal));
     }
 
-    const inputImages: string[] = [];
-    for (const reference of references) inputImages.push(await this.uploadAnumaReference(reference.data, reference.mime, options.signal));
-
+    // Server-verified Anuma /images/generations contract: model, prompt, n,
+    // and input_images only. Never send size/quality/style/response_format.
     const body: Record<string, unknown> = {
       model: this.config.model,
       prompt,
       n: 1
     };
-    const size = options.size ?? stringOption(this.config, 'size');
-    if (size) body.size = size;
     if (inputImages.length) body.input_images = inputImages;
 
-    const response = await requestJson<ImageApiResponse>(
-      this.http,
-      {
-        url: endpoint(this.config.baseUrl, '/images/generations'),
-        method: 'POST',
-        signal: options.signal,
-        timeoutMs: numberOption(this.config, 'timeoutMs'),
-        body
-      },
-      secretFor(this.config)
-    );
-    return await this.materializeImage(response, options.signal);
+    let response: ImageApiResponse;
+    try {
+      response = await requestJson<ImageApiResponse>(
+        this.http,
+        {
+          url: endpoint(this.config.baseUrl, '/images/generations'),
+          method: 'POST',
+          signal: options.signal,
+          timeoutMs: numberOption(this.config, 'timeoutMs'),
+          body
+        },
+        secretFor(this.config)
+      );
+    } catch (error) {
+      throw pipelineError('generation', error);
+    }
+    return await this.materializeOpenAICompatible(response, options.signal);
   }
 
   private async uploadAnumaReference(data: BinaryData, mimeInput: string, signal?: AbortSignal): Promise<string> {
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
     const mime = cleanMime(mimeInput, 'image/png').toLocaleLowerCase();
     if (!IMAGE_REFERENCE_MIMES.has(mime)) {
-      throw new ImageReferenceError(
+      throw pipelineError('reference_upload', new ImageReferenceError(
         'reference_image_type_unsupported',
         '参考图格式不受支持',
         `unsupported reference image type: ${mime}`
-      );
+      ));
     }
     if (bytes.byteLength === 0 || bytes.byteLength > IMAGE_REFERENCE_MAX_BYTES) {
-      throw new ImageReferenceError(
+      throw pipelineError('reference_upload', new ImageReferenceError(
         'reference_image_too_large',
         '参考图为空或超过 10MB',
         `reference image size is ${bytes.byteLength} bytes`
-      );
+      ));
     }
 
     const extension = mime === 'image/jpeg' ? 'jpg' : mime.split('/')[1] ?? 'png';
-    const response = await requestJson<unknown>(
-      this.http,
-      {
-        url: endpoint(this.config.baseUrl, '/media/upload'),
-        method: 'POST',
-        signal,
-        timeoutMs: numberOption(this.config, 'uploadTimeoutMs', 20_000),
-        body: {
-          filename: `reference.${extension}`,
-          content_type: mime,
-          data: toBase64(bytes)
-        }
-      },
-      secretFor(this.config)
-    );
+    let response: unknown;
+    try {
+      response = await requestJson<unknown>(
+        this.http,
+        {
+          url: endpoint(this.config.baseUrl, '/media/upload'),
+          method: 'POST',
+          signal,
+          timeoutMs: numberOption(this.config, 'uploadTimeoutMs', 20_000),
+          body: {
+            filename: `reference.${extension}`,
+            content_type: mime,
+            data: toBase64(bytes)
+          }
+        },
+        secretFor(this.config)
+      );
+    } catch (error) {
+      throw pipelineError('reference_upload', error);
+    }
     if (!isRecord(response) || typeof response.url !== 'string' || !response.url.startsWith('https://')) {
-      throw new ImageReferenceError(
+      throw pipelineError('reference_upload', new ImageReferenceError(
         'reference_upload_invalid_response',
         '参考图上传返回无效，请稍后重试',
         'anuma reference upload did not return an HTTPS URL'
-      );
+      ));
     }
     return response.url;
   }
 
-  private async materializeImage(response: ImageApiResponse, signal?: AbortSignal): Promise<GeneratedImage> {
+  /** Parse and materialize an OpenAI-compatible image response. */
+  private async materializeOpenAICompatible(response: ImageApiResponse, signal?: AbortSignal): Promise<GeneratedImage> {
+    let first: ImageApiItem;
+    try {
+      first = this.firstImage(response);
+      if (first.b64_json) {
+        const data = fromBase64(first.b64_json);
+        if (!data.byteLength) throw new ProviderRequestError('image response was empty');
+        return { data, mime: first.mime_type ?? 'image/png' };
+      }
+    } catch (error) {
+      throw pipelineError('generation', error);
+    }
+
+    try {
+      return await this.downloadGeneratedImage(first.url!, first.mime_type, signal);
+    } catch (error) {
+      throw pipelineError('download', error);
+    }
+  }
+
+  private firstImage(response: ImageApiResponse): ImageApiItem {
     const first = response.data?.[0];
     if (!first) throw new ProviderRequestError('image response contained no data');
-    if (first.b64_json) {
-      const data = fromBase64(first.b64_json);
-      if (!data.byteLength) throw new ProviderRequestError('image response was empty');
-      return { data, mime: first.mime_type ?? 'image/png' };
-    }
-    if (!first.url) throw new ProviderRequestError('image response contained neither b64_json nor url');
+    if (!first.b64_json && !first.url) throw new ProviderRequestError('image response contained neither b64_json nor url');
+    return first;
+  }
 
+  private async downloadGeneratedImage(url: string, fallbackMime: string | undefined, signal?: AbortSignal): Promise<GeneratedImage> {
     const downloaded = await this.http.request({
-      url: first.url,
+      url,
       method: 'GET',
       signal,
       timeoutMs: numberOption(this.config, 'timeoutMs')
@@ -277,7 +327,7 @@ export class BuiltinImageProvider implements ImageProvider {
     if (!downloaded.body.byteLength) throw new ProviderRequestError('downloaded image was empty');
     return {
       data: downloaded.body,
-      mime: cleanMime(headerValue(downloaded.headers, 'content-type'), first.mime_type ?? 'image/png')
+      mime: cleanMime(headerValue(downloaded.headers, 'content-type'), fallbackMime ?? 'image/png')
     };
   }
 }

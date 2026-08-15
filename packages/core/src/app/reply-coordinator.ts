@@ -1,7 +1,7 @@
 import type { MemoryProvider } from '../memory/types.js';
 import type { MessageRepo } from '../db/message.repo.js';
 import type { ReplyBatchRepo } from '../db/reply-batch.repo.js';
-import type { ChatChunk, ChatContentPart, ChatProvider, ChatRequest, ChatTurn } from '../providers/types.js';
+import { ImagePipelineError, ProviderRequestError, type ChatChunk, type ChatContentPart, type ChatProvider, type ChatRequest, type ChatTurn, type GeneratedImage, type ImagePipelineStage } from '../providers/types.js';
 import type { ToolCallRuntime } from '../tools/tool-runtime.js';
 import type { ConfiguredWebSearch, WebSearchResult } from '../providers/web-search.js';
 import { formatWebSearchContext, webSearchPartMeta } from '../providers/web-search.js';
@@ -20,6 +20,8 @@ const MAX_CONTEXT_IMAGE_BYTES = 2 * 1024 * 1024;
 const STREAM_WRITE_INTERVAL_MS = 250;
 /** ...or one DB write per this many deltas, whichever comes first. */
 const STREAM_WRITE_MAX_DELTAS = 32;
+/** Shown only when a model emitted an image-only reply and image execution failed. */
+const IMAGE_FAILURE_FALLBACK_TEXT = '（图片生成失败了，可以再试一次。）';
 
 export interface ReplyCoordinatorOptions {
   messages: MessageRepo;
@@ -163,9 +165,11 @@ export class ReplyCoordinator {
       const semanticText = stripModelMediaExecutionClaims(rawSemanticText, Boolean(userDirectives.wantImage || userDirectives.wantVoice));
       const directives = mergeDirectives(userDirectives, stripped.directives, buildImageFallbackPrompt(userDirectives, recent, latestUser));
       visibleText = directives.voiceOnly || directives.stickerOnly ? '' : semanticText;
+      const media = await this.appendRequestedMedia(assistantId, semanticText, directives, controller.signal, { batchId, revision });
+      if (!visibleText.trim() && media.appended === 0 && media.imageAttempted && media.imageFailed) visibleText = IMAGE_FAILURE_FALLBACK_TEXT;
       await this.options.messages.updatePart(partId, { text: visibleText });
-      const mediaCount = await this.appendRequestedMedia(assistantId, semanticText, directives, controller.signal, { batchId, revision });
-      if (!semanticText.trim() && mediaCount === 0) throw new Error('provider returned an empty reply');
+      if (!visibleText.trim() && media.appended === 0) throw new Error('provider returned an empty reply');
+      const mediaCount = media.appended;
       await this.options.messages.updateMeta(assistantId, { batchId, revision, partial: false, model: result.model, finishReason: result.finishReason ?? null, usage: result.usage ?? null, directives, mediaCount, ...(webSearchResult ? webSearchPartMeta(webSearchResult) : {}), ...(result.webSearch ? { webSearch: result.webSearch } : {}) });
       await this.options.messages.setStatus(assistantId, 'sent');
       const assistant = await this.options.messages.get(assistantId); if (!assistant) throw new Error('assistant message was not persisted');
@@ -182,33 +186,62 @@ export class ReplyCoordinator {
 
   async recover(): Promise<void> { const open = await this.options.batches.latestOpen(); if (open) this.schedule(open.id, open.revision); }
 
-  private async appendRequestedMedia(messageId: string, text: string, directives: EffectiveDirectives, signal: AbortSignal, context: { batchId: string; revision: number }): Promise<number> {
-    if (signal.aborted) return 0;
+  private async appendRequestedMedia(messageId: string, text: string, directives: EffectiveDirectives, signal: AbortSignal, context: { batchId: string; revision: number }): Promise<MediaAppendResult> {
+    const result: MediaAppendResult = { appended: 0, imageAttempted: false, imageFailed: false };
+    if (signal.aborted) return result;
     const { batchId, revision } = context;
     const runtime = this.runtime();
-    if (!runtime) {
-      if (directives.requiredImage) throw new Error('image runtime is unavailable');
-      return 0;
-    }
-    let appended = 0;
     const imagePrompt = directives.selfImagePrompt ?? directives.imagePrompt;
-    if (directives.requiredImage && !imagePrompt) throw new Error('image request did not resolve to a prompt');
-    if (imagePrompt) {
+    if (!runtime) {
+      if (directives.requiredImage || imagePrompt) await this.failImage(result, messageId, context, { stage: 'generation', error: new Error('image runtime is unavailable'), prompt: imagePrompt ?? undefined, selfImage: Boolean(directives.selfImagePrompt) });
+      return result;
+    }
+    if (directives.requiredImage && !imagePrompt) {
+      await this.failImage(result, messageId, context, { stage: 'generation', error: new Error('image request did not resolve to a prompt'), selfImage: Boolean(directives.selfImagePrompt) });
+    } else if (imagePrompt) {
+      result.imageAttempted = true;
       try {
         const provider = await runtime.imageProvider?.();
         if (!provider?.configured) {
-          if (directives.requiredImage) throw new Error('image provider is not configured');
+          await this.failImage(result, messageId, context, { stage: 'generation', error: new Error('image provider is not configured'), provider: provider?.name, prompt: imagePrompt, selfImage: Boolean(directives.selfImagePrompt) });
         } else {
-          this.options.emit('reply.image.generating', { batchId, revision, messageId, type: 'image' });
-          const references = directives.selfImagePrompt ? await runtime.referenceImages?.().catch(() => []) : undefined;
-          const generated = await provider.generate(imagePrompt, { signal, ...(references?.length ? { referenceImages: references } : {}) });
-          const record = await runtime.media.save({ kind: 'image', data: generated.data, mime: generated.mime, name: `sooya-${Date.now()}.image`, metadata: { prompt: imagePrompt, provider: provider.name, generated: true } });
-          await this.options.messages.appendPart(messageId, { type: 'image', mediaId: record.id, meta: { prompt: imagePrompt, generated: true, selfImage: Boolean(directives.selfImagePrompt) } });
-          this.options.emit('reply.media.created', { batchId, revision, messageId, type: 'image', mediaId: record.id }); appended += 1;
+          this.options.emit('reply.image.generating', { batchId, revision, messageId, type: 'image', provider: provider.name });
+          let references: Array<{ data: Uint8Array; mime: string }> | undefined;
+          if (directives.selfImagePrompt) {
+            try {
+              references = await runtime.referenceImages?.(imagePrompt) ?? [];
+            } catch (error) {
+              await this.failImage(result, messageId, context, { stage: stageOf(error, 'reference_read'), error, provider: provider.name, prompt: imagePrompt, selfImage: Boolean(directives.selfImagePrompt) });
+              return result;
+            }
+          }
+          const startedAt = Date.now();
+          let generated: GeneratedImage;
+          try {
+            generated = await provider.generate(imagePrompt, { signal, ...(references?.length ? { referenceImages: references } : {}) });
+          } catch (error) {
+            await this.failImage(result, messageId, context, {
+              stage: stageOf(error, 'generation'),
+              error,
+              provider: provider.name,
+              elapsedMs: Date.now() - startedAt,
+              referenceCount: references?.length ?? 0,
+              prompt: imagePrompt,
+              selfImage: Boolean(directives.selfImagePrompt)
+            });
+            return result;
+          }
+          try {
+            const record = await runtime.media.save({ kind: 'image', data: generated.data, mime: generated.mime, name: `sooya-${Date.now()}.image`, metadata: { prompt: imagePrompt, provider: provider.name, generated: true } });
+            await this.options.messages.appendPart(messageId, { type: 'image', mediaId: record.id, meta: { prompt: imagePrompt, generated: true, selfImage: Boolean(directives.selfImagePrompt) } });
+            this.options.emit('reply.media.created', { batchId, revision, messageId, type: 'image', mediaId: record.id, provider: provider.name });
+            result.appended += 1;
+          } catch (error) {
+            await this.failImage(result, messageId, context, { stage: stageOf(error, 'media_save'), error, provider: provider.name, prompt: imagePrompt, selfImage: Boolean(directives.selfImagePrompt) });
+          }
         }
       } catch (error) {
-        this.options.emit('reply.media.failed', { batchId, revision, messageId, type: 'image', error: errorMessage(error) });
-        if (directives.requiredImage) throw error;
+        await this.failImage(result, messageId, context, { stage: stageOf(error, 'generation'), error, prompt: imagePrompt, selfImage: Boolean(directives.selfImagePrompt) });
       }
     }
     if (directives.stickers?.length && !directives.noSticker && runtime.stickers) {
@@ -220,7 +253,7 @@ export class ReplyCoordinator {
           const sticker = matches.find((item) => !seen.has(item.id)) ?? (await runtime.stickers.list({ enabledOnly: true, sort: 'usage', limit: 24 })).find((item) => !seen.has(item.id));
           if (!sticker) continue; seen.add(sticker.id);
           await this.options.messages.appendPart(messageId, { type: 'sticker', mediaId: sticker.mediaId, meta: { stickerId: sticker.id, intent } });
-          await runtime.stickers.markAssistantUsed(sticker.id); this.options.emit('reply.media.created', { batchId, revision, messageId, type: 'sticker', mediaId: sticker.mediaId, stickerId: sticker.id }); appended += 1;
+          await runtime.stickers.markAssistantUsed(sticker.id); this.options.emit('reply.media.created', { batchId, revision, messageId, type: 'sticker', mediaId: sticker.mediaId, stickerId: sticker.id }); result.appended += 1;
         } catch (error) { this.options.emit('reply.media.failed', { batchId, revision, messageId, type: 'sticker', error: errorMessage(error) }); }
       }
     }
@@ -232,11 +265,58 @@ export class ReplyCoordinator {
           const audio = await provider.synthesize(text, { signal, ...(directives.voiceEmotion ? { emotion: directives.voiceEmotion } : {}) });
           const record = await runtime.media.save({ kind: 'audio', data: audio.data, mime: audio.mime, name: `sooya-${Date.now()}.${audio.format}`, metadata: { provider: provider.name, generated: true } });
           await this.options.messages.appendPart(messageId, { type: 'audio', mediaId: record.id, transcript: text, duration: audio.durationSec ?? null, meta: { generated: true, emotion: directives.voiceEmotion ?? null, intensity: directives.voiceIntensity ?? null } });
-          this.options.emit('reply.media.created', { batchId, revision, messageId, type: 'audio', mediaId: record.id }); appended += 1;
+          this.options.emit('reply.media.created', { batchId, revision, messageId, type: 'audio', mediaId: record.id }); result.appended += 1;
         }
       } catch (error) { this.options.emit('reply.media.failed', { batchId, revision, messageId, type: 'audio', error: errorMessage(error) }); }
     }
-    return appended;
+    return result;
+  }
+
+  private async failImage(
+    result: MediaAppendResult,
+    messageId: string,
+    context: { batchId: string; revision: number },
+    input: {
+      stage: ImagePipelineStage;
+      error: unknown;
+      provider?: string;
+      prompt?: string;
+      selfImage?: boolean;
+      elapsedMs?: number;
+      referenceCount?: number;
+    }
+  ): Promise<void> {
+    result.imageAttempted = true;
+    result.imageFailed = true;
+    const pipeline = input.error instanceof ImagePipelineError ? input.error : undefined;
+    const requestError = input.error instanceof ProviderRequestError ? input.error : undefined;
+    const stage = pipeline?.stage ?? input.stage;
+    // Keep the assistant message alive and visible: the failed image gets its
+    // own failed part, exactly like the server's image-part failure semantics.
+    await this.options.messages.appendPart(messageId, {
+      type: 'image',
+      status: 'failed',
+      error: errorMessage(input.error),
+      meta: {
+        prompt: input.prompt ?? '',
+        generated: true,
+        selfImage: input.selfImage === true,
+        stage,
+        ...(input.provider ? { provider: input.provider } : {})
+      }
+    });
+    this.options.emit('reply.media.failed', {
+      batchId: context.batchId,
+      revision: context.revision,
+      messageId,
+      type: 'image',
+      stage,
+      provider: input.provider,
+      status: pipeline?.status ?? requestError?.status,
+      elapsedMs: input.elapsedMs,
+      referenceCount: input.referenceCount,
+      error: errorMessage(input.error)
+    });
   }
 
   private async buildTurns(messages: ChatMessage[], latestUser: ChatMessage): Promise<ChatTurn[]> {
@@ -275,6 +355,7 @@ export class ReplyCoordinator {
   private async commitMemory(batchId: string, revision: number, user: ChatMessage, assistantText: string, signal: AbortSignal): Promise<void> { if (!signal.aborted) await this.options.memory.commit({ batchId, revision, userText: textOf(user), assistantText, signal }); }
 }
 
+interface MediaAppendResult { appended: number; imageAttempted: boolean; imageFailed: boolean; }
 interface EffectiveDirectives extends ModelDirectives { noSticker?: boolean; noVoice?: boolean; requiredImage?: boolean; }
 function mergeDirectives(user: UserDirectives, model: ModelDirectives, fallbackImagePrompt: string | null): EffectiveDirectives {
   const directives: EffectiveDirectives = { ...model, noSticker: user.noSticker, noVoice: user.noVoice, requiredImage: user.wantImage || undefined };
@@ -295,4 +376,5 @@ function appendDirectiveProtocol(system: string | undefined): string { return [s
 class SupersededReplyError extends Error { override name = 'SupersededReplyError'; }
 function isMessage(value: ChatMessage | undefined): value is ChatMessage { return value !== undefined; }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500); }
+function stageOf(error: unknown, fallback: ImagePipelineStage): ImagePipelineStage { return error instanceof ImagePipelineError ? error.stage : fallback; }
 export function textOf(message: ChatMessage): string { return message.content.map((part) => part.text ?? part.transcript ?? '').filter(Boolean).join('\n').trim(); }

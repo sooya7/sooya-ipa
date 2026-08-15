@@ -158,6 +158,25 @@ export class ProviderRequestError extends Error {
   constructor(message: string, readonly status?: number) { super(message); }
 }
 
+/** Where an image request failed in the local pipeline. */
+export type ImagePipelineStage =
+  | 'reference_select'
+  | 'reference_read'
+  | 'reference_upload'
+  | 'generation'
+  | 'download'
+  | 'media_save';
+
+/** Image failures carry their pipeline stage so reply media events stay diagnostic. */
+export class ImagePipelineError extends Error {
+  override name = 'ImagePipelineError';
+  constructor(
+    readonly stage: ImagePipelineStage,
+    message: string,
+    readonly status?: number
+  ) { super(message); }
+}
+
 export class ImageEditUnsupportedError extends Error {
   override name = 'ImageEditUnsupportedError';
 }

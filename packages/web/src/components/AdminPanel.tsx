@@ -5,6 +5,7 @@ import { useAutoNotice } from '../lib/autoNotice.js';
 import { navigate, APP_NAVIGATION_EVENT } from '../lib/navigation.js';
 import { AppLink } from './AppLink.js';
 import { currentSooyaClient, type SooyaClient } from '../lib/sooyaClient.js';
+import { isNativeSooya } from '../local/nativeRuntime.js';
 import { formatAdminDateTime } from '../lib/adminDisplay.js';
 import { featureApi } from '../lib/features.js';
 import { AvatarEditor, emotionLabel, ReferencesEditor, StorageEditor } from './FeatureAdminPage.js';
@@ -443,6 +444,7 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
   const [keyDraft, setKeyDraft] = useState('');
   const [pulling, setPulling] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [testingSelfie, setTestingSelfie] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [libraryKey, setLibraryKey] = useState(0);
   const [previewText, setPreviewText] = useState('你好呀，我刚刚想到你了。');
@@ -557,6 +559,29 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
     }
   };
 
+  /**
+   * Native-only end-to-end selfie probe: same framing selection, same single
+   * reference upload and same generation request as the chat runtime.
+   */
+  const runSelfieTest = async () => {
+    if (selected !== 'image') return;
+    if (!confirmAction('测试自拍链路会真实上传一张参考图并消耗一次生成额度，确定继续吗？')) return;
+    setTestingSelfie(true);
+    setTestResult(null);
+    try {
+      const r = await adminApi.testSelfieImage();
+      const text = `自拍链路正常：${r.provider}${r.model ? ` / ${r.model}` : ''}，参考图 ${r.framing ?? '无'}，${r.detail}，耗时 ${r.latencyMs} ms`;
+      setTestResult({ ok: true, text });
+      onNotice(text);
+    } catch (e) {
+      const text = errorText(e);
+      setTestResult({ ok: false, text });
+      onNotice(text);
+    } finally {
+      setTestingSelfie(false);
+    }
+  };
+
   /** Saves what is on screen into the library as a new entry. */
   const addToLibrary = async () => {
     if (selected === 'webSearch') return;
@@ -586,7 +611,7 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
       <aside>
         <h2>模型能力</h2>
         {CAPABILITIES.map(([key, label]) => (
-          <button key={key} type="button" className={selected === key ? 'admin-model-item active' : 'admin-model-item'} onClick={() => { setSelected(key); setAvailable(null); setKeyDraft(''); setTestResult(null); }}>
+          <button key={key} type="button" className={selected === key ? 'admin-model-item active' : 'admin-model-item'} onClick={() => { setSelected(key); setAvailable(null); setKeyDraft(''); setTestResult(null); setTestingSelfie(false); }}>
             <span>{label}</span>
             <small>{key === 'webSearch'
               ? ((models.webSearch as AdminWebSearchConfig | undefined)?.enabled ? (models.webSearch as AdminWebSearchConfig).providers.join(' → ') : '已关闭')
@@ -749,7 +774,10 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
         <div className="admin-actions">
           {selected === 'image' && <small className="admin-muted">测试出图会真实调用图片服务并消耗一次额度。</small>}
           <button type="button" onClick={() => void save()}>保存模型配置</button>
-          <button type="button" data-testid="admin-model-test" disabled={testing} onClick={() => void runTest()}>{testing ? '测试中…' : '测试连接'}</button>
+          <button type="button" data-testid="admin-model-test" disabled={testing || testingSelfie} onClick={() => void runTest()}>{testing ? '测试中…' : selected === 'image' ? '测试文生图' : '测试连接'}</button>
+          {selected === 'image' && isNativeSooya() && (
+            <button type="button" data-testid="admin-model-selfie-test" disabled={testing || testingSelfie} onClick={() => void runSelfieTest()}>{testingSelfie ? '测试中…' : '测试自拍链路'}</button>
+          )}
           <button type="button" data-testid="admin-model-add-preset" onClick={() => void addToLibrary()}>存入模型库</button>
         </div>
         {testResult ? (
