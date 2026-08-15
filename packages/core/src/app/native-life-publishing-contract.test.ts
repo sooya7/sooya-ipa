@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
+// This contract also guards the core code shipped inside the signed IPA OTA bundle.
 describe('native Life publishing contract', () => {
   it('uses the persisted IPA switch instead of a deployment env hard-disable', () => {
     const source = readFileSync(path.resolve('src/app/local-core.ts'), 'utf8');
