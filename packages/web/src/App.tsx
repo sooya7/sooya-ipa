@@ -66,6 +66,7 @@ export function ChatView({ chat, viewStateRef }: { chat: ChatController; viewSta
   latestMessagesRef.current = chat.messages;
   // 引用气泡按 id 取目标消息；全数组 find 在每条可见气泡上都扫一遍，长会话滚动会退化。
   const byId = useMemo(() => new Map(chat.messages.map((message) => [message.id, message])), [chat.messages]);
+  const failedAssistantBatchIds = useMemo(() => new Set(chat.messages.flatMap((message) => message.role === 'assistant' && message.status === 'failed' && typeof message.meta?.batchId === 'string' ? [message.meta.batchId] : [])), [chat.messages]);
   const timeZone = userTimeZone();
   const virtualizer = useVirtualizer({
     count: chat.messages.length,
@@ -229,7 +230,7 @@ export function ChatView({ chat, viewStateRef }: { chat: ChatController; viewSta
     if (message) setQuote(message);
   }, [chat.ensureQuotedMessage, chat.messages]);
   const action = useCallback(async (work: () => Promise<unknown>, success?: string) => { try { await work(); if (success) setNotice(success); } catch (error) { setNotice((error as Error).message); } }, []);
-  const statusLabel = chat.connection === 'online' ? chat.activity.thinking ? chat.activity.label ?? '正在输入' : '在线' : chat.connection === 'connecting' ? '连接中…' : chat.connection === 'unauthorized' ? '需要访问令牌' : '连接已断开，正在重试';
+  const statusLabel = chat.connection === 'online' ? '在线' : chat.connection === 'connecting' ? '连接中…' : chat.connection === 'unauthorized' ? '需要访问令牌' : '连接已断开，正在重试';
   const streamingMessage = useMemo<ChatMessage | null>(() => chat.streamingDraft ? {
     id: chat.streamingDraft.id,
     conversationId: 'main',
@@ -285,6 +286,7 @@ export function ChatView({ chat, viewStateRef }: { chat: ChatController; viewSta
                   showAvatar={showAvatar}
                   timeZone={timeZone}
                   onRetry={(m) => void action(() => { setNotice('正在重试'); return chat.retryFailed(m); })}
+                  onRetryReply={(batchId) => void action(() => chat.retryReply(batchId))}
                   onResend={(m) => void action(() => chat.sendAgain(m), '已再次发送')}
                   onQuote={setQuote}
                   onWithdraw={(m) => void action(() => chat.withdraw(m), '消息已撤回并保留上下文占位')}
@@ -310,14 +312,14 @@ export function ChatView({ chat, viewStateRef }: { chat: ChatController; viewSta
         )}
         {chat.activity.thinking && !streamingMessage && (
           <div className="msg-row theirs" data-testid="typing-indicator">
-            <div className="avatar-slot"><img className="avatar" src={persona?.avatar ?? '/avatars/sooya.svg'} alt="" /></div>
+            <div className="avatar-slot">{chat.messages.at(-1)?.role !== 'assistant' && <img className="avatar" src={persona?.avatar ?? '/avatars/sooya.svg'} alt="" />}</div>
             <div className="msg-body"><div className="bubble bubble-text theirs typing"><span className="typing-dots"><i /><i /><i /></span></div></div>
           </div>
         )}
       </div>
       <div ref={bottomRef} className="bottom-anchor" />
     </div>
-    {Object.values(chat.replyFailures).map((failure) => (
+    {Object.values(chat.replyFailures).filter((failure) => !failedAssistantBatchIds.has(failure.batchId)).map((failure) => (
       <div className={`reply-failure-card${failure.partial ? ' partial' : ''}`} key={`${failure.batchId}:${failure.revision}`} role="status" data-testid="reply-failure-card">
         <span>{failure.message}</span>
         {failure.retryable && <button type="button" onClick={() => void action(() => chat.retryReply(failure.batchId))}>重新生成</button>}

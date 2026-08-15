@@ -164,7 +164,7 @@ interface Props {
    * the user can already see. Quoting anything further back is still shown.
    */
   previousId?: string | null;
-  onRetry?: (message: ChatMessage) => void; onResend?: (message: ChatMessage) => void; onQuote?: (message: ChatMessage) => void; onWithdraw?: (message: ChatMessage) => void; onOpenImage?: (mediaId: string) => void; onNotice?: (text: string) => void;
+  onRetry?: (message: ChatMessage) => void; onRetryReply?: (batchId: string) => void; onResend?: (message: ChatMessage) => void; onQuote?: (message: ChatMessage) => void; onWithdraw?: (message: ChatMessage) => void; onOpenImage?: (mediaId: string) => void; onNotice?: (text: string) => void;
 }
 
 /**
@@ -288,7 +288,7 @@ export function InnerThoughtChip({ messageId, onNotice }: { messageId: string; o
   );
 }
 
-export const MessageItem = memo(function MessageItem({ message, personaName, avatar, userAvatar, showAvatar, timeZone, highlightQuery, highlighted, highlightNonce, quoted, quotedLabel, quotedStatus, onQuotedClick, previousId, onRetry, onResend, onQuote, onWithdraw, onOpenImage, onNotice }: Props) {
+export const MessageItem = memo(function MessageItem({ message, personaName, avatar, userAvatar, showAvatar, timeZone, highlightQuery, highlighted, highlightNonce, quoted, quotedLabel, quotedStatus, onQuotedClick, previousId, onRetry, onRetryReply, onResend, onQuote, onWithdraw, onOpenImage, onNotice }: Props) {
   const mine = message.role === 'user';
   // Every assistant turn carries `replyTo` for stream recovery, so a preview is only
   // worth showing when it says something the bubble order does not: not the message
@@ -313,6 +313,13 @@ export const MessageItem = memo(function MessageItem({ message, personaName, ava
   const failedMessage = message.status === 'failed';
   const replayable = isReplayableUserMessage(message);
   const retryable = isRetryableFailedMessage(message);
+  const assistantRetryBatchId = !mine && failedMessage && typeof message.meta?.batchId === 'string' ? message.meta.batchId : null;
+  const hasRenderableContent = visible.some((part) => {
+    if (part.type === 'text') return Boolean(stripModelDirectivesForDisplay(part.text));
+    if (part.type === 'audio') return Boolean(part.media || part.transcript);
+    if (part.type === 'sticker') return Boolean(part.media);
+    return part.type === 'image' || part.type === 'file';
+  });
   const [menu, setMenu] = useState<{ x: number; y: number; selectedText: string } | null>(null);
   const [flash, setFlash] = useState(false);
   const messageRef = useRef<HTMLDivElement | null>(null);
@@ -395,8 +402,8 @@ export const MessageItem = memo(function MessageItem({ message, personaName, ava
         {!mine && message.status === 'sent' && (
           <InnerThoughtChip messageId={message.id} onNotice={onNotice} />
         )}
-        <div className="bubbles">{visible.map((part) => { switch (part.type) { case 'text': { const displayText = stripModelDirectivesForDisplay(part.text); const readAloudId = part.meta?.readAloudMediaId as string | undefined; return displayText ? <div key={part.id} className="text-bubble-block"><div className={`bubble bubble-text ${mine ? 'mine' : 'theirs'}`} data-testid="text-bubble">{highlightedText(displayText, highlightQuery)}</div>{!mine && <WebCitations meta={part.meta} />}{readAloudId && <ReadAloudButton mediaId={readAloudId} />}</div> : null; } case 'sticker': return <StickerPart key={part.id} part={part} />; case 'image': return <ImagePart key={part.id} part={part} mine={mine} onOpen={onOpenImage} />; case 'audio': return <AudioBubble key={part.id} part={part} mine={mine} />; case 'file': return <FilePart key={part.id} part={part} mine={mine} />; default: return null; } })}</div>
-        <div className="msg-meta"><span className="clock" title={formatFullDateTime(message.createdAt, timeZone)}>{formatClock(message.createdAt, timeZone)}</span>{message.pendingLocal && message.status !== 'failed' && <span className="sending-dot" aria-label="发送中" />}{failedMessage && <span className="failed-flag">发送失败{retryable && onRetry && <button type="button" className="retry-btn" onClick={() => onRetry(message)}>重试</button>}</span>}<button type="button" className="message-menu-button" aria-label="消息操作" onClick={(event) => openMenu(event.clientX, event.clientY)}>···</button></div>
+        <div className="bubbles">{!mine && failedMessage && !hasRenderableContent && <div className="bubble bubble-note reply-failed-bubble" data-testid="assistant-reply-failed"><span>这次回复没有生成成功。</span>{assistantRetryBatchId && onRetryReply && <button type="button" className="retry-btn" onClick={() => onRetryReply(assistantRetryBatchId)}>重新生成</button>}</div>}{visible.map((part) => { switch (part.type) { case 'text': { const displayText = stripModelDirectivesForDisplay(part.text); const readAloudId = part.meta?.readAloudMediaId as string | undefined; return displayText ? <div key={part.id} className="text-bubble-block"><div className={`bubble bubble-text ${mine ? 'mine' : 'theirs'}`} data-testid="text-bubble">{highlightedText(displayText, highlightQuery)}</div>{!mine && <WebCitations meta={part.meta} />}{readAloudId && <ReadAloudButton mediaId={readAloudId} />}</div> : null; } case 'sticker': return <StickerPart key={part.id} part={part} />; case 'image': return <ImagePart key={part.id} part={part} mine={mine} onOpen={onOpenImage} />; case 'audio': return <AudioBubble key={part.id} part={part} mine={mine} />; case 'file': return <FilePart key={part.id} part={part} mine={mine} />; default: return null; } })}</div>
+        <div className="msg-meta"><span className="clock" title={formatFullDateTime(message.createdAt, timeZone)}>{formatClock(message.createdAt, timeZone)}</span>{message.pendingLocal && message.status !== 'failed' && <span className="sending-dot" aria-label="发送中" />}{failedMessage && mine && <span className="failed-flag">发送失败{retryable && onRetry && <button type="button" className="retry-btn" onClick={() => onRetry(message)}>重试</button>}</span>}{failedMessage && !mine && hasRenderableContent && <span className="failed-flag">回复中断{assistantRetryBatchId && onRetryReply && <button type="button" className="retry-btn" onClick={() => onRetryReply(assistantRetryBatchId)}>重新生成</button>}</span>}<button type="button" className="message-menu-button" aria-label="消息操作" onClick={(event) => openMenu(event.clientX, event.clientY)}>···</button></div>
       </div>
       {menu && <div ref={menuRef} className="message-action-menu" role="menu" aria-label="消息操作" style={{ position: 'fixed', left: menu.x, top: menu.y, zIndex: 10000 }}>
         {text && <button role="menuitem" type="button" onClick={() => void act(() => copy(text), '已复制全文')}>复制全文</button>}

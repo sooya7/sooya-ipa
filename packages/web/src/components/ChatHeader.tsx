@@ -20,7 +20,7 @@ export function ChatHeader({ persona, connection, statusLabel, life, presence, o
         <img className="topbar-avatar" src={persona?.avatar ?? '/avatars/sooya.svg'} alt="" />
         <div className="topbar-text">
           <span className="topbar-name">{persona?.name ?? 'SOOYA'}</span>
-          <span className={`topbar-status ${connection}`} data-testid="connection-status"><span className="status-dot" />{statusLabel}</span>
+          <span className={`topbar-status ${connection}`} data-testid="connection-status"><span className="status-dot" /><span className="topbar-status-label">{statusLabel}</span></span>
           {connection === 'online' && life && <span className="topbar-life" data-testid="life-activity" title={`心情${life.mood}`}>{life.activity}</span>}
         </div>
       </div>

@@ -34,6 +34,7 @@ export class ChatStream {
   private stopped = false;
   private readonly types = [
     'message.received',
+    'reply.queued',
     'reply.thinking',
     'reply.text.delta',
     'reply.text.done',
@@ -46,6 +47,7 @@ export class ChatStream {
     'reply.media.failed',
     'reply.completed',
     'reply.failed',
+    'reply.interrupted',
     'reply.batch.collecting',
     'reply.batch.queued',
     'reply.generation.started',

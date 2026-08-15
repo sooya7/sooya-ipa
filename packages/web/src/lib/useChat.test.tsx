@@ -929,3 +929,23 @@ describe('useChat 回前台重同步', () => {
   });
 });
 
+
+
+describe('useChat 回复终态栅栏', () => {
+  it('中断后拒绝同 revision 的迟到输入事件，新 revision 仍可正常回复', async () => {
+    const { chat, push } = await mountStreaming();
+    await push('reply.queued', { batchId: 'batch_state', revision: 1, count: 1 });
+    expect(chat().activity.thinking).toBe(true);
+    await push('reply.interrupted', { batchId: 'batch_state', revision: 1, reason: 'app_inactive' });
+    expect(chat().activity.thinking).toBe(false);
+    expect(Object.values(chat().replyFailures)[0]?.retryable).toBe(true);
+    await push('reply.text.done', { batchId: 'batch_state', revision: 1 });
+    await push('reply.text.delta', { batchId: 'batch_state', revision: 1, messageId: 'stale_assistant', delta: '旧回复' });
+    expect(chat().activity.thinking).toBe(false);
+    expect(chat().streamingDraft).toBeNull();
+    await push('reply.queued', { batchId: 'batch_state', revision: 2, count: 1 });
+    expect(chat().activity.thinking).toBe(true);
+    await push('reply.interrupted', { batchId: 'batch_state', revision: 1, reason: 'superseded' });
+    expect(chat().activity.thinking).toBe(true);
+  });
+});

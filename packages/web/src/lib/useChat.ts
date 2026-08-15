@@ -79,6 +79,7 @@ export function useChat(client: SooyaClient | null = currentSooyaClient()) {
   const [replyFailures, setReplyFailures] = useState<Record<string, ReplyFailureCard>>({});
   const streamRef = useRef<{ stop(): void; setLastEventId?(seq: number): void } | null>(null);
   const batchRevisionsRef = useRef(new Map<string, number>());
+  const terminalBatchRevisionsRef = useRef(new Map<string, number>());
   const maxSeqRef = useRef(0);
   const streamingDraftRef = useRef<StreamingDraft | null>(null);
   const quotedStatesRef = useRef(new Map<string, QuotedMessageState>());
@@ -137,13 +138,17 @@ export function useChat(client: SooyaClient | null = currentSooyaClient()) {
   const handleEvent = useCallback((type: string, data: Record<string, any>) => {
         // Drop events from an old revision of a batch (stale generation must
         // never overwrite the newer one's state).
-        const acceptBatchEvent = (payload: Record<string, any>): boolean => {
+        const acceptBatchEvent = (payload: Record<string, any>, terminal = false): boolean => {
           const batchId = String(payload.batchId ?? '');
           if (!batchId) return true;
           const revision = Number(payload.revision ?? 0);
+          if (!Number.isFinite(revision) || revision <= 0) return true;
           const seen = batchRevisionsRef.current.get(batchId) ?? 0;
+          const terminalRevision = terminalBatchRevisionsRef.current.get(batchId) ?? 0;
           if (revision < seen) return false;
-          batchRevisionsRef.current.set(batchId, revision);
+          if (!terminal && revision <= terminalRevision) return false;
+          batchRevisionsRef.current.set(batchId, Math.max(seen, revision));
+          if (terminal) terminalBatchRevisionsRef.current.set(batchId, Math.max(terminalRevision, revision));
           return true;
         };
         switch (type) {
@@ -158,8 +163,8 @@ export function useChat(client: SooyaClient | null = currentSooyaClient()) {
             break;
           }
           case 'persona.updated': if (data.persona) setPersona((old) => ({ ...(old ?? { name: 'SOOYA', avatar: '/avatars/sooya.svg', userAvatar: '/avatars/user.svg', tagline: '' }), ...(data.persona as PersonaInfo) })); break;
-          case 'reply.queued': updateActivity({ thinking: true, label: `正在看你刚发的 ${Number(data.count ?? 1)} 条消息` }); break;
-          case 'reply.thinking': updateActivity({ thinking: true, label: '正在思考' }); break;
+          case 'reply.queued': if (acceptBatchEvent(data)) updateActivity({ thinking: true, label: `正在看你刚发的 ${Number(data.count ?? 1)} 条消息` }); break;
+          case 'reply.thinking': if (acceptBatchEvent(data)) updateActivity({ thinking: true, label: '正在思考' }); break;
           // Interruptible pipeline events (batchId + revision fenced).
           case 'reply.batch.collecting': if (acceptBatchEvent(data)) updateActivity({ thinking: true, label: '正在听你说' }); break;
           case 'reply.batch.queued': if (acceptBatchEvent(data)) updateActivity({ thinking: true, label: '正在整理' }); break;
@@ -168,6 +173,7 @@ export function useChat(client: SooyaClient | null = currentSooyaClient()) {
           case 'reply.generation.retrying': if (acceptBatchEvent(data)) updateActivity({ thinking: true, label: '回复有点慢，正在重试' }); break;
           case 'reply.publishing.started': if (acceptBatchEvent(data)) updateActivity({ thinking: true, label: '正在回复' }); break;
           case 'reply.publishing.partial': {
+            if (!acceptBatchEvent(data, true)) break;
             updateActivity({ thinking: false, label: null });
             const batchId = String(data.batchId ?? '');
             const revision = Number(data.revision ?? 0);
@@ -176,6 +182,7 @@ export function useChat(client: SooyaClient | null = currentSooyaClient()) {
             break;
           }
           case 'reply.completed': {
+            if (!acceptBatchEvent(data, true)) break;
             updateActivity({ thinking: false, label: null });
             const batchId = String(data.batchId ?? '');
             const revision = Number(data.revision ?? 0);
@@ -186,22 +193,38 @@ export function useChat(client: SooyaClient | null = currentSooyaClient()) {
             break;
           }
           case 'reply.superseded': break; // a newer revision owns the batch now
+          case 'reply.interrupted': {
+            if (!acceptBatchEvent(data, true)) break;
+            updateActivity({ thinking: false, label: null });
+            clearStreamingDraft();
+            const batchId = String(data.batchId ?? '');
+            const revision = Number(data.revision ?? 0);
+            const reason = String(data.reason ?? 'interrupted');
+            if (batchId && reason === 'app_inactive') {
+              setReplyFailures((previous) => ({ ...previous, [`${batchId}:${revision}`]: { batchId, revision, code: 'interrupted', retryable: true, message: '回复被系统中断了。', partial: false } }));
+            }
+            break;
+          }
           case 'reply.failed': {
+            if (!acceptBatchEvent(data, true)) break;
             updateActivity({ thinking: false, label: null });
             clearStreamingDraft();
             const failure = data.failure as { batchId?: string; revision?: number; code?: string; retryable?: boolean; message?: string } | undefined;
             const batchId = String(data.batchId ?? failure?.batchId ?? '');
             const revision = Number(data.revision ?? failure?.revision ?? 0);
+            const detail = typeof data.error === 'string' ? data.error : failure?.message ?? '';
             if (batchId) {
-              setReplyFailures((previous) => ({ ...previous, [`${batchId}:${revision}`]: { batchId, revision, code: failure?.code ?? 'internal_error', retryable: failure?.retryable ?? false, message: failure?.message ?? '这次回复没有生成成功。', partial: false } }));
+              setReplyFailures((previous) => ({ ...previous, [`${batchId}:${revision}`]: { batchId, revision, code: failure?.code ?? 'internal_error', retryable: failure?.retryable ?? true, message: detail || '这次回复没有生成成功。', partial: false } }));
             } else {
-              setError(failure?.message ?? '回复失败');
+              setError(detail || '回复失败');
             }
             const message = data.message as ChatMessage | undefined;
             if (message) applyMessages([message]);
+            else if (batchId) void resync();
             break;
           }
           case 'reply.text.delta': {
+            if (!acceptBatchEvent(data)) break;
             const id = String(data.messageId ?? '');
             const delta = String(data.delta ?? '');
             updateActivity({ thinking: true, label: '正在输入' });
@@ -215,9 +238,9 @@ export function useChat(client: SooyaClient | null = currentSooyaClient()) {
             }
             break;
           }
-          case 'reply.sticker.selecting': updateActivity({ thinking: true, label: '正在挑表情' }); break;
-          case 'reply.image.generating': updateActivity({ thinking: true, label: '正在生成图片' }); break;
-          case 'reply.audio.generating': updateActivity({ thinking: true, label: '正在生成语音' }); break;
+          case 'reply.sticker.selecting': if (acceptBatchEvent(data)) updateActivity({ thinking: true, label: '正在挑表情' }); break;
+          case 'reply.image.generating': if (acceptBatchEvent(data)) updateActivity({ thinking: true, label: '正在生成图片' }); break;
+          case 'reply.audio.generating': if (acceptBatchEvent(data)) updateActivity({ thinking: true, label: '正在生成语音' }); break;
           // Native multimedia reply orchestration (local ReplyCoordinator
           // emits these while appendRequestedMedia generates image/sticker/
           // voice parts). Reflect the in-flight state and reconcile the full
@@ -248,7 +271,7 @@ export function useChat(client: SooyaClient | null = currentSooyaClient()) {
             break;
           }
           case 'reply.text.done':
-          case 'reply.content.done': updateActivity({ thinking: true, label: '正在整理' }); break;
+          case 'reply.content.done': if (acceptBatchEvent(data)) updateActivity({ thinking: true, label: '正在整理' }); break;
           case 'voice.published':
           case 'voice.synthesis.failed': void resync(); break;
           case 'sticker.updated':
@@ -283,7 +306,7 @@ export function useChat(client: SooyaClient | null = currentSooyaClient()) {
   const reload = useCallback(async () => {
     setReady(false); setConnection('connecting'); setError(null);
     try {
-      maxSeqRef.current = 0; clearStreamingDraft(); quotedStatesRef.current.clear(); quotedRequestsRef.current.clear(); setQuotedStates({});
+      maxSeqRef.current = 0; batchRevisionsRef.current.clear(); terminalBatchRevisionsRef.current.clear(); clearStreamingDraft(); quotedStatesRef.current.clear(); quotedRequestsRef.current.clear(); setQuotedStates({}); setReplyFailures({});
       const boot = normalizeBootstrap(await dataClient.bootstrap());
       setPersona(personaFromBootstrap(boot)); trackSeq(boot.messages.messages); setMessages(boot.messages.messages); setHasMore(boot.messages.hasMore); setLife(boot.life); setPresence(boot.presence); setStickers(boot.stickers); streamRef.current?.setLastEventId?.(boot.messages.lastEventSeq); updateActivity({ thinking: false, label: null }); setError(null); setReady(true);
       startStream(boot.messages.lastEventSeq);
@@ -401,6 +424,7 @@ export function useChat(client: SooyaClient | null = currentSooyaClient()) {
   const retryReply = useCallback(async (batchId: string) => {
     try {
       const result = await dataClient.retryBatch(batchId);
+      batchRevisionsRef.current.set(batchId, Math.max(batchRevisionsRef.current.get(batchId) ?? 0, result.revision));
       setReplyFailures((previous) => { const next = { ...previous }; for (const key of Object.keys(next)) if (next[key]?.batchId === batchId) delete next[key]; return next; });
       updateActivity({ thinking: true, label: '正在重新生成' });
       return result;

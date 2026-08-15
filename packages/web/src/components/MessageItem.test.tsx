@@ -124,17 +124,18 @@ describe('MessageItem 引用块', () => {
 });
 
 describe('MessageItem 重放操作', () => {
-  it('不为失败的助手消息或历史音频显示重试入口', async () => {
-    await render(<MessageItem {...common} message={message({ id: 'a1', status: 'failed' })} onRetry={() => {}} />);
-    expect(container.querySelector('.retry-btn')).toBeNull();
+  it('失败的助手空消息原地显示重试卡，历史音频仍不开放发送重试', async () => {
+    const retryReply = vi.fn();
+    await render(<MessageItem {...common} message={message({ id: 'a1', status: 'failed', meta: { batchId: 'batch_1' }, content: [{ id: 'a1-p1', type: 'text', text: '', status: 'failed' }] })} onRetryReply={retryReply} />);
+    expect(container.querySelector('[data-testid="assistant-reply-failed"]')?.textContent).toContain('这次回复没有生成成功');
+    const retry = container.querySelector<HTMLButtonElement>('.retry-btn')!;
+    await act(async () => { retry.click(); });
+    expect(retryReply).toHaveBeenCalledWith('batch_1');
 
     await act(async () => { root!.unmount(); });
     root = null;
     container.remove();
-    await render(<MessageItem {...common} message={message({
-      id: 'u1', role: 'user', status: 'failed',
-      content: [{ id: 'audio', type: 'audio', mediaId: 'md_audio', status: 'sent' }]
-    })} onRetry={() => {}} />);
+    await render(<MessageItem {...common} message={message({ id: 'u1', role: 'user', status: 'failed', content: [{ id: 'audio', type: 'audio', mediaId: 'md_audio', status: 'sent' }] })} onRetry={() => {}} />);
     expect(container.querySelector('.retry-btn')).toBeNull();
   });
 });
