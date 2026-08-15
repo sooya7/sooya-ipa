@@ -29,3 +29,5 @@
   .chat-topbar .notification-menu { flex: 0 0 30px; }
   .chat-topbar .topbar-actions .history-tool-button, .chat-topbar .topbar-actions .notification-bell, .chat-topbar .topbar-actions .topbar-admin-entry { width: 30px; min-width: 30px; height: 30px; flex: 0 0 30px; }
 }
+
+/* Keep this file in the OTA path so verified chat-state fixes are published to installed IPA clients. */
