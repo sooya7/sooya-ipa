@@ -49,6 +49,14 @@ interface PreservedLocalState {
   tombstones: DatabaseRow[];
   localMemoryReceipts: DatabaseRow[];
 
+  // Built-in sticker binaries live in the IPA web bundle, not Media/objects.
+  // Preserve their SQLite rows so user meaning/favorites/use counters survive
+  // instead of resetting to the bundled defaults after a server migration.
+  builtinStickerMedia: DatabaseRow[];
+  builtinStickers: DatabaseRow[];
+  builtinStickerSearch: DatabaseRow[];
+  builtinStickerMarkers: DatabaseRow[];
+
   // These tables describe the IPA runtime, not server business data. Their
   // Keychain values live outside SQLite and survive the restore, so the DB
   // references/configuration must survive as well.
@@ -108,8 +116,9 @@ export async function pickFullBackup(): Promise<PickedFullBackup | null> {
 /**
  * Normal IPA backup restores remain full replacements. A server migration ZIP
  * (SOOYA-server-to-IPA-*.zip) is different: server chat/life/media become the
- * phone's business data, while IPA-local runtime configuration and hybrid
- * memory state survive. Server memories/stickers are intentionally absent.
+ * phone's business data, while IPA-local runtime configuration, built-in
+ * sticker state and hybrid memory state survive. Server memories/stickers are
+ * intentionally absent from the migration package.
  */
 export async function importFullBackup(selected: PickedFullBackup, password?: string): Promise<PreparedFullImport> {
   const archive = nativePlugin('SOOYAArchive');
@@ -167,6 +176,10 @@ async function captureLocalState(db: CapacitorDatabase): Promise<PreservedLocalS
     syncCursors: await db.query<DatabaseRow>('SELECT * FROM memory_sync_cursors'),
     tombstones: await db.query<DatabaseRow>('SELECT * FROM memory_tombstones'),
     localMemoryReceipts: await db.query<DatabaseRow>('SELECT * FROM local_memory_receipts'),
+    builtinStickerMedia: await db.query<DatabaseRow>("SELECT * FROM media WHERE kind='sticker' AND origin='builtin'"),
+    builtinStickers: await db.query<DatabaseRow>("SELECT * FROM stickers WHERE media_id IN (SELECT id FROM media WHERE kind='sticker' AND origin='builtin')"),
+    builtinStickerSearch: await db.query<DatabaseRow>("SELECT * FROM sticker_semantics_fts WHERE sticker_id IN (SELECT id FROM stickers WHERE media_id IN (SELECT id FROM media WHERE kind='sticker' AND origin='builtin'))"),
+    builtinStickerMarkers: await db.query<DatabaseRow>("SELECT * FROM settings WHERE key LIKE 'builtin-stickers:%'"),
     mcpServers: await db.query<DatabaseRow>('SELECT * FROM mcp_servers'),
     mcpPolicies: await db.query<DatabaseRow>('SELECT * FROM mcp_tool_policies'),
     secretRefs: await db.query<DatabaseRow>('SELECT * FROM secret_refs'),
@@ -192,6 +205,18 @@ async function restoreLocalState(db: CapacitorDatabase, state: PreservedLocalSta
   await insertRows(db, 'memory_sync_cursors', state.syncCursors);
   await insertRows(db, 'memory_tombstones', state.tombstones);
 
+  // The server export has no sticker rows. Restore the IPA's current built-in
+  // state, including semantic edits/favorites/counters and the seed marker. The
+  // associated binary assets remain available from the bundled asset paths.
+  await db.run('DELETE FROM sticker_semantics_fts');
+  await db.run('DELETE FROM stickers');
+  await db.run("DELETE FROM media WHERE kind='sticker'");
+  await db.run("DELETE FROM settings WHERE key LIKE 'builtin-stickers:%'");
+  await insertRows(db, 'media', state.builtinStickerMedia);
+  await insertRows(db, 'stickers', state.builtinStickers);
+  await insertRows(db, 'sticker_semantics_fts', state.builtinStickerSearch);
+  await insertRows(db, 'settings', state.builtinStickerMarkers);
+
   // Preserve all IPA-local provider/MCP/OTA preferences, not just Ombre. The
   // corresponding Keychain secrets are outside the SQLite file and were never
   // touched by the server migration restore.
@@ -206,6 +231,7 @@ async function restoreLocalState(db: CapacitorDatabase, state: PreservedLocalSta
   await insertRows(db, 'provider_configs', state.providerConfigs);
   await insertRows(db, 'app_preferences', state.appPreferences);
   await insertRows(db, 'notification_capabilities', state.notificationCapabilities);
+  await insertRows(db, 'local_updateState', []);
   await insertRows(db, 'local_update_state', state.localUpdateState);
   await insertRows(db, 'local_backup_metadata', state.localBackupMetadata);
 
