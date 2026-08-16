@@ -18,6 +18,9 @@ export interface VoiceDirectorIntent {
 export interface VoiceDirectorResult {
   text: string;
   speed: number;
+  /** True when the text is the sanitized raw intent (director unavailable or
+   * invalid) — callers apply their per-mode fallback policy on this flag. */
+  fallback?: boolean;
 }
 
 export interface ImageDirectorIntent {
@@ -74,12 +77,12 @@ export class MediaDirector {
     });
     if (!result) {
       this.client.recordFallback('voice', 'director_unavailable_or_invalid');
-      return { text: sanitizeFishText(intent.content), speed: 1 };
+      return { text: sanitizeFishText(intent.content), speed: 1, fallback: true };
     }
     const text = sanitizeFishText(result.data.text);
     if (!text) {
       this.client.recordFallback('voice', 'empty_after_cue_sanitization');
-      return { text: sanitizeFishText(intent.content), speed: 1 };
+      return { text: sanitizeFishText(intent.content), speed: 1, fallback: true };
     }
     return { text, speed: result.data.speed ?? 1 };
   }

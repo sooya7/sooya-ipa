@@ -13,6 +13,8 @@ import { fallbackImagePrompt } from './media-director.js';
 import { StaleGenerationError } from './stale-generation.js';
 import { parseUserDirectives, StreamingDirectiveFilter, stripModelDirectives, type ModelDirectives, type UserDirectives } from './directives.js';
 import { mergeVoiceDirectives, type VoiceIntent } from './voice/intent.js';
+import type { InlineVoiceOutcome } from './voice/service.js';
+import type { LocalVoiceService } from './voice/service.js';
 import { buildImageFallbackPrompt, stripModelMediaExecutionClaims } from './reply-media-policy.js';
 import { decideWebSearch } from './web-search-policy.js';
 
@@ -42,6 +44,8 @@ export interface ReplyCoordinatorOptions {
   replyFeatureRuntime?: ReplyFeatureRuntime | null;
   /** Media Director (image/voice) built from the director provider slot. */
   mediaDirector?: MediaDirector | null;
+  /** Voice V2 pipeline; when absent, voice requests degrade to text-only. */
+  voiceService?: LocalVoiceService | null;
   now?: () => Date;
   debounceMs?: number;
   emit: (type: string, data: Record<string, unknown>) => void;
@@ -177,8 +181,16 @@ export class ReplyCoordinator {
       const semanticText = stripModelMediaExecutionClaims(rawSemanticText, Boolean(userDirectives.wantImage || userDirectives.wantVoice));
       const directives = mergeDirectives(userDirectives, stripped.directives, buildImageFallbackPrompt(userDirectives, recent, latestUser), userVoiceIntent);
       visibleText = directives.voiceOnly || directives.stickerOnly ? '' : semanticText;
-      const media = await this.appendRequestedMedia(assistantId, semanticText, directives, controller.signal, { batchId, revision, sourceMessages });
+      const media = await this.appendRequestedMedia(assistantId, semanticText, directives, controller.signal, { batchId, revision, sourceMessages, userVoiceIntent, textPartId: partId });
       if (!visibleText.trim() && media.appended === 0 && media.imageAttempted && media.imageFailed) visibleText = IMAGE_FAILURE_FALLBACK_TEXT;
+      // Voice-outcome release rules: a published replace owns the message
+      // (audio is the reply, the draft text part was removed); a text
+      // fallback published by the service must not be overwritten; anything
+      // else keeps the canonical text.
+      const voicePublishedReplace = media.voiceOutcome?.kind === 'published' && media.voiceOutcome.mode === 'replace';
+      const voicePublishedText = media.voiceOutcome?.kind === 'published-as-text' ? media.voiceOutcome.text : undefined;
+      if (voicePublishedText !== undefined) visibleText = voicePublishedText;
+      else if (directives.voiceOnly || directives.stickerOnly || voicePublishedReplace) visibleText = '';
       await this.options.messages.updatePart(partId, { text: visibleText });
       if (!visibleText.trim() && media.appended === 0) throw new Error('provider returned an empty reply');
       const mediaCount = media.appended;
@@ -204,10 +216,10 @@ export class ReplyCoordinator {
 
   async recover(): Promise<void> { const open = await this.options.batches.latestOpen(); if (open) this.schedule(open.id, open.revision); }
 
-  private async appendRequestedMedia(messageId: string, text: string, directives: EffectiveDirectives, signal: AbortSignal, context: { batchId: string; revision: number; sourceMessages: ChatMessage[] }): Promise<MediaAppendResult> {
+  private async appendRequestedMedia(messageId: string, text: string, directives: EffectiveDirectives, signal: AbortSignal, context: { batchId: string; revision: number; sourceMessages: ChatMessage[]; userVoiceIntent: VoiceIntent; textPartId: string | null }): Promise<MediaAppendResult> {
     const result: MediaAppendResult = { appended: 0, imageAttempted: false, imageFailed: false };
     if (signal.aborted) return result;
-    const { batchId, revision, sourceMessages } = context;
+    const { batchId, revision, sourceMessages, userVoiceIntent, textPartId } = context;
     const runtime = this.runtime();
     const imagePrompt = directives.selfImagePrompt ?? directives.imagePrompt;
     if (!runtime) {
@@ -342,17 +354,46 @@ export class ReplyCoordinator {
         } catch (error) { this.options.emit('reply.media.failed', { batchId, revision, messageId, type: 'sticker', error: errorMessage(error) }); }
       }
     }
-    if (directives.voice && !directives.noVoice && text.trim()) {
-      try {
-        const provider = await runtime.ttsProvider?.();
-        if (provider?.configured) {
+    // Voice V2 (server parity): intent → mode → independent spoken script →
+    // guards → delivery → TTS → publication. The coordinator never hands the
+    // raw reply text to TTS; only the service's synthesisText crosses that
+    // line (read_aloud is the single sanctioned exception).
+    if (this.options.voiceService && directives.voice && !directives.noVoice && text.trim()) {
+      const provider = await runtime.ttsProvider?.().catch(() => null);
+      if (provider?.configured) {
+        // Model-marker mapping (server replier semantics): the model alone
+        // can never hide text — [[voice-only]] without the user asking
+        // degrades to complement.
+        const userWantsReplace = userVoiceIntent === 'voice_only' || userVoiceIntent === 'voice_reply';
+        const modelVoice = directives.voiceOnly ? (userWantsReplace ? 'replace' : 'complement') : 'complement';
+        const userText = sourceMessages.filter((message) => message.role === 'user').map((message) => textOf(message)).filter(Boolean).join('\n');
+        const decision = await this.options.voiceService.decide({ userIntent: userVoiceIntent, modelVoice, text, ttsConfigured: true });
+        if (decision.mode) {
+          this.options.emit('voice.plan.created', { batchId, revision, messageId, mode: decision.mode, requestedBy: decision.requestedBy, reason: decision.reason });
           this.options.emit('reply.audio.generating', { batchId, revision, messageId, type: 'audio' });
-          const audio = await provider.synthesize(text, { signal, ...(directives.voiceEmotion ? { emotion: directives.voiceEmotion } : {}) });
-          const record = await runtime.media.save({ kind: 'audio', data: audio.data, mime: audio.mime, name: `sooya-${Date.now()}.${audio.format}`, metadata: { provider: provider.name, generated: true } });
-          await this.options.messages.appendPart(messageId, { type: 'audio', mediaId: record.id, transcript: text, duration: audio.durationSec ?? null, meta: { generated: true, emotion: directives.voiceEmotion ?? null, intensity: directives.voiceIntensity ?? null } });
-          this.options.emit('reply.media.created', { batchId, revision, messageId, type: 'audio', mediaId: record.id }); result.appended += 1;
+          try {
+            const outcome = await this.options.voiceService.synthesizeInlineVoice({
+              batchId,
+              revision,
+              shell: await this.options.messages.get(messageId) ?? null,
+              textPartId,
+              finalText: text,
+              userText,
+              decision,
+              modelEmotion: directives.voiceEmotion ?? null,
+              modelIntensity: directives.voiceIntensity ?? null,
+              signal,
+              media: runtime.media,
+              ttsProvider: provider
+            });
+            result.voiceOutcome = outcome;
+            if (outcome.kind === 'published') result.appended += 1;
+          } catch (error) {
+            if (isInterruption(error, signal)) throw error;
+            this.options.emit('reply.media.failed', { batchId, revision, messageId, type: 'audio', error: errorMessage(error) });
+          }
         }
-      } catch (error) { this.options.emit('reply.media.failed', { batchId, revision, messageId, type: 'audio', error: errorMessage(error) }); }
+      }
     }
     return result;
   }
@@ -440,7 +481,7 @@ export class ReplyCoordinator {
   private async commitMemory(batchId: string, revision: number, user: ChatMessage, assistantText: string, signal: AbortSignal): Promise<void> { if (!signal.aborted) await this.options.memory.commit({ batchId, revision, userText: textOf(user), assistantText, signal }); }
 }
 
-interface MediaAppendResult { appended: number; imageAttempted: boolean; imageFailed: boolean; }
+interface MediaAppendResult { appended: number; imageAttempted: boolean; imageFailed: boolean; voiceOutcome?: InlineVoiceOutcome; }
 interface EffectiveDirectives extends ModelDirectives { noSticker?: boolean; noVoice?: boolean; requiredImage?: boolean; readAloud?: boolean; }
 function mergeDirectives(user: UserDirectives, model: ModelDirectives, fallbackImagePrompt: string | null, userVoiceIntent: VoiceIntent): EffectiveDirectives {
   const directives: EffectiveDirectives = { ...model, noSticker: user.noSticker, noVoice: user.noVoice, requiredImage: user.wantImage || undefined, readAloud: user.readAloud || undefined };
@@ -461,7 +502,7 @@ function mergeDirectives(user: UserDirectives, model: ModelDirectives, fallbackI
   if (user.noVoice) { directives.voice = false; directives.voiceOnly = false; }
   return directives;
 }
-function appendDirectiveProtocol(system: string | undefined): string { return [system ?? '', '你可以在回复中使用私有多媒体标记，标记不会显示给用户：', '[[sticker:情绪或含义]] 发送表情包；[[image:画面描述]] 生成图片；[[image-self:自拍画面描述]] 生成你的自拍；[[voice]] 把本次文字同时转成语音；[[voice-only]] 只发语音；[[sticker-only:含义]] 只发表情包。', '只有确实需要多媒体时才使用标记，不要把标记解释给用户。', '多媒体 Provider 会在你的文本生成结束后由本地 Runtime 执行；你看不到它的配置状态、调用结果或错误。不要声称接口已调用、未配置、失败、成功、回传为空或通道不可用。用户明确要求图片时，只需提供真实画面意图/私有图片标记，绝不要用文字假装已经发图。'].filter(Boolean).join('\n'); }
+function appendDirectiveProtocol(system: string | undefined): string { return [system ?? '', '你可以在回复中使用私有多媒体标记，标记不会显示给用户：', '[[sticker:情绪或含义]] 发送表情包；[[image:画面描述]] 生成图片；[[image-self:自拍画面描述]] 生成你的自拍；[[voice]] 为这次回复补充一条适合用声音表达的语音；[[voice-only]] 仅表示语音承担回复的高层意图；[[sticker-only:含义]] 只发表情包。', '语音标记不是正文朗读指令：不要把括号动作、舞台说明、Markdown 或整段正文当作语音脚本，也不要在标记里写 TTS 参数、速度或供应商指令；Runtime 会通过 Voice Director 独立生成实际朗读内容。只有用户明确要求只发/用语音回复时，Runtime 才允许隐藏文字。', '只有确实需要多媒体时才使用标记，不要把标记解释给用户。', '多媒体 Provider 会在你的文本生成结束后由本地 Runtime 执行；你看不到它的配置状态、调用结果或错误。不要声称接口已调用、未配置、失败、成功、回传为空或通道不可用。用户明确要求图片时，只需提供真实画面意图/私有图片标记，绝不要用文字假装已经发图。'].filter(Boolean).join('\n'); }
 class SupersededReplyError extends Error { override name = 'SupersededReplyError'; }
 /** Aborts, revision-fence losses and superseded generations must never be
  * swallowed into media fallbacks: the reply they belonged to is already gone.

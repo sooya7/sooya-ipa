@@ -46,7 +46,7 @@ describe('MediaDirector.voice', () => {
   it('falls back to the sanitized intent text when the director is unavailable', async () => {
     const director = new MediaDirector(new DirectorClient(() => null));
     const result = await director.voice({ content: '[cute] 原始意图' });
-    expect(result).toEqual({ text: '原始意图', speed: 1 });
+    expect(result).toEqual({ text: '原始意图', speed: 1, fallback: true });
   });
 });
 
