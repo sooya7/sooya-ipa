@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { AuthenticatedAudio, AuthenticatedImage } from '../AuthenticatedMedia.js';
 import { mediaThumbnailPath } from '../../lib/authenticatedMedia.js';
-import { adminApi, type AdminActivityItem, type AdminChatMessage, type AdminMedia, type AdminMemory, type AdminOmbreStatus, type AdminSticker } from '../../lib/admin.js';
+import { adminApi, type AdminActivityItem, type AdminChatMessage, type AdminMedia, type AdminOmbreStatus, type AdminSticker } from '../../lib/admin.js';
 import { featureApi } from '../../lib/features.js';
 import { navigate, APP_NAVIGATION_EVENT } from '../../lib/navigation.js';
 import { AdminState, adminStateFromError } from './AdminState.js';
@@ -46,7 +46,6 @@ function PageFrame({ title, description, children, actions }: { title: string; d
 function MemoryPage({ onNotice }: { onNotice: (message: string) => void }) {
   const [status, setStatus] = useState<AdminOmbreStatus | null>(null);
   const [activity, setActivity] = useState<AdminActivityItem[]>([]);
-  const [legacy, setLegacy] = useState<{ memories: AdminMemory[]; total: number } | null>(null);
   const [query, setQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState<Array<Record<string, unknown>> | null>(null);
@@ -57,10 +56,9 @@ function MemoryPage({ onNotice }: { onNotice: (message: string) => void }) {
 
   const load = useCallback(async () => {
     try {
-      const [nextStatus, nextActivity, nextLegacy] = await Promise.all([adminApi.ombreStatus(), adminApi.ombreActivity(50), adminApi.legacyMemories(100)]);
+      const [nextStatus, nextActivity] = await Promise.all([adminApi.ombreStatus(), adminApi.ombreActivity(50)]);
       setStatus(nextStatus);
       setActivity(nextActivity.activity);
-      setLegacy(nextLegacy);
       setError(null);
     } catch (cause) {
       const mapped = adminStateFromError(cause);
@@ -122,7 +120,6 @@ function MemoryPage({ onNotice }: { onNotice: (message: string) => void }) {
       {catalog && <pre className="admin-safe-pre">{JSON.stringify(catalog, null, 2)}</pre>}
     </section>
     <section className="admin-card"><div className="admin-card-heading"><div><h3>最近记忆活动</h3><p>仅保留安全摘要，不展示 prompt、tool args 或完整记忆正文。</p></div></div>{activity.length ? activity.map((item) => <div className="admin-list-row" key={item.id}><span><strong>{item.type}</strong><small>{JSON.stringify(item.detail)}</small></span><small>{dateText(item.createdAt)}</small></div>) : <AdminState kind="empty" message="暂无 Ombre 活动" />}</section>
-    <details className="admin-card admin-legacy-memory"><summary>旧 SOOYA 记忆 · 只读回滚观察（{legacy?.total ?? 0}）</summary><p>当前 Ombre 模式不读取、不编辑、不删除这批数据。</p>{legacy?.memories.map((memory) => <div className="admin-list-row" key={memory.id}><span>{memory.content}</span><small>{memory.kind} · {dateText(memory.updatedAt)}</small></div>)}</details>
   </PageFrame>;
 }
 
