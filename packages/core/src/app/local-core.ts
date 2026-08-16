@@ -1572,8 +1572,10 @@ export class LocalCore implements LocalCoreApi {
     }
     const mcpTest = route.match(/^\/api\/admin\/mcp\/([^/]+)\/(test|refresh-tools)$/u);
     if (mcpTest && method === 'POST') {
-      const server = await this.refreshMcpServer(decodeURIComponent(mcpTest[1]!));
-      return { ok: true, server: { ...server, authConfigured: Boolean(server?.secretKey) } };
+      const id = decodeURIComponent(mcpTest[1]!);
+      const server = await this.refreshMcpServer(id);
+      const toolCount = (await this.mcpRepo.listPolicies(id)).length;
+      return { ok: true, server: { ...server, authConfigured: Boolean(server?.secretKey), toolCount } };
     }
     const mcpTool = route.match(/^\/api\/admin\/mcp\/tools\/([^/]+)$/u)?.[1];
     if (mcpTool) {
@@ -2356,6 +2358,17 @@ export class LocalCore implements LocalCoreApi {
       await this.mcpRepo.setState(id, 'connecting', null);
       await this.options.mcp.connect(server);
       const tools = await this.options.mcp.listTools(id);
+      if (tools.length === 0) {
+        // Ready session with an empty discovery is a diagnosable state, not
+        // a success: registering nothing would silently reset the admin
+        // counts to 0/0 while the UI keeps saying the server is healthy.
+        // Surface the concrete reason so admin and Ombre diagnostics show
+        // "no tools discovered" instead of a vague degraded/empty state.
+        const message = `no tools discovered: ${id} connected to ${server.url} but tools/list returned 0 tools`;
+        await this.mcpRepo.setState(id, 'degraded', message);
+        await this.recordError(`mcp.${id}`, message);
+        throw new Error(message);
+      }
       const policies = new Map((await this.mcpRepo.listPolicies(id)).map((policy) => [policy.remoteName, policy]));
       this.toolRegistry.replaceSource(id, tools.map((tool) => {
         const policy = policies.get(tool.name);

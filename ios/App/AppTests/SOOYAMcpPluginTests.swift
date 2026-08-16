@@ -119,6 +119,165 @@ final class SOOYAMcpPluginTests: XCTestCase {
         XCTAssertEqual(Set(resolver.references), Set(["bearer-ref", "oauth-ref"]))
     }
 
+    /// Real-device equivalence: replays the exact wire behavior of the Ombre
+    /// Brain v2.7.6 streamable-HTTP server (mcp python-sdk 1.28.1, stateful
+    /// sessions) as captured against a local replica: initialize returns 200
+    /// with an SSE body and a Mcp-Session-Id header, notifications return
+    /// 202 with an empty body, and tools/list returns 14 tools as one SSE
+    /// event. This locks the full handshake -> decode -> list chain so a
+    /// "connected but empty tool list" cannot silently pass.
+    func testOmbreStreamableHandshakeListsFourteenToolsOverSSE() throws {
+        let client = makeClient()
+        var sessionHeader: String?
+        URLProtocolStub.install { request in
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(request.httpBody)) as? [String: Any])
+            let method = try XCTUnwrap(json["method"] as? String)
+            if method == "notifications/initialized" {
+                XCTAssertNotNil(request.value(forHTTPHeaderField: "Mcp-Session-Id"))
+                return self.stub(request, status: 202, headers: ["Content-Type": "application/json"], object: nil)
+            }
+            let body: String
+            if method == "initialize" {
+                body = """
+                event: message
+                data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"Ombre Brain Replica","version":"1.28.1"}}}
+
+                """
+                return self.stub(request, headers: ["Content-Type": "text/event-stream", "Mcp-Session-Id": "session-ombre"], raw: body)
+            }
+            if method == "tools/list" {
+                sessionHeader = request.value(forHTTPHeaderField: "Mcp-Session-Id")
+                var tools = ""
+                for index in 0..<14 {
+                    tools += #"{"name":"ombre_tool_\#(index)","description":"Tool \#(index).","inputSchema":{"type":"object","properties":{}}}"#
+                    if index < 13 { tools += "," }
+                }
+                body = """
+                event: message
+                data: {"jsonrpc":"2.0","id":2,"result":{"tools":[\#(tools)]}}
+
+                """
+                return self.stub(request, headers: ["Content-Type": "text/event-stream"], raw: body)
+            }
+            throw URLError(.badServerResponse)
+        }
+
+        let connected = expectation(description: "connected")
+        var snapshot: SOOYAMcpServerSnapshot?
+        client.connect(server("alpha")) { result in
+            snapshot = try? result.get()
+            connected.fulfill()
+        }
+        wait(for: [connected], timeout: 2)
+        XCTAssertEqual(snapshot?.sessionID, "session-ombre")
+        XCTAssertEqual(snapshot?.protocolVersion, "2025-06-18")
+
+        let listed = expectation(description: "listed")
+        var names: [String] = []
+        client.listTools(serverID: "alpha") { result in
+            names = (try? result.get())?.compactMap { $0["name"] as? String } ?? []
+            listed.fulfill()
+        }
+        wait(for: [listed], timeout: 2)
+        XCTAssertEqual(names.count, 14)
+        XCTAssertEqual(names.first, "ombre_tool_0")
+        XCTAssertEqual(names.last, "ombre_tool_13")
+        XCTAssertEqual(sessionHeader, "session-ombre")
+    }
+
+    /// A successful tools/list that returns zero tools is a diagnosable
+    /// state: the client must surface it as an empty success (the plugin
+    /// layer then reports "no tools discovered") instead of failing or
+    /// pretending tools exist.
+    func testEmptyToolsListSurfacesAsEmptySuccessForDiagnostics() throws {
+        let client = makeClient()
+        URLProtocolStub.install { request in
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(request.httpBody)) as? [String: Any])
+            let method = try XCTUnwrap(json["method"] as? String)
+            if method == "notifications/initialized" { return self.stub(request, status: 202, object: nil) }
+            if method == "tools/list" {
+                return self.stub(request, headers: ["Content-Type": "text/event-stream"], raw: "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[]}}\n\n")
+            }
+            return self.stub(request, object: ["jsonrpc": "2.0", "id": json["id"] as Any, "result": ["protocolVersion": "2025-06-18", "capabilities": [:], "serverInfo": ["name": "x", "version": "1"]]])
+        }
+        let connected = expectation(description: "connected")
+        client.connect(server("alpha")) { _ in connected.fulfill() }
+        wait(for: [connected], timeout: 2)
+
+        let listed = expectation(description: "listed")
+        client.listTools(serverID: "alpha") { result in
+            guard case .success(let tools) = result else { return XCTFail("expected success, got \(result)") }
+            XCTAssertTrue(tools.isEmpty)
+            listed.fulfill()
+        }
+        wait(for: [listed], timeout: 2)
+    }
+
+    /// Stateful Ombre servers reject tools/list without a session id with a
+    /// 400; the client must surface that as an HTTP status error so the
+    /// admin refresh records "degraded" with a reason instead of a silent
+    /// empty list.
+    func testToolsListWithoutSessionIdIsRejectedAsHttpStatus() throws {
+        let client = makeClient()
+        URLProtocolStub.install { request in
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(request.httpBody)) as? [String: Any])
+            let method = try XCTUnwrap(json["method"] as? String)
+            if method == "notifications/initialized" { return self.stub(request, status: 202, object: nil) }
+            if method == "tools/list" {
+                // No Mcp-Session-Id header: exactly what a stateful server
+                // returns before the client captured the session header.
+                XCTAssertNil(request.value(forHTTPHeaderField: "Mcp-Session-Id"))
+                return self.stub(request, status: 400, object: ["error": "Bad Request: Missing session ID"])
+            }
+            return self.stub(request, object: ["jsonrpc": "2.0", "id": json["id"] as Any, "result": ["protocolVersion": "2025-06-18", "capabilities": [:], "serverInfo": ["name": "x", "version": "1"]]])
+        }
+        let connected = expectation(description: "connected")
+        client.connect(server("alpha")) { _ in connected.fulfill() }
+        wait(for: [connected], timeout: 2)
+
+        let listed = expectation(description: "listed")
+        client.listTools(serverID: "alpha") { result in
+            guard case .failure(let error) = result, case SOOYAMcpError.httpStatus(400) = error else {
+                return XCTFail("expected httpStatus(400), got \(result)")
+            }
+            listed.fulfill()
+        }
+        wait(for: [listed], timeout: 2)
+    }
+
+    /// Connect must be idempotent: the Ombre memory adapter probes at boot
+    /// and the admin refresh reconnects on demand, so a second connect for
+    /// the same server id replaces the old session instead of failing with
+    /// duplicateServer (which used to mark healthy connections degraded).
+    func testConnectReplacesExistingSessionInsteadOfFailing() throws {
+        let client = makeClient()
+        var initializeCount = 0
+        let lock = NSLock()
+        URLProtocolStub.install { request in
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(request.httpBody)) as? [String: Any])
+            let method = try XCTUnwrap(json["method"] as? String)
+            if method == "initialize" {
+                lock.lock(); initializeCount += 1; lock.unlock()
+            }
+            if method == "notifications/initialized" { return self.stub(request, status: 202, object: nil) }
+            return self.stub(request, object: ["jsonrpc": "2.0", "id": json["id"] as Any, "result": ["protocolVersion": "2025-06-18", "capabilities": [:], "serverInfo": ["name": "x", "version": "1"]]])
+        }
+        let first = expectation(description: "first connect")
+        client.connect(server("alpha")) { result in
+            XCTAssertNoThrow(try result.get())
+            first.fulfill()
+        }
+        wait(for: [first], timeout: 2)
+
+        let second = expectation(description: "second connect")
+        client.connect(server("alpha")) { result in
+            XCTAssertNoThrow(try result.get())
+            second.fulfill()
+        }
+        wait(for: [second], timeout: 2)
+        XCTAssertEqual(initializeCount, 2)
+    }
+
     private func makeClient(resolver: SOOYAMcpTokenResolving = SOOYANullMcpTokenResolver()) -> SOOYAMcpClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [URLProtocolStub.self]

@@ -2,10 +2,11 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { AdminMcpOverview } from '../../lib/admin.js';
 import { McpAdminPage } from './McpAdminPage.js';
 
 const adminMocks = vi.hoisted(() => ({
-  mcpOverview: vi.fn(async () => ({
+  mcpOverview: vi.fn(async (): Promise<AdminMcpOverview> => ({
     configSource: '/opt/sooya/shared/config/mcp.json',
     globalPolicy: { readEnabled: true, writeEnabled: true, maintenanceEnabled: true },
     servers: [{
@@ -172,6 +173,26 @@ describe('McpAdminPage', () => {
     await vi.waitFor(() => expect(adminMocks.mcpOverview).toHaveBeenCalledTimes(1));
     expect(container!.textContent).toContain('添加 MCP Server');
     expect(container!.querySelector('[data-testid="admin-mcp-add"]')).not.toBeNull();
+  });
+
+  it('surfaces the concrete no-tools-discovered diagnostic for a degraded memory backend', async () => {
+    const degraded: AdminMcpOverview = {
+      configSource: 'local', globalPolicy: { readEnabled: true, writeEnabled: true, maintenanceEnabled: true },
+      servers: [{ id: 'ombre', enabled: true, url: 'https://echo.sooya.icu/mcp', transport: 'streamable-http', authConfigured: true, required: false, state: 'degraded', toolCount: 0, lastError: 'no tools discovered: ombre connected to https://echo.sooya.icu/mcp but tools/list returned 0 tools' }],
+      tools: [],
+      memory: { backend: 'ombre-sync', connection: 'degraded', health: { state: 'degraded', provider: 'ombre-mcp', detail: 'no tools discovered: Ombre MCP is connected but tools/list returned 0 tools' }, lastCommit: null, pending: 0, uncertain: 0, lastDream: null, dashboardUrl: null },
+      dashboardUrl: null
+    };
+    adminMocks.mcpOverview.mockResolvedValueOnce(degraded);
+    await act(async () => {
+      root!.render(<McpAdminPage onNotice={vi.fn()} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(adminMocks.mcpOverview).toHaveBeenCalledTimes(1));
+    // The reason must be visible on the cards, not just a generic "degraded".
+    expect(container!.textContent).toContain('no tools discovered: Ombre MCP is connected but tools/list returned 0 tools');
+    expect(container!.textContent).toContain('no tools discovered: ombre connected to https://echo.sooya.icu/mcp');
+    expect(container!.textContent).toContain('尚未发现工具');
   });
 
   it('deletes a server after confirmation', async () => {

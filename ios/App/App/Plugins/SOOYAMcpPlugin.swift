@@ -149,10 +149,16 @@ final class SOOYAMcpClient {
             guard server.timeout > 0, server.maxPages > 0 else { throw SOOYAMcpError.invalidResponse }
             _ = try authorization(for: server)
             lock.lock()
-            guard states[server.id] == nil else { lock.unlock(); throw SOOYAMcpError.duplicateServer }
+            // Idempotent connect: a previous session (e.g. the Ombre memory
+            // adapter's boot-time probe) must not make a later admin refresh
+            // fail with duplicateServer. Tear the old state down and replace
+            // it, exactly like an explicit disconnect followed by connect.
+            let stale = states.removeValue(forKey: server.id)
+            let staleTasks = stale?.tasks.values ?? Dictionary<String, URLSessionTask>().values
             let state = State(configuration: server)
             states[server.id] = state
             lock.unlock()
+            staleTasks.forEach { $0.cancel() }
             initialize(state: state, allowLegacy: true, completion: completion)
         } catch { completion(.failure(error)) }
     }
@@ -467,7 +473,18 @@ public final class SOOYAMcpPlugin: CAPPlugin, CAPBridgedPlugin {
         let operationID = call.getString("operationId") ?? UUID().uuidString.lowercased()
         client.listTools(serverID: id, operationID: operationID) { result in
             switch result {
-            case .success(let tools): call.resolve(["operationId": operationID, "tools": tools])
+            case .success(let tools):
+                // A successful tools/list that yields zero tools is a real
+                // diagnostic state, not "everything is fine": the session is
+                // ready but nothing is registered. Surface it explicitly so
+                // the admin/Ombre adapter can report "no tools discovered"
+                // instead of a generic degraded/empty state.
+                var payload: [String: Any] = ["operationId": operationID, "tools": tools]
+                if tools.isEmpty {
+                    payload["noToolsDiscovered"] = true
+                    payload["detail"] = "MCP server is connected but tools/list returned 0 tools"
+                }
+                call.resolve(payload)
             case .failure(let error): self.reject(call, error)
             }
         }

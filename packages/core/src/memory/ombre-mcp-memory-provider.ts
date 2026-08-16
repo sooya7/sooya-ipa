@@ -1,4 +1,4 @@
-import type { McpPlatform, McpServerConfig } from '../platform/mcp.js';
+import type { McpPlatform, McpServerConfig, McpTool } from '../platform/mcp.js';
 import type { McpToolCallResult } from '../tools/mcp-result.js';
 import type { MemoryCommitInput, MemoryCommitResult, MemoryEntry, MemoryKind, MemoryProvider, MemoryRecall, MemoryRecallInput } from './types.js';
 import type { OmbreMemorySyncPort } from './sync-types.js';
@@ -101,6 +101,12 @@ export class OmbreMcpMemoryProvider implements MemoryProvider, OmbreMemorySyncPo
   async health(): Promise<{ state: 'ready' | 'degraded' | 'unavailable'; provider: string; detail?: string }> {
     try {
       await this.ensureReady();
+      if (this.availableTools.size === 0) {
+        // Connected but tools/list discovered nothing: the session itself is
+        // healthy, so this is a degraded diagnostic state with an explicit
+        // reason, not a vague "unavailable".
+        return { state: 'degraded', provider: 'ombre-mcp', detail: 'no tools discovered: Ombre MCP is connected but tools/list returned 0 tools' };
+      }
       return { state: 'ready', provider: 'ombre-mcp', detail: `${this.availableTools.size} tools` };
     } catch (error) {
       return { state: 'unavailable', provider: 'ombre-mcp', detail: safeError(error) };
@@ -197,7 +203,20 @@ export class OmbreMcpMemoryProvider implements MemoryProvider, OmbreMemorySyncPo
       );
       if (state.state !== 'ready') throw new Error(state.detail ?? `Ombre MCP connection is ${state.state}`);
       connected = true;
-      const tools = await callWithTimeout((callSignal) => this.options.mcp.listTools(this.serverId, callSignal), signal, this.timeoutMs);
+      // Discovery shares the connect budget: the first tools/list round-trip
+      // over a tunneled streamable-HTTP session (initialize + SSE + session
+      // header) is routinely slower than per-tool-call latency, and the
+      // default 1.8s timeout made healthy servers look permanently
+      // unavailable on real devices.
+      const listTimeout = Math.max(this.timeoutMs, config.connectTimeoutMs ?? this.timeoutMs);
+      let tools: McpTool[] = [];
+      try {
+        tools = await callWithTimeout((callSignal) => this.options.mcp.listTools(this.serverId, callSignal), signal, listTimeout);
+      } catch (error) {
+        // "no tools discovered" is a diagnosable state, not a transport
+        // failure: keep the healthy session, report degraded via health().
+        if (!(error instanceof Error && /no tools discovered/iu.test(error.message))) throw error;
+      }
       this.availableTools = new Set(tools.map((tool) => tool.name));
       this.connectedConfigKey = key;
     } catch (error) {

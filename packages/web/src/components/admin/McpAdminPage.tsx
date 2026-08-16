@@ -194,6 +194,7 @@ export function McpAdminPage({ onNotice }: { onNotice: (message: string) => void
           <span className="admin-card-kicker">记忆后端</span>
           <strong>{overview.memory.backend === 'ombre' ? 'Ombre Brain' : overview.memory.backend}</strong>
           <span className={`admin-status-chip ${stateClass(overview.memory.connection)}`}>{overview.memory.connection === 'connected' ? '已连接' : 'degraded'}</span>
+          {typeof overview.memory.health?.detail === 'string' && <small>{overview.memory.health.detail}</small>}
         </article>
         <article className="admin-card">
           <span className="admin-card-kicker">配置来源</span>

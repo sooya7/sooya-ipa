@@ -154,12 +154,35 @@ export class CapacitorMcp implements McpPlatform {
   private readonly plugin = nativePlugin('SOOYAMcp');
   async connect(config: McpServerConfig): Promise<McpConnectionState> {
     const result = await this.plugin.call<{ serverId: string; mode?: string }>('connect', { serverId: config.id, url: config.url, transport: config.transport, timeoutMs: config.connectTimeoutMs ?? 30_000, authType: config.secretKey ? 'bearer' : 'none', ...(config.secretKey ? { tokenRef: config.secretKey } : {}) });
-    return { serverId: result.serverId ?? config.id, state: 'ready', toolCount: 0, detail: result.mode };
+    const serverId = result.serverId ?? config.id;
+    // Native connect resolves as soon as the session is initialized; the tool
+    // count is only knowable after a tools/list round-trip, so fetch it here
+    // instead of reporting a misleading constant zero. A discovery failure
+    // must not fail the connection itself, but its diagnostic is surfaced in
+    // the returned detail so admin/Ombre can tell "connected" from
+    // "connected with no tools discovered".
+    let toolCount = 0;
+    let detail = result.mode;
+    try {
+      const tools = await this.listTools(serverId);
+      toolCount = tools.length;
+      if (tools.length === 0) detail = 'no tools discovered: connected but tools/list returned 0 tools';
+    } catch (error) {
+      detail = error instanceof Error ? error.message : String(error);
+    }
+    return { serverId, state: 'ready', toolCount, detail };
   }
   async disconnect(serverId: string): Promise<void> { await this.plugin.call('disconnect', { serverId }); }
   async listTools(serverId: string): Promise<McpTool[]> {
-    const result = await this.plugin.call<{ tools: Array<Record<string, unknown>> }>('listTools', { serverId });
-    return (result.tools ?? []).flatMap((tool) => typeof tool.name === 'string' ? [{ name: tool.name, description: typeof tool.description === 'string' ? tool.description : undefined, inputSchema: isRecordValue(tool.inputSchema) ? tool.inputSchema : { type: 'object' }, annotations: isRecordValue(tool.annotations) ? tool.annotations : undefined }] : []);
+    const result = await this.plugin.call<{ tools: Array<Record<string, unknown>>; noToolsDiscovered?: boolean; detail?: string }>('listTools', { serverId });
+    const tools = (result.tools ?? []).flatMap((tool) => typeof tool.name === 'string' ? [{ name: tool.name, description: typeof tool.description === 'string' ? tool.description : undefined, inputSchema: isRecordValue(tool.inputSchema) ? tool.inputSchema : { type: 'object' }, annotations: isRecordValue(tool.annotations) ? tool.annotations : undefined }] : []);
+    if (result.noToolsDiscovered === true) {
+      // A healthy session that advertises zero tools is a diagnosable state,
+      // not an empty success: the Ombre adapter and the admin refresh both
+      // surface "no tools discovered" instead of silently registering nothing.
+      throw new Error(result.detail || 'no tools discovered: connected but tools/list returned 0 tools');
+    }
+    return tools;
   }
   async callTool(serverId: string, name: string, arguments_: Record<string, unknown>, signal?: AbortSignal): Promise<McpToolCallResult> {
     if (signal?.aborted) throw signal.reason ?? new Error('MCP call aborted');
