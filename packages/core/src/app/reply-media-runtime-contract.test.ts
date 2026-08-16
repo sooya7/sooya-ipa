@@ -49,4 +49,14 @@ describe('reply media runtime contract', () => {
     expect(source).toContain('你看不到它的配置状态、调用结果或错误');
     expect(source).toContain('不要声称接口已调用、未配置、失败、成功、回传为空或通道不可用');
   });
+
+  it('falls back to text for sticker-only when no qualified sticker exists', async () => {
+    const source = await readFile(new URL('./reply-coordinator.ts', import.meta.url), 'utf8');
+
+    expect(source).toContain('directives.stickerOnly && media.appended === 0');
+    expect(source).toContain("this.options.emit('reply.sticker.none'");
+    expect(source).toContain('new StickerRetriever');
+    expect(source).toContain('new StickerPicker');
+    expect(source).not.toContain("const sticker = matches.find((item) => !seen.has(item.id)) ?? (await runtime.stickers.list({ enabledOnly: true, sort: 'usage', limit: 24 })).find((item) => !seen.has(item.id));");
+  });
 });
