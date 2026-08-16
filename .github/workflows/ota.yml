@@ -41,7 +41,10 @@ jobs:
       - run: npm run build
       - name: Build integrity-gated OTA package
         env:
-          RELEASE_ID: ota-${{ github.sha }}
+          # Keep the user-visible OTA version short and monotonic. GitHub's
+          # workflow run number increments for each OTA publish attempt, while
+          # the immutable bundle tag below still pins the exact commit SHA.
+          RELEASE_ID: ota-${{ github.run_number }}
           BUNDLE_TAG: ota-bundle-${{ github.sha }}
           OTA_PRIVATE_KEY: ${{ secrets.OTA_PRIVATE_KEY }}
         run: |
@@ -86,7 +89,7 @@ jobs:
       OTA_PUBLISH_URL: ${{ secrets.OTA_PUBLISH_URL }}
       OTA_PUBLISH_TOKEN: ${{ secrets.OTA_PUBLISH_TOKEN }}
       OTA_PRIVATE_KEY: ${{ secrets.OTA_PRIVATE_KEY }}
-      RELEASE_ID: ota-${{ github.sha }}
+      RELEASE_ID: ota-${{ github.run_number }}
       BUNDLE_TAG: ota-bundle-${{ github.sha }}
     steps:
       - uses: actions/download-artifact@v4
