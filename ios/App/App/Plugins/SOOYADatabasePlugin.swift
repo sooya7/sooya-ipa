@@ -435,7 +435,7 @@ final class SOOYADatabaseStore {
                     case "execute":
                         try validateSQL(statement.sql)
                         let beforeStatement = Int64(sqlite3_total_changes(connection))
-                        let code = sqlite3_exec(connection, sql, nil, nil, nil)
+                        let code = sqlite3_exec(connection, statement.sql, nil, nil, nil)
                         guard code == SQLITE_OK else {
                             throw sqliteError(connection, operation: "execute", fallbackCode: code)
                         }
