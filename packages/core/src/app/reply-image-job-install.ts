@@ -1,5 +1,4 @@
-import type { MessageRepo } from '../db/message.repo.js';
-import type { GeneratedImage, ImageProvider } from '../providers/types.js';
+import type { GeneratedImage } from '../providers/types.js';
 import {
   ImageJobUnsupportedError,
   isJobCapableImageProvider,
@@ -9,7 +8,7 @@ import {
 import type { ReplyFeatureRuntime } from './reply-feature-runtime.js';
 import { ReplyCoordinator, type ReplyCoordinatorOptions } from './reply-coordinator.js';
 import { fallbackImagePrompt } from './media-director.js';
-import type { ChatMessage, MessagePart } from './types.js';
+import type { ChatMessage } from './types.js';
 
 /**
  * Durable image-job adapter.
@@ -53,17 +52,28 @@ type MediaAppendResult = {
   voiceOutcome?: unknown;
 };
 
-type InternalCoordinator = ReplyCoordinator & {
+/** Structural view of the coordinator internals used by this transition shim.
+ * Do not intersect this with ReplyCoordinator: its private `options` member
+ * intentionally makes such an intersection reduce to `never` in TypeScript. */
+type InternalCoordinator = {
   options: ReplyCoordinatorOptions;
   runtime(): ReplyFeatureRuntime | null;
-  appendImageMedia(messageId: string, directives: EffectiveDirectives, signal: AbortSignal, context: ImageContext): Promise<MediaAppendResult>;
-  recover(): Promise<void>;
 };
+
+type AppendImageMethod = (
+  this: InternalCoordinator,
+  messageId: string,
+  directives: EffectiveDirectives,
+  signal: AbortSignal,
+  context: ImageContext
+) => Promise<MediaAppendResult>;
+
+type RecoverMethod = (this: InternalCoordinator) => Promise<void>;
 
 type PatchedPrototype = {
   __sooyaImageJobsInstalled?: boolean;
-  appendImageMedia: InternalCoordinator['appendImageMedia'];
-  recover: InternalCoordinator['recover'];
+  appendImageMedia: AppendImageMethod;
+  recover: RecoverMethod;
 };
 
 const activeRecoveredParts = new Set<string>();
@@ -73,15 +83,15 @@ export function installReplyImageJobs(): void {
   if (prototype.__sooyaImageJobsInstalled) return;
   prototype.__sooyaImageJobsInstalled = true;
 
-  const originalAppend = prototype.appendImageMedia;
-  const originalRecover = prototype.recover;
+  const originalAppend: AppendImageMethod = prototype.appendImageMedia;
+  const originalRecover: RecoverMethod = prototype.recover;
 
   prototype.appendImageMedia = async function (
     this: InternalCoordinator,
-    messageId,
-    directives,
-    signal,
-    context
+    messageId: string,
+    directives: EffectiveDirectives,
+    signal: AbortSignal,
+    context: ImageContext
   ): Promise<MediaAppendResult> {
     const imagePrompt = cleanString(directives.selfImagePrompt) ?? cleanString(directives.imagePrompt);
     const imageRequested = Boolean(imagePrompt || directives.requiredImage);
@@ -107,7 +117,7 @@ export function installReplyImageJobs(): void {
     const provider = runtime?.imageProvider ? await runtime.imageProvider().catch(() => null) : null;
     if (imagePrompt && runtime && provider?.configured && isJobCapableImageProvider(provider)) {
       try {
-        const prepared = await prepareImageJob(this, runtime, provider, imagePrompt, selfImage, context, signal);
+        const prepared = await prepareImageJob(this, runtime, imagePrompt, selfImage, context, signal);
         const lifecycle = {
           clientRequestId,
           onState: async (state: ImageJobLifecycleState) => {
@@ -125,7 +135,13 @@ export function installReplyImageJobs(): void {
           signal,
           ...(prepared.references.length ? { referenceImages: prepared.references } : {})
         }, lifecycle);
-        pendingMeta = { ...pendingMeta, imageState: 'queued', remoteJobId: started.jobId, ...(prepared.aspectRatio ? { aspectRatio: prepared.aspectRatio } : {}), ...(prepared.referenceMediaId ? { referenceMediaId: prepared.referenceMediaId, editedUserImage: true } : {}) };
+        pendingMeta = {
+          ...pendingMeta,
+          imageState: 'queued',
+          remoteJobId: started.jobId,
+          ...(prepared.aspectRatio ? { aspectRatio: prepared.aspectRatio } : {}),
+          ...(prepared.referenceMediaId ? { referenceMediaId: prepared.referenceMediaId, editedUserImage: true } : {})
+        };
         await this.options.messages.updatePart(pendingPartId, { status: 'pending', meta: pendingMeta });
         await emitMessageUpdated(this.options, messageId);
 
@@ -145,7 +161,12 @@ export function installReplyImageJobs(): void {
           signal: undefined
         });
 
-        const visualOnly = { ...directives, imagePrompt: undefined, selfImagePrompt: undefined, requiredImage: false };
+        const visualOnly: EffectiveDirectives = {
+          ...directives,
+          imagePrompt: undefined,
+          selfImagePrompt: undefined,
+          requiredImage: false
+        };
         const nonImage = await originalAppend.call(this, messageId, visualOnly, signal, context);
         return {
           ...nonImage,
@@ -168,7 +189,8 @@ export function installReplyImageJobs(): void {
     }
 
     try {
-      const before = new Set((await this.options.messages.get(messageId))?.content.map((part) => part.id) ?? []);
+      const current = await this.options.messages.get(messageId);
+      const before = new Set<string>(current?.content.map((part) => part.id) ?? []);
       const result = await originalAppend.call(this, messageId, directives, signal, context);
       await reconcileLegacyImage(this.options, messageId, pendingPartId, before, pendingMeta);
       return result;
@@ -185,7 +207,7 @@ export function installReplyImageJobs(): void {
     if (!runtime?.imageProvider) return;
     const provider = await runtime.imageProvider().catch(() => null);
     if (!provider?.configured || !isJobCapableImageProvider(provider)) return;
-    const recent = await this.options.messages.recent(256).catch(() => []);
+    const recent = await this.options.messages.recent(256).catch(() => [] as ChatMessage[]);
     for (const message of recent) {
       for (const part of message.content) {
         if (part.type !== 'image' || part.status !== 'pending' || activeRecoveredParts.has(part.id)) continue;
@@ -218,7 +240,6 @@ export function installReplyImageJobs(): void {
 async function prepareImageJob(
   coordinator: InternalCoordinator,
   runtime: ReplyFeatureRuntime,
-  _provider: JobCapableImageProvider,
   imagePrompt: string,
   selfImage: boolean,
   context: ImageContext,
@@ -248,6 +269,7 @@ async function prepareImageJob(
   if (editingUserImage) {
     const referenceMediaId = userImageParts[0]!;
     const read = await runtime.media.read(referenceMediaId);
+    if (!read) throw new Error('参考图不可用，请重新上传后再试');
     return {
       prompt: finalPrompt,
       references: [{ data: read.data instanceof Uint8Array ? read.data : new Uint8Array(read.data), mime: read.record.mime }],
