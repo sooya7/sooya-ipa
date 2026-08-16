@@ -61,6 +61,14 @@ export class PersonaReferenceService {
     };
   }
 
+
+  /** Deterministic framing choice for a selfie intent. */
+  framingFor(hint?: string): ReferenceFraming {
+    const text = (hint ?? '').toLocaleLowerCase();
+    if (text.includes('全身') || text.includes('full') || text.includes('full-body')) return 'full-body';
+    if (text.includes('侧面') || text.includes('侧身') || text.includes('side')) return 'side';
+    return 'front';
+  }
   async upload(framing: ReferenceFraming, mediaId: string): Promise<{ item: PersonaReferenceItem; previousMediaId: string | null }> {
     const slots = await this.settings.get<Record<string, string | null>>(SLOT_KEY, {});
     const previousMediaId = slots[framing] ?? null;

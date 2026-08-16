@@ -4,6 +4,9 @@ export interface MomentCandidate {
   topic: string;
   occurredAt: string;
   status: 'pending' | 'queued' | 'shared';
+  /** 0..1 aggregate share-candidate score used by the image planner. */
+  importance?: number;
+  meta?: Record<string, unknown>;
 }
 
 export interface MomentRecord {
