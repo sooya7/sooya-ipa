@@ -45,6 +45,46 @@ function personaFromBootstrap(boot: { conversation?: { persona?: Partial<Persona
     tagline: typeof candidate?.tagline === 'string' ? candidate.tagline : DEFAULT_PERSONA.tagline
   };
 }
+
+const IMAGE_STAGE_LABELS: Record<string, string> = {
+  generation: 'generation（生成请求）',
+  reference_upload: 'reference_upload（参考图上传）',
+  download: 'download（成品下载）',
+  media_save: 'media_save（本地保存）'
+};
+
+/**
+ * Core emits structured image-pipeline diagnostics. Keep the user-facing card
+ * compact while preserving the fields needed to distinguish upstream/TLS,
+ * returned-image download, reference upload, and local persistence failures.
+ * Never surface prompts, URLs, headers, or secrets here.
+ */
+export function formatMediaFailureMessage(data: Record<string, unknown>): string {
+  const type = typeof data.type === 'string' ? data.type : '';
+  const detail = typeof data.error === 'string' ? data.error.trim() : '';
+  if (type !== 'image') return detail || '多媒体生成失败。';
+
+  const diagnostics: string[] = [];
+  const stage = typeof data.stage === 'string' ? data.stage.trim() : '';
+  if (stage) diagnostics.push(`阶段：${IMAGE_STAGE_LABELS[stage] ?? stage}`);
+
+  const provider = typeof data.provider === 'string' ? data.provider.trim() : '';
+  if (provider) diagnostics.push(`Provider：${provider}`);
+
+  const elapsedMs = Number(data.elapsedMs);
+  if (Number.isFinite(elapsedMs) && elapsedMs >= 0) {
+    diagnostics.push(`耗时：${elapsedMs >= 1000 ? `${(elapsedMs / 1000).toFixed(1)}s` : `${Math.round(elapsedMs)}ms`}`);
+  }
+
+  const status = Number(data.status);
+  if (Number.isFinite(status) && status > 0) diagnostics.push(`HTTP：${Math.trunc(status)}`);
+
+  const referenceCount = Number(data.referenceCount);
+  if (Number.isFinite(referenceCount) && referenceCount > 0) diagnostics.push(`参考图：${Math.trunc(referenceCount)}`);
+
+  return [detail || '图片生成失败。', diagnostics.join(' · ')].filter(Boolean).join('\n');
+}
+
 export type QuotedMessageState = { status: 'loading' | 'ready' | 'missing' | 'error'; message?: ChatMessage };
 export interface ReplyFailureCard { batchId: string; revision: number; code: string; retryable: boolean; message: string; partial?: boolean; }
 export interface StreamingDraft {
@@ -249,7 +289,7 @@ export function useChat(client: SooyaClient | null = currentSooyaClient()) {
           case 'reply.media.failed': {
             const messageId = String(data.messageId ?? '');
             const type = String(data.type ?? '');
-            const detail = String(data.error ?? '');
+            const detail = formatMediaFailureMessage(data);
             if (type === 'image') updateActivity({ thinking: false, label: null });
             else if (type === 'sticker') updateActivity({ thinking: false, label: null });
             else if (type === 'audio') updateActivity({ thinking: false, label: null });
@@ -258,7 +298,7 @@ export function useChat(client: SooyaClient | null = currentSooyaClient()) {
             // failure card surface when the batch is known.
             const batchId = String(data.batchId ?? '');
             const revision = Number(data.revision ?? 0);
-            if (batchId) setReplyFailures((previous) => ({ ...previous, [`${batchId}:${revision}`]: { batchId, revision, code: 'media_failed', retryable: true, message: detail || '多媒体生成失败。', partial: false } }));
+            if (batchId) setReplyFailures((previous) => ({ ...previous, [`${batchId}:${revision}`]: { batchId, revision, code: 'media_failed', retryable: true, message: detail, partial: false } }));
             break;
           }
           case 'reply.text.done':
