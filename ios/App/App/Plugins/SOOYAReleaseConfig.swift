@@ -1,7 +1,7 @@
 import Foundation
 
 enum SOOYAReleaseConfig {
-    static let nativeBaseVersion = 12
+    static let nativeBaseVersion = 13
     static let bridgeVersion = 5
     static let otaPublicKeyBase64 = "8Xv0j12IoENRjTFUnRbX08ZGi+Kqxv+N0FpqEsztKsk="
     static let capabilities = [

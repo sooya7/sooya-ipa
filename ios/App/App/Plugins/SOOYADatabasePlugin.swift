@@ -485,7 +485,7 @@ final class SOOYADatabaseStore {
     func verifyBackup(named name: String) throws -> SOOYABackupInfo {
         try lock.sooyaWithLock {
             let backupURL = try existingBackupURLLocked(named: name)
-            let source = try openSQLiteConnectionLocked(at: backupURL, readOnly: true, operation: "backup verify open")
+            let source = try openBackupSnapshotLocked(at: backupURL, operation: "backup verify open")
             defer { _ = sqlite3_close_v2(source) }
             let verification = try integrityLocked(source)
             guard verification.ok else {
@@ -513,7 +513,13 @@ final class SOOYADatabaseStore {
         try lock.sooyaWithLock {
             let connection = try requireConnectionLocked()
             let backupURL = try existingBackupURLLocked(named: name)
-            let source = try openSQLiteConnectionLocked(at: backupURL, readOnly: true, operation: "restore open")
+            // Full-backup archives created by older bases can contain a clean
+            // SQLite snapshot whose persistent journal-mode byte is still WAL,
+            // but the ZIP intentionally contains no -wal/-shm sidecars. Opening
+            // that snapshot read-only can therefore fail lazily on the first
+            // PRAGMA/prepare with SQLITE_CANTOPEN (14). Open the app-owned copy
+            // read-write and normalize it to DELETE before integrity/restore.
+            let source = try openBackupSnapshotLocked(at: backupURL, operation: "restore source open")
             defer { _ = sqlite3_close_v2(source) }
 
             let sourceIntegrity = try integrityLocked(source)
@@ -543,10 +549,9 @@ final class SOOYADatabaseStore {
                 )
             } catch {
                 do {
-                    let rollback = try openSQLiteConnectionLocked(
+                    let rollback = try openBackupSnapshotLocked(
                         at: preRestore.fileURL,
-                        readOnly: true,
-                        operation: "recovery open"
+                        operation: "recovery source open"
                     )
                     defer { _ = sqlite3_close_v2(rollback) }
                     try copyDatabaseLocked(from: rollback, to: connection, operation: "recovery")
@@ -988,6 +993,11 @@ final class SOOYADatabaseStore {
         )
         do {
             try copyDatabaseLocked(from: connection, to: destination, operation: "backup")
+            // sqlite3_backup copies the source database header, including the
+            // persistent WAL journal-mode byte. A portable single-file backup
+            // must not depend on -wal/-shm sidecars that are not part of the
+            // archive, so normalize every new snapshot before verification.
+            try normalizeBackupJournalLocked(destination, operation: "backup journal")
             let verification = try integrityLocked(destination)
             guard verification.ok else {
                 throw SOOYADatabaseError.invalidBackup
@@ -1045,6 +1055,24 @@ final class SOOYADatabaseStore {
               !name.contains("\\"),
               name.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
             throw SOOYADatabaseError.invalidBackupName
+        }
+    }
+
+    private func openBackupSnapshotLocked(at url: URL, operation: String) throws -> OpaquePointer {
+        let source = try openSQLiteConnectionLocked(at: url, readOnly: false, operation: operation)
+        do {
+            try normalizeBackupJournalLocked(source, operation: "\(operation) journal")
+            return source
+        } catch {
+            _ = sqlite3_close_v2(source)
+            throw error
+        }
+    }
+
+    private func normalizeBackupJournalLocked(_ connection: OpaquePointer, operation: String) throws {
+        let code = sqlite3_exec(connection, "PRAGMA journal_mode = DELETE", nil, nil, nil)
+        guard code == SQLITE_OK else {
+            throw sqliteError(connection, operation: operation, fallbackCode: code)
         }
     }
 
