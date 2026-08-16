@@ -307,9 +307,10 @@ export class LocalVoiceService {
       };
       let partId: string | null = null;
       let targetShell = args.shell;
-      if (mode === 'replace' && !targetShell) {
-        targetShell = args.openShell ? await args.openShell() : null;
-        if (!targetShell) throw new StaleGenerationError('voice publish barrier lost');
+      if (!targetShell && args.openShell) {
+        // Hidden draft: open the barrier and create the shell only now that
+        // the audio (or its text fallback) is ready.
+        targetShell = await args.openShell();
       }
       if (!targetShell) throw new StaleGenerationError('voice publish target shell missing');
       if (mode === 'read_aloud' && args.textPartId) {

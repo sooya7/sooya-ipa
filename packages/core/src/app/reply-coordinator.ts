@@ -142,9 +142,34 @@ export class ReplyCoordinator {
       const finalRequest = this.options.toolRuntime ? await this.options.toolRuntime.prepare(provider, request, { phase: 'reply', batchId, revision, signal: controller.signal }) : request;
       if (controller.signal.aborted) throw controller.signal.reason ?? new SupersededReplyError('reply aborted');
 
-      const created = await this.options.messages.create({ role: 'assistant', status: 'sending', replyTo: latestUser.id, batchId, parts: [{ type: 'text', text: '' }], meta: { batchId, revision, partial: true } });
-      assistantId = created.message.id; generation.assistantId = assistantId;
-      const partId = created.message.content[0]?.id; if (!partId) throw new Error('assistant text part was not persisted');
+      // Hidden publish barrier (server parity C5): an explicit user voice
+      // request keeps the whole draft in memory — no shell, no text part, no
+      // streaming deltas — until the voice (or its text fallback) is ready.
+      // The planner gate is the single source of truth for "would this become
+      // a user-requested replace", so hold and dispatch cannot disagree.
+      let holdDraft = false;
+      if (this.options.voiceService && (userVoiceIntent === 'voice_reply' || userVoiceIntent === 'voice_only')) {
+        const runtime = this.runtime();
+        const tts = runtime ? await runtime.ttsProvider?.().catch(() => null) : null;
+        const holdDecision = await this.options.voiceService.decide({ userIntent: userVoiceIntent, modelVoice: null, text: '', ttsConfigured: Boolean(tts?.configured) });
+        holdDraft = holdDecision.mode === 'replace' && holdDecision.requestedBy === 'user';
+      }
+
+      let partId: string | null = null;
+      if (!holdDraft) {
+        const created = await this.options.messages.create({ role: 'assistant', status: 'sending', replyTo: latestUser.id, batchId, parts: [{ type: 'text', text: '' }], meta: { batchId, revision, partial: true } });
+        assistantId = created.message.id; generation.assistantId = assistantId;
+        partId = created.message.content[0]?.id ?? null; if (!partId) throw new Error('assistant text part was not persisted');
+      }
+      // Under a hidden draft the shell is created lazily by the voice phase.
+      const openShell = async (): Promise<ChatMessage> => {
+        const existing = assistantId ? await this.options.messages.get(assistantId) : undefined;
+        if (existing) return existing;
+        const created = await this.options.messages.create({ role: 'assistant', status: 'sending', replyTo: latestUser.id, batchId, parts: [], meta: { batchId, revision, partial: true } });
+        assistantId = created.message.id; generation.assistantId = assistantId;
+        this.options.emit('reply.publishing.started', { batchId, revision, messageId: assistantId });
+        return created.message;
+      };
       let rawText = ''; let visibleText = ''; let write = Promise.resolve(); const filter = new StreamingDirectiveFilter();
       // Persistence throttle: coalesce per-delta updatePart calls (each is a
       // JS↔native bridge round trip) into at most one write per
@@ -152,6 +177,7 @@ export class ReplyCoordinator {
       // text is always written when the stream ends.
       let deltasSinceWrite = 0; let lastWriteAt = 0;
       const persist = (text: string): void => {
+        if (!partId) return;
         write = write.then(() => this.options.messages.updatePart(partId, { text }));
       };
       const maybePersist = (): void => {
@@ -166,13 +192,21 @@ export class ReplyCoordinator {
         if (controller.signal.aborted) return;
         if (chunk.delta) {
           rawText += chunk.delta; const delta = filter.push(chunk.delta);
-          if (delta) { visibleText += delta; this.options.emit('reply.text.delta', { batchId, revision, messageId: assistantId, delta, text: visibleText }); maybePersist(); }
+          if (delta) {
+            visibleText += delta;
+            // Held drafts buffer in memory only: no UI delta, no DB write.
+            if (!holdDraft) { this.options.emit('reply.text.delta', { batchId, revision, messageId: assistantId, delta, text: visibleText }); maybePersist(); }
+          }
         }
         if (chunk.toolCall) this.options.emit('reply.tool.delta', { batchId, revision, messageId: assistantId, toolCall: chunk.toolCall });
         if (chunk.finishReason) this.options.emit('reply.finish', { batchId, revision, finishReason: chunk.finishReason });
       };
       const result = await provider.stream(finalRequest, publish);
-      const flushed = filter.flush(); if (flushed) { visibleText += flushed; this.options.emit('reply.text.delta', { batchId, revision, messageId: assistantId, delta: flushed, text: visibleText }); }
+      const flushed = filter.flush();
+      if (flushed) {
+        visibleText += flushed;
+        if (!holdDraft) this.options.emit('reply.text.delta', { batchId, revision, messageId: assistantId, delta: flushed, text: visibleText });
+      }
       persist(visibleText);
       await write;
       if (controller.signal.aborted || await this.options.batches.currentRevision(batchId) !== revision) throw new SupersededReplyError('reply revision is no longer current');
@@ -180,8 +214,40 @@ export class ReplyCoordinator {
       const rawSemanticText = stripped.text || visibleText.trim();
       const semanticText = stripModelMediaExecutionClaims(rawSemanticText, Boolean(userDirectives.wantImage || userDirectives.wantVoice));
       const directives = mergeDirectives(userDirectives, stripped.directives, buildImageFallbackPrompt(userDirectives, recent, latestUser), userVoiceIntent);
-      visibleText = directives.voiceOnly || directives.stickerOnly ? '' : semanticText;
-      const media = await this.appendRequestedMedia(assistantId, semanticText, directives, controller.signal, { batchId, revision, sourceMessages, userVoiceIntent, textPartId: partId });
+      const voiceContext = { batchId, revision, sourceMessages, userVoiceIntent, textPartId: partId };
+      let media: MediaAppendResult;
+      if (holdDraft) {
+        // Voice owns the barrier: the shell appears only with audio (or its
+        // text fallback); deferred image/sticker attach afterwards.
+        media = await this.appendVoiceMedia({ messageId: null, shell: null, openShell, text: semanticText, directives, signal: controller.signal, context: voiceContext });
+        if (!assistantId) {
+          // Nothing was published (voice skipped/unavailable): release the
+          // buffered draft as a normal text reply — the user never loses the
+          // answer.
+          const shell = await openShell();
+          await this.options.messages.appendPart(shell.id, { type: 'text', text: semanticText, status: 'sent' });
+        } else if (media.voiceOutcome?.kind === 'published' && media.voiceOutcome.mode !== 'replace') {
+          // Defensive contract: complement under a hold keeps the text.
+          await this.options.messages.appendPart(assistantId, { type: 'text', text: semanticText, status: 'sent' });
+        }
+        if (assistantId && (directives.stickers?.length || directives.requiredImage || directives.imagePrompt || directives.selfImagePrompt)) {
+          const deferred = await this.appendImageMedia(assistantId, directives, controller.signal, { batchId, revision, sourceMessages });
+          media = { appended: media.appended + deferred.appended, imageAttempted: media.imageAttempted || deferred.imageAttempted, imageFailed: media.imageFailed || deferred.imageFailed, voiceOutcome: media.voiceOutcome };
+        }
+      } else {
+        media = await this.appendRequestedMedia(assistantId!, semanticText, directives, controller.signal, voiceContext);
+      }
+      if (!holdDraft) {
+        visibleText = directives.voiceOnly || directives.stickerOnly ? '' : semanticText;
+      } else {
+        // Held release rules, driven by the outcome: a published replace is
+        // audio-only; the service's text fallback already wrote the part;
+        // anything else releases the full buffered text (written above).
+        const outcome = media.voiceOutcome;
+        visibleText = outcome?.kind === 'published-as-text' ? outcome.text
+          : outcome?.kind === 'published' && outcome.mode === 'replace' ? ''
+            : semanticText;
+      }
       if (!visibleText.trim() && media.appended === 0 && media.imageAttempted && media.imageFailed) visibleText = IMAGE_FAILURE_FALLBACK_TEXT;
       // Voice-outcome release rules: a published replace owns the message
       // (audio is the reply, the draft text part was removed); a text
@@ -191,7 +257,8 @@ export class ReplyCoordinator {
       const voicePublishedText = media.voiceOutcome?.kind === 'published-as-text' ? media.voiceOutcome.text : undefined;
       if (voicePublishedText !== undefined) visibleText = voicePublishedText;
       else if (directives.voiceOnly || directives.stickerOnly || voicePublishedReplace) visibleText = '';
-      await this.options.messages.updatePart(partId, { text: visibleText });
+      if (!holdDraft && partId) await this.options.messages.updatePart(partId, { text: visibleText });
+      if (!assistantId) throw new Error('hidden reply lost its shell');
       if (!visibleText.trim() && media.appended === 0) throw new Error('provider returned an empty reply');
       const mediaCount = media.appended;
       await this.options.messages.updateMeta(assistantId, { batchId, revision, partial: false, model: result.model, finishReason: result.finishReason ?? null, usage: result.usage ?? null, directives, mediaCount, ...(webSearchResult ? webSearchPartMeta(webSearchResult) : {}), ...(result.webSearch ? { webSearch: result.webSearch } : {}) });
@@ -217,9 +284,17 @@ export class ReplyCoordinator {
   async recover(): Promise<void> { const open = await this.options.batches.latestOpen(); if (open) this.schedule(open.id, open.revision); }
 
   private async appendRequestedMedia(messageId: string, text: string, directives: EffectiveDirectives, signal: AbortSignal, context: { batchId: string; revision: number; sourceMessages: ChatMessage[]; userVoiceIntent: VoiceIntent; textPartId: string | null }): Promise<MediaAppendResult> {
+    const visual = await this.appendImageMedia(messageId, directives, signal, { batchId: context.batchId, revision: context.revision, sourceMessages: context.sourceMessages });
+    const voice = await this.appendVoiceMedia({ messageId, shell: null, openShell: undefined, text, directives, signal, context });
+    return { appended: visual.appended + voice.appended, imageAttempted: visual.imageAttempted, imageFailed: visual.imageFailed, voiceOutcome: voice.voiceOutcome };
+  }
+
+  /** Image + sticker appends; safe to call on a shell opened by the voice
+   * phase (hidden-draft deferred media ordering). */
+  private async appendImageMedia(messageId: string, directives: EffectiveDirectives, signal: AbortSignal, context: { batchId: string; revision: number; sourceMessages: ChatMessage[] }): Promise<MediaAppendResult> {
     const result: MediaAppendResult = { appended: 0, imageAttempted: false, imageFailed: false };
     if (signal.aborted) return result;
-    const { batchId, revision, sourceMessages, userVoiceIntent, textPartId } = context;
+    const { batchId, revision, sourceMessages } = context;
     const runtime = this.runtime();
     const imagePrompt = directives.selfImagePrompt ?? directives.imagePrompt;
     if (!runtime) {
@@ -354,10 +429,25 @@ export class ReplyCoordinator {
         } catch (error) { this.options.emit('reply.media.failed', { batchId, revision, messageId, type: 'sticker', error: errorMessage(error) }); }
       }
     }
-    // Voice V2 (server parity): intent → mode → independent spoken script →
-    // guards → delivery → TTS → publication. The coordinator never hands the
-    // raw reply text to TTS; only the service's synthesisText crosses that
-    // line (read_aloud is the single sanctioned exception).
+    return result;
+  }
+
+  /**
+   * Voice V2 (server parity): intent → mode → independent spoken script →
+   * guards → delivery → TTS → publication. The coordinator never hands the
+   * raw reply text to TTS; only the service's synthesisText crosses that
+   * line (read_aloud is the single sanctioned exception).
+   *
+   * Under a hidden draft, `shell` is null and `openShell` creates the message
+   * only once audio (or its text fallback) is ready.
+   */
+  private async appendVoiceMedia(options: { messageId: string | null; shell: ChatMessage | null; openShell?: () => Promise<ChatMessage>; text: string; directives: EffectiveDirectives; signal: AbortSignal; context: { batchId: string; revision: number; sourceMessages: ChatMessage[]; userVoiceIntent: VoiceIntent; textPartId: string | null } }): Promise<MediaAppendResult> {
+    const result: MediaAppendResult = { appended: 0, imageAttempted: false, imageFailed: false };
+    const { text, directives, signal } = options;
+    const { batchId, revision, sourceMessages, userVoiceIntent, textPartId } = options.context;
+    const messageId = options.messageId;
+    const runtime = this.runtime();
+    if (signal.aborted || !runtime) return result;
     if (this.options.voiceService && directives.voice && !directives.noVoice && text.trim()) {
       const provider = await runtime.ttsProvider?.().catch(() => null);
       if (provider?.configured) {
@@ -375,8 +465,9 @@ export class ReplyCoordinator {
             const outcome = await this.options.voiceService.synthesizeInlineVoice({
               batchId,
               revision,
-              shell: await this.options.messages.get(messageId) ?? null,
+              shell: options.shell ?? (messageId !== null ? await this.options.messages.get(messageId) ?? null : null),
               textPartId,
+              openShell: options.openShell,
               finalText: text,
               userText,
               decision,

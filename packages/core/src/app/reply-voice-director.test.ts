@@ -4,7 +4,7 @@ import type { MessageRepo } from '../db/message.repo.js';
 import type { ReplyBatchRepo } from '../db/reply-batch.repo.js';
 import type { MemoryProvider } from '../memory/types.js';
 import type { VoiceGenerationInput, VoiceGenerationRow } from '../db/voice.repo.js';
-import type { ChatProvider, ChatRequest, ChatResult, HealthStatus, TTSProvider, SynthesizedAudio } from '../providers/types.js';
+import type { ChatProvider, ChatRequest, ChatResult, GeneratedImage, HealthStatus, ImageProvider, TTSProvider, SynthesizedAudio } from '../providers/types.js';
 import type { MediaPlatform, MediaRecord } from '../platform/media.js';
 import { installReplyFeatureRuntime, type ReplyFeatureRuntime } from './reply-feature-runtime.js';
 import { ReplyCoordinator } from './reply-coordinator.js';
@@ -28,8 +28,10 @@ class FakeMessages {
   readonly messages = new Map<string, ChatMessage>();
   readonly appended: MessagePart[] = [];
   readonly deletedParts: string[] = [];
+  readonly createdCalls: Array<{ parts: Array<{ type: string; text?: string | null }> }> = [];
   constructor(initial: ChatMessage[]) { for (const item of initial) this.messages.set(item.id, item); }
   async create(input: { role: 'assistant'; parts: Array<{ type: MessagePart['type']; text?: string | null }>; meta?: Record<string, unknown> }) {
+    this.createdCalls.push({ parts: input.parts });
     const created: ChatMessage = {
       ...message('assistant-1', 'assistant', ''),
       content: input.parts.map((part, index) => ({ ...textPart(`a-p-${index}`, part.text ?? ''), type: part.type }))
@@ -47,9 +49,9 @@ class FakeMessages {
       if (target) Object.assign(target, patch);
     }
   }
-  async appendPart(messageId: string, input: { type: MessagePart['type']; status?: MessagePart['status']; mediaId?: string | null; meta?: Record<string, unknown>; transcript?: string | null; duration?: number | null }) {
+  async appendPart(messageId: string, input: { type: MessagePart['type']; text?: string | null; status?: MessagePart['status']; mediaId?: string | null; meta?: Record<string, unknown>; transcript?: string | null; duration?: number | null }) {
     const target = this.messages.get(messageId)!;
-    const created: MessagePart = { id: `part-${target.content.length + 1}`, type: input.type, text: null, mediaId: input.mediaId ?? null, status: input.status ?? 'sent', error: null, duration: input.duration ?? null, transcript: input.transcript ?? null, meta: input.meta ?? {} };
+    const created: MessagePart = { id: `part-${target.content.length + 1}`, type: input.type, text: input.text ?? null, mediaId: input.mediaId ?? null, status: input.status ?? 'sent', error: null, duration: input.duration ?? null, transcript: input.transcript ?? null, meta: input.meta ?? {} };
     target.content.push(created);
     this.appended.push(created);
     return created.id;
@@ -102,6 +104,18 @@ class FakeDirectorModel implements ChatProvider {
     return { text: script, model: 'director-model' };
   }
   async stream(): Promise<ChatResult> { throw new Error('not used'); }
+  async inspectHealth(): Promise<HealthStatus> { throw new Error('not used'); }
+}
+
+class FakeImageProvider implements ImageProvider {
+  readonly configured = true;
+  readonly name = 'anuma-input-images';
+  readonly generateCalls: string[] = [];
+  async generate(prompt: string): Promise<GeneratedImage> {
+    this.generateCalls.push(prompt);
+    return { data: new Uint8Array([3]), mime: 'image/png' };
+  }
+  async edit(): Promise<GeneratedImage> { throw new Error('edit not used'); }
   async inspectHealth(): Promise<HealthStatus> { throw new Error('not used'); }
 }
 
@@ -162,6 +176,7 @@ interface VoiceHarness {
   batches: FakeBatches;
   tts: FakeTts;
   fishTts: FakeTts;
+  imageProvider: FakeImageProvider;
   director: FakeDirectorModel;
   voices: FakeVoices;
   media: VoiceMedia;
@@ -187,6 +202,7 @@ function voiceHarness(options: {
   const voices = new FakeVoices();
   const settings = new FakeSettings();
   const media = new VoiceMedia();
+  const imageProvider = new FakeImageProvider();
   const mediaDirector = new MediaDirector(new DirectorClient(() => director));
   const voiceService = new LocalVoiceService({
     voices: voices as unknown as ConstructorParameters<typeof LocalVoiceService>[0]['voices'],
@@ -197,7 +213,7 @@ function voiceHarness(options: {
     emit: (type, data) => events.push({ type, data }),
     isCurrentRevision: async (_batchId, revision) => batches.revision === revision
   });
-  installReplyFeatureRuntime({ media, ttsProvider: async () => fishTts });
+  installReplyFeatureRuntime({ media, imageProvider: async () => imageProvider, ttsProvider: async () => fishTts });
   const coordinator = new ReplyCoordinator({
     messages: messages as unknown as MessageRepo,
     batches: batches as unknown as ReplyBatchRepo,
@@ -207,7 +223,7 @@ function voiceHarness(options: {
     voiceService,
     emit: (type, data) => events.push({ type, data })
   });
-  return { messages, batches, tts: fishTts, fishTts, director, voices, media, events, run: () => coordinator.run('batch-1', 1) };
+  return { messages, batches, tts: fishTts, fishTts, imageProvider, director, voices, media, events, run: () => coordinator.run('batch-1', 1) };
 }
 
 const actionReply = '（听到你这么说，我把声音放轻了一点）\n好。\n（顿了一下，像把手机凑近了些）\n是我。你早点休息。';
@@ -357,6 +373,70 @@ describe('voice V2 through the reply pipeline', () => {
     // Transcript stays clean of the cue.
     const audio = h.messages.appended.find((part) => part.type === 'audio')!;
     expect(audio.transcript).toBe('晚安，做个好梦。');
+  });
+
+  it('voice-only holds the whole draft: no shell, no deltas, audio is the first visible output', async () => {
+    const h = voiceHarness({
+      rawText: '今天还不错，整理了房间，还去了咖啡店。[[voice]]',
+      userTexts: ['只发语音，别打字'],
+      directorScripts: ['{"text":"今天还不错，整理了房间，还去了咖啡店，跟你语音说。","speed":1}']
+    });
+
+    await h.run();
+
+    // Exactly one shell, created empty by the voice publish barrier.
+    expect(h.messages.createdCalls).toEqual([{ parts: [] }]);
+    // No streaming text ever reached the UI.
+    expect(h.events.filter((event) => event.type === 'reply.text.delta')).toEqual([]);
+    const assistant = await h.messages.get('assistant-1');
+    expect(assistant!.status).toBe('sent');
+    expect(assistant!.content.map((part) => part.type)).toEqual(['audio']);
+    expect(assistant!.content[0]?.transcript).toContain('语音说');
+    expect(h.batches.completed).toBe(true);
+    expect(h.messages.createdCalls[0]!.parts).toEqual([]);
+  });
+
+  it('hold + image request: voice opens the shell, the deferred image attaches after the audio', async () => {
+    const directorScripts = ['{"text":"睡前给你看看我的小猫。","speed":1}'];
+    const h = voiceHarness({
+      rawText: '给你看。[[voice]][[image:一只正在打盹的橘猫]]',
+      userTexts: ['用语音回我，顺便画一张小猫图'],
+      directorScripts
+    });
+    // Reuse the same director model for the image expansion (second task).
+    let imageExpanded = false;
+    const originalComplete = h.director.complete.bind(h.director);
+    h.director.complete = async (request: ChatRequest) => {
+      const result = await originalComplete(request);
+      const input = request.messages.map((t) => (t as { content: Array<{ text?: string }> }).content.map((p) => p.text ?? '').join('')).join('');
+      if (input.includes('Image2')) { imageExpanded = true; return { text: '{"prompt":"一只蜷着打盹的橘猫，暖黄台灯，真实手机摄影质感","aspectRatio":"3:4"}', model: 'director-model' }; }
+      return result;
+    };
+
+    await h.run();
+
+    expect(imageExpanded).toBe(true);
+    const assistant = await h.messages.get('assistant-1');
+    // Audio first (voice opened the barrier), then the deferred image.
+    expect(assistant!.content.map((part) => part.type)).toEqual(['audio', 'image']);
+    expect(h.messages.createdCalls).toEqual([{ parts: [] }]);
+  });
+
+  it('hold replace survives director unavailability through the rule-based script', async () => {
+    const h = voiceHarness({
+      rawText: '今天过得还行，上午看书，下午散步。[[voice]]',
+      userTexts: ['用语音回我'],
+      directorScripts: ['not json']
+    });
+
+    await h.run();
+
+    expect(h.tts.inputs).toHaveLength(1);
+    const assistant = await h.messages.get('assistant-1');
+    expect(assistant!.content.map((part) => part.type)).toEqual(['audio']);
+    expect(assistant!.status).toBe('sent');
+    const generation = [...h.voices.rows.values()][0]!;
+    expect(generation.status).toBe('published');
   });
 
   it('reports superseded and destroys the audio when the revision moves during TTS', async () => {
