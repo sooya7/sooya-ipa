@@ -13,6 +13,7 @@ import {
   BuiltinRerankProvider
 } from './builtin.js';
 import { BuiltinImageProvider, BuiltinTtsProvider } from './media-providers.js';
+import { DurableAnumaImageProvider } from './durable-image-provider.js';
 
 export interface ConfiguredProviders {
   chat: ChatProvider | null;
@@ -39,6 +40,18 @@ function runtimeImageConfig(config: ProviderConfig): ProviderConfig {
   if (!protocol || protocol === config.provider) return config;
   if (protocol === 'anuma-input-images') return { ...config, provider: protocol };
   return config;
+}
+
+function configuredImageProvider(http: HttpPlatform, config: ProviderConfig): ImageProvider {
+  const runtime = runtimeImageConfig(config);
+  const legacy = new BuiltinImageProvider(http, runtime);
+  // Anuma/Image2 keeps its legacy synchronous path as an automatic fallback.
+  // When the optional /image-jobs gateway is present, ReplyCoordinator can
+  // opt into DurableAnumaImageProvider's start/resume methods without changing
+  // any other image protocol.
+  return runtime.provider === 'anuma-input-images'
+    ? new DurableAnumaImageProvider(http, runtime, legacy)
+    : legacy;
 }
 
 /**
@@ -71,7 +84,7 @@ export async function createConfiguredProviders(
     director: director && director.enabled ? new BuiltinChatProvider(http, director) : chatProvider,
     embedding: embedding && embedding.enabled ? new BuiltinEmbeddingProvider(http, embedding) : null,
     rerank: rerank && rerank.enabled ? new BuiltinRerankProvider(http, rerank) : null,
-    image: image && image.enabled ? new BuiltinImageProvider(http, runtimeImageConfig(image)) : null,
+    image: image && image.enabled ? configuredImageProvider(http, image) : null,
     tts: tts && tts.enabled ? new BuiltinTtsProvider(http, tts) : null
   };
 }
