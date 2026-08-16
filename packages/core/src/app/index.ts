@@ -40,6 +40,13 @@ export type { SummaryBuildResult, SummaryBuilderOptions } from './summary-builde
 export { StickerAnalyzer, STICKER_ANALYSIS_VERSION } from './sticker-analyzer.js';
 export type { StickerAnalysisResult } from './sticker-analyzer.js';
 export { LocalLifeCatchUp } from '../life/catch-up-service.js';
+export { LocalTaskScheduler, TASK_PRIORITY } from '../jobs/local-task-scheduler.js';
+export { buildTaskHandlerMap } from '../jobs/handlers.js';
+export type { TaskHandlerMap, CoreTaskHandlerDeps } from '../jobs/handlers.js';
+export { retryDelayMs, isRetryableJobError } from '../jobs/retry-policy.js';
+export { NotificationPolicy, sanitizeBody } from '../notifications/policy.js';
+export { NotificationPlanner } from '../notifications/planner.js';
+export type { LocalNotificationScheduler, NotificationEvent, NotificationPolicyState, NotificationDecision } from '../notifications/types.js';
 export { LifeV2Source } from '../life/v2/source.js';
 export type { LifeV2SourceOptions } from '../life/v2/source.js';
 export { LIFE_ACTIVITIES, activityById } from '../life/v2/activities.js';
