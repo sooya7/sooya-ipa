@@ -1,6 +1,8 @@
 name: OTA web bundle
 
-# Web-only admin/UI fixes are shipped by this OTA bundle and do not require a native reinstall.
+# Web/admin fixes ship by OTA. Native gate source changes also republish the
+# current Web bundle so a newly installed Native Base never points at a stale
+# stable manifest whose nativeMin/nativeMax still target the previous base.
 
 on:
   push:
@@ -9,6 +11,8 @@ on:
       - 'packages/core/**'
       - 'packages/web/**'
       - 'packages/migration-tools/**'
+      - 'ios/App/App/native-base.version'
+      - 'ios/App/App/Plugins/SOOYAReleaseConfig.swift'
       - 'scripts/build-ota.mjs'
       - 'scripts/ota-gates.mjs'
       - 'scripts/ota_server.py'
