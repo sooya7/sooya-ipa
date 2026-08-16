@@ -1,3 +1,5 @@
+import './reply-image-job-install.js';
+
 export * from './types.js';
 export { LocalCore, AdminRouteUnsupportedError, zonedStartOfDayUtcMs } from './local-core.js';
 export type { NativeAdminRoute, NativeAdminRouteContext, NativeAdminMethod } from './admin-routes.js';
