@@ -107,7 +107,7 @@ export class ReplyCoordinator {
         sourceMessages.filter((message) => message.role === 'user').map((message) => ({ text: textOf(message) }))
       ).intent;
       const recent = await this.options.messages.recent(32);
-      const context = this.options.contextBuilder ? await this.options.contextBuilder.build({ recent, latestUser }) : { system: await this.systemPrompt(latestUser), turns: await this.buildTurns(recent, latestUser) };
+      const context = this.options.contextBuilder ? await this.options.contextBuilder.build({ recent, latestUser, batchMessageIds: ids }) : { system: await this.systemPrompt(latestUser), turns: await this.buildTurns(recent, latestUser) };
       const request: ChatRequest = { system: appendDirectiveProtocol(context.system), messages: context.turns, maxTokens: 2048, temperature: 0.7, signal: controller.signal };
       // Web search decision + injection: only when the user asks for current
       // information. Failures degrade the prompt honestly instead of failing
