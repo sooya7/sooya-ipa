@@ -7,6 +7,8 @@ import {
   type ModelCapabilitySlot
 } from '@sooya/core/app';
 import type { HttpPlatform, McpPlatform } from '@sooya/core/platform';
+import type { LocalNotificationScheduler } from '@sooya/core/app';
+import { NativeNotifications } from './nativeNotifications.js';
 import {
   BuiltinChatProvider,
   BuiltinEmbeddingProvider,
@@ -58,8 +60,8 @@ export class NativeLocalCore extends LocalCore {
   private readonly probeMcp?: McpPlatform;
   private readonly probeReferenceImages?: NativeProbeReferenceLoader;
 
-  constructor(options: LocalCoreOptions & { http: HttpPlatform; referenceImages?: NativeProbeReferenceLoader }) {
-    super(options);
+  constructor(options: LocalCoreOptions & { http: HttpPlatform; referenceImages?: NativeProbeReferenceLoader; notificationScheduler?: LocalNotificationScheduler | null }) {
+    super({ ...options, notificationScheduler: options.notificationScheduler === undefined ? new NativeNotifications() : options.notificationScheduler });
     this.probeHttp = options.http;
     this.probeMcp = options.mcp;
     this.probeReferenceImages = options.referenceImages;

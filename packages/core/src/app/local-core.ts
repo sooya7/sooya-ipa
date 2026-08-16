@@ -35,6 +35,9 @@ import { SummaryBuilder } from './summary-builder.js';
 import { StickerAnalyzer } from './sticker-analyzer.js';
 import { extractText } from '../util/text-extractor.js';
 import { LocalLifeCatchUp } from '../life/catch-up-service.js';
+import { LocalTaskScheduler, TASK_PRIORITY, type DurableTaskHandler, type DurableTaskStore, type DurableTaskType } from '../jobs/local-task-scheduler.js';
+import { buildTaskHandlerMap } from '../jobs/handlers.js';
+import { isRetryableJobError } from '../jobs/retry-policy.js';
 import { LifeV2Source } from '../life/v2/source.js';
 import { LocalLocationService } from '../world/location/service.js';
 import { MomentComposer } from '../moments/composer.js';
@@ -45,6 +48,8 @@ import { LATEST_SCHEMA_VERSION } from '../db/migrations.js';
 import { newId } from '../db/database.js';
 import { exactRoute, methodSet, prefixRoute, regexRoute, type NativeAdminMethod, type NativeAdminRoute, type NativeAdminRouteContext } from './admin-routes.js';
 import type { LocalEvent, LocalEventListener, LocalCoreApi, BootstrapInfo, ChatMessage, LifeState, MessagePage, MediaRef, MessagePart, MessageContext, MessageSearchHit, Moment, StickerInfo, WorldPresence, UploadInputFile, LocalAdminRequestOptions } from './types.js';
+import { NotificationPlanner } from '../notifications/planner.js';
+import type { LocalNotificationScheduler, NotificationPolicyState } from '../notifications/types.js';
 
 export interface LocalCoreOptions {
   db: LocalDatabase;
@@ -64,6 +69,8 @@ export interface LocalCoreOptions {
   version?: string;
   /** Process start timestamp surfaced by GET /api/admin/system. */
   startedAt?: string;
+  /** Local-only notification delivery bridge (Capacitor LocalNotifications). */
+  notificationScheduler?: LocalNotificationScheduler | null;
 }
 
 /**
@@ -171,6 +178,9 @@ export class LocalCore implements LocalCoreApi {
   /** Voice V2 pipeline: intent → mode → independent script → guards → TTS. */
   readonly voiceService: LocalVoiceService;
   readonly replies: ReplyCoordinator;
+  /** Foreground-only durable task scheduler. */
+  readonly scheduler: LocalTaskScheduler;
+  readonly notificationPlanner: NotificationPlanner | null;
   readonly contextBuilder: ContextBuilder;
   readonly summaryBuilder: SummaryBuilder;
   readonly personaReferences: PersonaReferenceService;
@@ -182,6 +192,8 @@ export class LocalCore implements LocalCoreApi {
   /** Ordered native admin route registry. Matching and capability discovery
    * are owned by this table; unknown routes never reach a handler. */
   private readonly adminRoutes: NativeAdminRoute[];
+  private appActive = false;
+  private readonly notificationHistoryKey = 'notifications.history';
 
   constructor(private readonly options: LocalCoreOptions) {
     const db = options.db;
@@ -340,12 +352,176 @@ export class LocalCore implements LocalCoreApi {
       debounceMs: options.replyDebounceMs,
       emit: (type, data) => this.events.emit(type, data)
     });
+    this.scheduler = new LocalTaskScheduler({ store: this.durableTaskStore(), handlers: this.taskHandlers() });
+    this.notificationPlanner = options.notificationScheduler
+      ? new NotificationPlanner({
+          scheduler: options.notificationScheduler,
+          now,
+          recordDelivery: async (entry) => {
+            const history = await this.configRepo.getPreference<Array<{ key: string; at: string }>>(this.notificationHistoryKey, []);
+            await this.configRepo.setPreference(this.notificationHistoryKey, [...history.slice(-199), entry]);
+          }
+        })
+      : null;
+    this.events.subscribe((event) => {
+      if (event.type !== 'reply.completed') return;
+      void this.notifyReplyCompleted(event.data).catch((error) => { void this.recordError('notification.reply', errorMessage(error)); });
+    });
     this.adminRoutes = this.buildAdminRoutes();
   }
 
   subscribe(listener: LocalEventListener): () => void {
     return this.events.subscribe(listener);
   }
+
+  private durableTaskStore(): DurableTaskStore {
+    return {
+      recoverRunning: () => this.jobsRepo.recoverStuck(),
+      claimNext: async () => {
+        const row = await this.jobsRepo.claimNext();
+        if (!row) return null;
+        let payload: Record<string, unknown> = {};
+        try { payload = JSON.parse(row.payload_json) as Record<string, unknown>; } catch { payload = {}; }
+        return {
+          id: row.id,
+          type: row.type as DurableTaskType,
+          state: 'running',
+          priority: TASK_PRIORITY[row.type as DurableTaskType] ?? 50,
+          attempts: row.attempts,
+          maxAttempts: row.max_attempts,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+          payload
+        };
+      },
+      complete: (id) => this.jobsRepo.complete(id),
+      fail: async (id, error, retryable) => {
+        if (!retryable && !isRetryableJobError(error)) await this.jobsRepo.failTerminal(id, error);
+        else await this.jobsRepo.fail(id, error);
+      }
+    };
+  }
+
+  /** Every scheduled maintenance path is owned by a durable task handler. */
+  private taskHandlers(): Partial<Record<DurableTaskType, DurableTaskHandler>> {
+    return buildTaskHandlerMap({
+      'life.catchup': async () => {
+        const caught = await this.lifeCatchUp.catchUp();
+        this.events.emit('life.updated', { activity: caught.state.current.activity });
+      },
+      'weather.refresh': async () => { await this.refreshWeather(); },
+      'moment.compose': async () => { await this.composeMomentsIfEnabled(); },
+      'moment.image': async () => { await this.composeMomentsIfEnabled(); },
+      'sticker.analyze': async () => { await this.analyzePendingStickers(); },
+      'sticker.embed': async () => { await this.embedPendingStickers(); },
+      'media.extract_text': async () => {
+        const rows = await this.mediaRepo.pendingTextExtractions(20);
+        for (const row of rows) await this.extractMediaText(row.id);
+      },
+      'memory.commit': async () => { /* reply coordinator owns batch/revision commit */ },
+      'memory.reembed': async () => { await this.memoryProvider.maintain(); },
+      backup: async () => { await this.adminRequest('/api/admin/backups', { method: 'POST' }); }
+    });
+  }
+
+  private async enqueueTask(type: DurableTaskType, payload: Record<string, unknown>): Promise<void> {
+    if (await this.jobsRepo.hasActive(type)) return;
+    if (await this.jobsRepo.hasRecentDone(type)) return;
+    await this.jobsRepo.enqueue(type, payload, { priority: TASK_PRIORITY[type], maxAttempts: type === 'life.catchup' ? 3 : 3 });
+  }
+
+  /** Queues only work that is actually due; handlers own the real execution. */
+  private async enqueueDueTasks(): Promise<void> {
+    await this.enqueueTask('life.catchup', {});
+    const cachedWeather = await this.weatherRepo.latest('active').catch(() => undefined);
+    const now = this.options.now?.() ?? new Date();
+    const weatherAgeMs = cachedWeather ? now.getTime() - Date.parse(cachedWeather.observed_at) : Number.POSITIVE_INFINITY;
+    if (!cachedWeather || !Number.isFinite(weatherAgeMs) || weatherAgeMs > 30 * 60_000) await this.enqueueTask('weather.refresh', {});
+    if ((await this.lifeV2Repo.pendingCandidates()).length > 0) await this.enqueueTask('moment.compose', {});
+    if ((await this.mediaRepo.pendingTextExtractions(1)).length > 0) await this.enqueueTask('media.extract_text', {});
+    if ((await this.stickersRepo.list({ enabledOnly: true, status: 'pending', limit: 1 })).length > 0) await this.enqueueTask('sticker.analyze', {});
+    const ready = await this.stickersRepo.list({ enabledOnly: true, status: 'ready', limit: 100 });
+    if (ready.some((sticker) => !sticker.embedding?.length)) await this.enqueueTask('sticker.embed', {});
+  }
+
+  private async analyzePendingStickers(): Promise<void> {
+    const pending = await this.stickersRepo.list({ enabledOnly: true, status: 'pending', limit: 5 });
+    for (const sticker of pending) {
+      try { await this.analyzeSticker(sticker.id); }
+      catch (error) { await this.recordError('sticker.analyze', errorMessage(error)); }
+    }
+  }
+
+  private async embedPendingStickers(): Promise<void> {
+    const provider = (await this.configuredProviders?.())?.embedding;
+    if (!provider?.configured) return;
+    const ready = (await this.stickersRepo.list({ enabledOnly: true, status: 'ready', limit: 100 }))
+      .filter((sticker) => !sticker.embedding?.length);
+    if (ready.length === 0) return;
+    const texts = ready.map((sticker) => [sticker.userMeaning, sticker.description, sticker.imageText, sticker.name].filter(Boolean).join(' ').slice(0, 500));
+    const result = await provider.embed(texts);
+    for (let index = 0; index < ready.length; index += 1) {
+      const vector = result.vectors[index];
+      if (!vector?.length) continue;
+      await this.stickersRepo.setEmbedding(ready[index]!.id, vector, result.model, result.dimensions);
+    }
+  }
+
+  private async notificationPolicyState(): Promise<NotificationPolicyState> {
+    const caps = await this.configRepo.notificationCapabilities();
+    const prefs = await this.configRepo.getPreference<Record<string, unknown>>('notifications', {});
+    const history = await this.configRepo.getPreference<Array<{ key: string; at: string }>>(this.notificationHistoryKey, []);
+    const detail = caps.detail && typeof caps.detail === 'object' ? caps.detail as Record<string, unknown> : {};
+    const quiet = prefs.quietHours && typeof prefs.quietHours === 'object' ? prefs.quietHours as Record<string, unknown> : null;
+    return {
+      permission: {
+        supported: caps.localSupported,
+        enabled: caps.localEnabled,
+        granted: caps.localSupported && detail.localPermission !== 'denied'
+      },
+      foregroundSuppression: prefs.foregroundSuppression !== false,
+      quietHours: quiet && typeof quiet.from === 'number' && typeof quiet.to === 'number'
+        ? { fromHour: Math.max(0, Math.min(23, quiet.from)), toHour: Math.max(0, Math.min(23, quiet.to)), timeZone: typeof quiet.timeZone === 'string' ? quiet.timeZone : 'Asia/Shanghai' }
+        : null,
+      dailyCap: typeof prefs.dailyCap === 'number' && prefs.dailyCap >= 0 ? Math.trunc(prefs.dailyCap) : 5,
+      recent: history,
+      maxBodyLength: typeof prefs.maxBodyLength === 'number' ? Math.max(40, Math.min(300, Math.trunc(prefs.maxBodyLength))) : 160
+    };
+  }
+
+  private async notifyReplyCompleted(data: Record<string, unknown>): Promise<void> {
+    if (!this.notificationPlanner) return;
+    const message = isRecord(data.message) ? data.message as unknown as ChatMessage : undefined;
+    const body = message?.content.map((part) => part.text ?? '').filter(Boolean).join(' ').trim();
+    if (!body) return;
+    await this.notificationPlanner.plan({
+      type: 'reply.completed',
+      id: typeof data.message && isRecord(data.message) && typeof (data.message as { id?: unknown }).id === 'string' ? (data.message as { id: string }).id : String(data.batchId ?? 'reply'),
+      at: this.options.now?.() ?? new Date(),
+      appActive: this.appActive,
+      title: 'SOOYA 回复了你',
+      body,
+      extra: { batchId: data.batchId, revision: data.revision }
+    }, await this.notificationPolicyState());
+  }
+
+  private async notifyImportantMoment(momentId: string): Promise<void> {
+    if (!this.notificationPlanner) return;
+    const row = await this.momentsRepo.get(momentId);
+    if (!row || !row.text) return;
+    const important = row.image_media_id !== null || ['out', 'social', 'play', 'meal'].includes(row.activity);
+    if (!important) return;
+    await this.notificationPlanner.plan({
+      type: 'important_moment',
+      id: row.id,
+      at: this.options.now?.() ?? new Date(),
+      appActive: this.appActive,
+      title: 'SOOYA 的新动态',
+      body: row.text,
+      extra: { momentId: row.id, image: row.image_media_id !== null }
+    }, await this.notificationPolicyState());
+  }
+
 
   /** Single world producer consumed by ContextBuilder (Life/Location/Weather). */
   private async worldSnapshot(): Promise<WorldSnapshot> {
@@ -378,18 +554,16 @@ export class LocalCore implements LocalCoreApi {
     };
   }
 
-  /** Foreground: recover interrupted jobs before the scheduler drains them. */
+  /** Foreground: recover interrupted jobs, enqueue due work, drain, then reply/memory. */
   async onAppActive(): Promise<void> {
+    this.appActive = true;
     await this.jobsRepo.recoverStuck();
     await this.voicesRepo.recoverInFlight().catch(() => undefined);
-    const caught = await this.lifeCatchUp.catchUp().catch(() => null);
-    if (caught) this.events.emit('life.updated', { activity: caught.state.current.activity });
-    const cachedWeather = await this.weatherRepo.latest('active').catch((error) => { void this.recordError('weather.read', errorMessage(error)); return undefined; });
-    const weatherAgeMs = cachedWeather ? (this.options.now?.() ?? new Date()).getTime() - Date.parse(cachedWeather.observed_at) : Number.POSITIVE_INFINITY;
-    if (!cachedWeather || !Number.isFinite(weatherAgeMs) || weatherAgeMs > 30 * 60_000) await this.refreshWeather().catch((error) => { void this.recordError('weather.refresh', errorMessage(error)); });
+    await this.enqueueDueTasks();
+    await this.scheduler.activate();
+    await this.scheduler.whenIdle();
     const presence = await this.presence().catch((error) => { void this.recordError('world.presence', errorMessage(error)); return null; });
     if (presence) this.events.emit('world.updated', { presence });
-    await this.composeMomentsIfEnabled().catch((error) => { void this.recordError('moment.compose', errorMessage(error)); });
     await this.replies.recover().catch((error) => { void this.recordError('reply.recover', errorMessage(error)); });
     void this.memorySync?.syncOnce().catch((error) => { void this.recordError('memory.sync', errorMessage(error)); });
   }
@@ -404,14 +578,19 @@ export class LocalCore implements LocalCoreApi {
     const settings = await this.localLifeSettings();
     const now = this.options.now?.() ?? new Date();
     if (!settings.reachOut || settings.maxReachOutsPerDay <= 0 || isSilentLifeHour(now, settings)) return;
-    await this.momentComposer.compose(now, new MomentPolicy({
+    const result = await this.momentComposer.compose(now, new MomentPolicy({
       dailyCap: settings.maxReachOutsPerDay,
       minGapMs: settings.quietGapMinutes * 60_000
     }));
+    for (const id of result.created) {
+      void this.notifyImportantMoment(id).catch((error) => { void this.recordError('notification.moment', errorMessage(error)); });
+    }
   }
 
-  /** Background: persist WAL state so the database survives suspension. */
+  /** Background: stop optional jobs, interrupt replies, checkpoint WAL. */
   async onAppInactive(): Promise<void> {
+    this.appActive = false;
+    await this.scheduler.deactivate();
     this.replies.interruptAll('app_inactive');
     try {
       await this.options.db.execute('PRAGMA wal_checkpoint(TRUNCATE)');
