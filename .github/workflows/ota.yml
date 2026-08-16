@@ -41,10 +41,10 @@ jobs:
       - run: npm run build
       - name: Build integrity-gated OTA package
         env:
-          # Keep the user-visible OTA version short and monotonic. GitHub's
-          # workflow run number increments for each OTA publish attempt, while
-          # the immutable bundle tag below still pins the exact commit SHA.
-          RELEASE_ID: ota-${{ github.run_number }}
+          # Keep the user-visible OTA version short and monotonic while also
+          # satisfying the shared identifier validator's minimum length.
+          # The admin UI renders `ota-run-84` as `OTA #84`.
+          RELEASE_ID: ota-run-${{ github.run_number }}
           BUNDLE_TAG: ota-bundle-${{ github.sha }}
           OTA_PRIVATE_KEY: ${{ secrets.OTA_PRIVATE_KEY }}
         run: |
@@ -89,7 +89,7 @@ jobs:
       OTA_PUBLISH_URL: ${{ secrets.OTA_PUBLISH_URL }}
       OTA_PUBLISH_TOKEN: ${{ secrets.OTA_PUBLISH_TOKEN }}
       OTA_PRIVATE_KEY: ${{ secrets.OTA_PRIVATE_KEY }}
-      RELEASE_ID: ota-${{ github.run_number }}
+      RELEASE_ID: ota-run-${{ github.run_number }}
       BUNDLE_TAG: ota-bundle-${{ github.sha }}
     steps:
       - uses: actions/download-artifact@v4
@@ -111,7 +111,7 @@ jobs:
           bundle_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${BUNDLE_TAG}/bundle.zip"
 
           if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${BUNDLE_TAG}" > release.json 2>/dev/null; then
-            asset_id="$(jq -r '.assets[]? | select(.name == "bundle.zip") | .id' release.json | head -n1)"
+            asset_id="$(jq -r '.assets[]? | select(.name == \"bundle.zip\") | .id' release.json | head -n1)"
             if [ -z "${asset_id}" ]; then
               gh release upload "${BUNDLE_TAG}" build/bundle.zip --repo "${GITHUB_REPOSITORY}"
             fi
@@ -126,9 +126,9 @@ jobs:
           verified=""
           for attempt in $(seq 1 20); do
             gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${BUNDLE_TAG}" > release.json
-            asset_size="$(jq -r '.assets[]? | select(.name == "bundle.zip") | .size // empty' release.json | head -n1)"
-            asset_digest="$(jq -r '.assets[]? | select(.name == "bundle.zip") | .digest // empty' release.json | head -n1)"
-            asset_state="$(jq -r '.assets[]? | select(.name == "bundle.zip") | .state // empty' release.json | head -n1)"
+            asset_size="$(jq -r '.assets[]? | select(.name == \"bundle.zip\") | .size // empty' release.json | head -n1)"
+            asset_digest="$(jq -r '.assets[]? | select(.name == \"bundle.zip\") | .digest // empty' release.json | head -n1)"
+            asset_state="$(jq -r '.assets[]? | select(.name == \"bundle.zip\") | .state // empty' release.json | head -n1)"
             if [ "${asset_state}" = "uploaded" ] && [ "${asset_size}" = "${bytes}" ] && [ "${asset_digest}" = "${expected_digest}" ]; then
               verified=1
               break
@@ -141,15 +141,12 @@ jobs:
           done
           test -n "${verified}" || { echo 'OTA release asset was not verifiable' >&2; exit 1; }
 
-          # Capgo accepts arbitrary HTTPS bundle URLs, including GitHub release assets.
-          # The signed manifest pins this URL, while checksum pins the exact zip bytes.
           curl --fail --show-error --silent --location --head "${bundle_url}" >/dev/null
           manifest_bundle_url="$(node --input-type=module -e "import { readFile } from 'node:fs/promises'; const m=JSON.parse(await readFile('build/ota/ota-manifest.json','utf8')); process.stdout.write(m.bundleUrl ?? '');")"
           manifest_zip_sha="$(node --input-type=module -e "import { readFile } from 'node:fs/promises'; const m=JSON.parse(await readFile('build/ota/ota-manifest.json','utf8')); process.stdout.write(m.bundle?.zipSha256 ?? '');")"
           test "${manifest_bundle_url}" = "${bundle_url}" || { echo 'OTA manifest bundle URL mismatch' >&2; exit 1; }
           test "${manifest_zip_sha}" = "${sha256}" || { echo 'OTA manifest zip checksum mismatch' >&2; exit 1; }
 
-          # Only small signed control-plane files pass through sooya.icu.
           curl --http1.1 --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/manifests/${RELEASE_ID}/ota-manifest.json"
           curl --http1.1 --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/stable.json.tmp"
           curl --http1.1 --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/stable.json"
