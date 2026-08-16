@@ -23,7 +23,7 @@ import type { ToolCallRuntime } from '../tools/tool-runtime.js';
 import { ReplyCoordinator } from './reply-coordinator.js';
 import { LocalMediaResolver } from './media-resolver.js';
 import { ModelDiscoveryService } from './model-discovery.js';
-import { MODEL_CAPABILITY_SLOTS, MODEL_DEFAULTS, type ModelCapabilitySlot } from './model-defaults.js';
+import { CHAT_FALLBACK_SLOTS, MODEL_CAPABILITY_SLOTS, MODEL_DEFAULTS, type ModelCapabilitySlot } from './model-defaults.js';
 import { PersonaReferenceService, REFERENCE_FRAMINGS, type ReferenceFraming } from './persona-reference-service.js';
 import { ContextBuilder } from './context-builder.js';
 import { SummaryBuilder } from './summary-builder.js';
@@ -33,6 +33,8 @@ import { LocalLifeCatchUp } from '../life/catch-up-service.js';
 import { MomentComposer } from '../moments/composer.js';
 import { MomentPolicy } from '../moments/moment-policy.js';
 import { LATEST_SCHEMA_VERSION } from '../db/migrations.js';
+import { newId } from '../db/database.js';
+import { exactRoute, methodSet, prefixRoute, regexRoute, type NativeAdminMethod, type NativeAdminRoute, type NativeAdminRouteContext } from './admin-routes.js';
 import type { LocalEvent, LocalEventListener, LocalCoreApi, BootstrapInfo, ChatMessage, LifeState, MessagePage, MediaRef, MessagePart, MessageContext, MessageSearchHit, Moment, StickerInfo, WorldPresence, UploadInputFile, LocalAdminRequestOptions } from './types.js';
 
 export interface LocalCoreOptions {
@@ -49,6 +51,10 @@ export interface LocalCoreOptions {
   memoryProvider?: MemoryProvider;
   replyDebounceMs?: number;
   now?: () => Date;
+  /** Display version surfaced by GET /api/admin/system. */
+  version?: string;
+  /** Process start timestamp surfaced by GET /api/admin/system. */
+  startedAt?: string;
 }
 
 /**
@@ -96,6 +102,17 @@ class LocalEmitter {
   }
 }
 
+/** Thrown when the native admin bridge receives a route it has not
+ * implemented. The old `return {}` behavior made missing handlers look like
+ * successful mutations; this is the explicit failure contract instead. */
+export class AdminRouteUnsupportedError extends Error {
+  readonly code = 'admin-route-unsupported';
+  constructor(readonly method: string, readonly route: string) {
+    super(`此功能尚未接入设备端：${method} ${route}`);
+    this.name = 'AdminRouteUnsupportedError';
+  }
+}
+
 /**
  * Local SOOYA Core: the in-process, server-free implementation of the client
  * contract. Reads come straight from local repositories; writes persist to the
@@ -129,6 +146,10 @@ export class LocalCore implements LocalCoreApi {
   readonly voicesRepo: VoiceRepo;
   readonly metricsRepo: MetricsRepo;
   readonly mediaRepo: MediaRepo;
+  readonly lifeV2Repo: LifeV2Repo;
+  /** Monotonic wall-clock used for runtime-relative admin fields. */
+  readonly runtimeStartedAt: Date;
+  readonly runtimeVersion: string;
   /** Logical-id → physical-location media store (builtin assets vs native
    * UUID via rel_path); undefined only when no platform store was injected. */
   readonly media: MediaPlatform | undefined;
@@ -142,6 +163,9 @@ export class LocalCore implements LocalCoreApi {
   private readonly configuredProviders?: () => Promise<ConfiguredProviders>;
   /** In-memory weather forecast cache (per city, 30 min TTL). */
   private readonly forecastCache = new Map<string, { summary: WeatherForecastSummary; fetchedAt: number }>();
+  /** Ordered native admin route registry. Matching and capability discovery
+   * are owned by this table; unknown routes never reach a handler. */
+  private readonly adminRoutes: NativeAdminRoute[];
 
   constructor(private readonly options: LocalCoreOptions) {
     const db = options.db;
@@ -169,6 +193,9 @@ export class LocalCore implements LocalCoreApi {
     this.voicesRepo = new VoiceRepo(db, now);
     this.metricsRepo = new MetricsRepo(db, now);
     this.mediaRepo = new MediaRepo(db, now);
+    this.lifeV2Repo = new LifeV2Repo(db, now);
+    this.runtimeStartedAt = options.startedAt ? new Date(options.startedAt) : now();
+    this.runtimeVersion = options.version ?? 'local';
     this.media = options.mediaStore ? new LocalMediaResolver(this.mediaRepo, options.mediaStore) : undefined;
     this.personaReferences = new PersonaReferenceService(this.settingsRepo, this.mediaRepo);
     this.configuredProviders = options.http
@@ -244,6 +271,7 @@ export class LocalCore implements LocalCoreApi {
       debounceMs: options.replyDebounceMs,
       emit: (type, data) => this.events.emit(type, data)
     });
+    this.adminRoutes = this.buildAdminRoutes();
   }
 
   subscribe(listener: LocalEventListener): () => void {
@@ -255,14 +283,14 @@ export class LocalCore implements LocalCoreApi {
     await this.jobsRepo.recoverStuck();
     const caught = await this.lifeCatchUp.catchUp().catch(() => null);
     if (caught) this.events.emit('life.updated', { activity: caught.state.current.activity });
-    const cachedWeather = await this.weatherRepo.latest('active').catch(() => undefined);
+    const cachedWeather = await this.weatherRepo.latest('active').catch((error) => { void this.recordError('weather.read', errorMessage(error)); return undefined; });
     const weatherAgeMs = cachedWeather ? (this.options.now?.() ?? new Date()).getTime() - Date.parse(cachedWeather.observed_at) : Number.POSITIVE_INFINITY;
-    if (!cachedWeather || !Number.isFinite(weatherAgeMs) || weatherAgeMs > 30 * 60_000) await this.refreshWeather().catch(() => undefined);
-    const presence = await this.presence().catch(() => null);
+    if (!cachedWeather || !Number.isFinite(weatherAgeMs) || weatherAgeMs > 30 * 60_000) await this.refreshWeather().catch((error) => { void this.recordError('weather.refresh', errorMessage(error)); });
+    const presence = await this.presence().catch((error) => { void this.recordError('world.presence', errorMessage(error)); return null; });
     if (presence) this.events.emit('world.updated', { presence });
-    await this.composeMomentsIfEnabled().catch(() => undefined);
-    await this.replies.recover();
-    void this.memorySync?.syncOnce().catch(() => undefined);
+    await this.composeMomentsIfEnabled().catch((error) => { void this.recordError('moment.compose', errorMessage(error)); });
+    await this.replies.recover().catch((error) => { void this.recordError('reply.recover', errorMessage(error)); });
+    void this.memorySync?.syncOnce().catch((error) => { void this.recordError('memory.sync', errorMessage(error)); });
   }
 
   private async localLifeSettings(): Promise<LocalLifeSettings> {
@@ -524,10 +552,10 @@ export class LocalCore implements LocalCoreApi {
   }
 
   /** Runs one sticker through the vision analyzer; failure stays recorded on the sticker. */
-  private async analyzeSticker(stickerId: string): Promise<void> {
+  private async analyzeSticker(stickerId: string, force = false): Promise<void> {
     if (!this.media) return;
     const analyzer = new StickerAnalyzer(this.stickersRepo, this.media, () => this.visionProvider());
-    await analyzer.analyze(stickerId);
+    await analyzer.analyze(stickerId, { force });
   }
 
   private async visionProvider(): Promise<ChatProvider | null> {
@@ -687,24 +715,209 @@ export class LocalCore implements LocalCoreApi {
     }
   }
 
-  /** Admin UI bridge for native mode. It intentionally accepts route-shaped
-   * paths so existing panels can be reused without a localhost server. */
+  /** Admin UI bridge for native mode. Route matching is owned by the
+   * {@link adminRoutes} registry; unknown routes fail explicitly. */
   async adminRequest<T = unknown>(path: string, options: LocalAdminRequestOptions = {}): Promise<T> {
+    const url = new URL(path, 'https://sooya.local');
+    const route = url.pathname;
+    const method = (options.method ?? 'GET').toUpperCase() as NativeAdminMethod;
+    const context: NativeAdminRouteContext = {
+      path,
+      route,
+      method,
+      url,
+      rawBody: options.body,
+      body: isRecord(options.body) ? options.body : {},
+      options
+    };
+    for (const entry of this.adminRoutes) {
+      if (entry.methods && !entry.methods.includes(method)) continue;
+      if (!entry.matches(route)) continue;
+      return await entry.handler(context) as T;
+    }
+    throw new AdminRouteUnsupportedError(method, route);
+  }
+
+  /** Builds the ordered route registry in the same precedence order as the
+   * original admin if-chain. Every implemented route must be declared here;
+   * the dispatcher rejects everything else before any handler runs. */
+  private buildAdminRoutes(): NativeAdminRoute[] {
+    const handler = (context: NativeAdminRouteContext) => this.adminRequestLegacy(context.path, context.options);
+    const legacy = (capability: string, methods: readonly NativeAdminMethod[] | undefined, matches: (route: string) => boolean): NativeAdminRoute => ({
+      capability,
+      methods,
+      matches,
+      handler
+    });
+
+    return [
+      // ---- overview / bootstrap ----
+      legacy('system', undefined, exactRoute('/api/admin/system')),
+      legacy('capabilities', undefined, exactRoute('/api/admin/capabilities')),
+      legacy('nativeCapabilities', methodSet('GET'), exactRoute('/api/admin/native-capabilities')),
+
+      // ---- persona / voice behavior ----
+      legacy('persona', undefined, exactRoute('/api/admin/persona')),
+      legacy('voiceBehavior', undefined, exactRoute('/api/admin/voice-behavior')),
+
+      // ---- models & presets ----
+      legacy('models', undefined, exactRoute('/api/admin/models')),
+      legacy('modelPresets', undefined, exactRoute('/api/admin/model-presets')),
+      legacy('modelPresets', methodSet('POST'), exactRoute('/api/admin/model-presets/from-current')),
+      legacy('webSearchProbe', methodSet('POST'), exactRoute('/api/admin/models/web-search/test')),
+      legacy('modelProbe', methodSet('POST'), regexRoute(/^\/api\/admin\/models\/(?!web-search)[^/]+\/(discover|test)$/u)),
+      legacy('modelPresets', methodSet('POST'), regexRoute(/^\/api\/admin\/model-presets\/[^/]+\/apply$/u)),
+      legacy('ttsPreview', methodSet('POST'), exactRoute('/api/admin/voice/preview')),
+
+      // ---- memory ----
+      legacy('memories', undefined, exactRoute('/api/admin/memories')),
+      legacy('memories', methodSet('POST'), exactRoute('/api/admin/memories/clear')),
+      legacy('memoryStatus', undefined, exactRoute('/api/admin/memory/status')),
+      legacy('memorySync', methodSet('POST'), exactRoute('/api/admin/memory/sync')),
+      legacy('memoryLocalSearch', undefined, prefixRoute('/api/admin/memory/ombre/search')),
+      legacy('memoryCatalog', undefined, prefixRoute('/api/admin/memory/ombre/catalog')),
+      legacy('memoryActivity', undefined, exactRoute('/api/admin/memory/activity')),
+      legacy('memories', methodSet('DELETE'), regexRoute(/^\/api\/admin\/memories\/[^/]+$/u)),
+
+      // ---- chat ----
+      legacy('chatHistory', methodSet('GET'), exactRoute('/api/admin/chat/history')),
+      legacy('chatContext', methodSet('GET'), regexRoute(/^\/api\/admin\/chat\/history\/[^/]+\/context$/u)),
+      legacy('chatHistory', methodSet('POST'), exactRoute('/api/admin/chat/clear')),
+      legacy('chatSummary', methodSet('POST'), exactRoute('/api/admin/chat/summary/build')),
+
+      // ---- operations / diagnostics ----
+      legacy('jobs', undefined, exactRoute('/api/admin/jobs')),
+      legacy('errors', methodSet('DELETE'), exactRoute('/api/admin/errors')),
+      legacy('errors', methodSet('GET'), exactRoute('/api/admin/errors')),
+      legacy('backupList', methodSet('GET'), exactRoute('/api/admin/backups')),
+      legacy('backupCreate', methodSet('POST'), exactRoute('/api/admin/backups')),
+      legacy('backupDelete', methodSet('DELETE'), regexRoute(/^\/api\/admin\/backups\/[^/]+$/u)),
+      legacy('backupVerify', methodSet('POST'), regexRoute(/^\/api\/admin\/backups\/[^/]+\/(verify|restore)$/u)),
+      legacy('notifications', undefined, exactRoute('/api/admin/notifications')),
+
+      // ---- life / moments / weather ----
+      legacy('lifeCatchUp', methodSet('POST'), exactRoute('/api/admin/life/catch-up')),
+      legacy('momentsCompose', methodSet('POST'), exactRoute('/api/admin/moments/compose')),
+
+      // ---- OTA ----
+      legacy('ota', methodSet('GET'), exactRoute('/api/admin/ota')),
+      legacy('ota', methodSet('PUT', 'PATCH'), exactRoute('/api/admin/ota')),
+
+      // ---- MCP ----
+      legacy('mcpOverview', methodSet('GET'), exactRoute('/api/admin/mcp/servers')),
+      legacy('mcpTest', methodSet('POST'), regexRoute(/^\/api\/admin\/mcp\/[^/]+\/(test|refresh-tools)$/u)),
+      legacy('mcpToolSchema', undefined, regexRoute(/^\/api\/admin\/mcp\/tools\/[^/]+$/u)),
+      legacy('mcpServerDelete', methodSet('DELETE'), regexRoute(/^\/api\/admin\/mcp\/servers\/[^/]+$/u)),
+      legacy('mcpServerSave', methodSet('POST', 'PUT'), exactRoute('/api/admin/mcp/servers')),
+
+      // ---- stickers ----
+      legacy('stickerUpload', methodSet('POST'), exactRoute('/api/admin/stickers')),
+      legacy('stickerList', methodSet('GET'), exactRoute('/api/admin/stickers')),
+      legacy('stickerUpdate', methodSet('PATCH', 'DELETE'), regexRoute(/^\/api\/admin\/stickers\/[^/]+$/u)),
+      legacy('stickerAnalyze', methodSet('POST'), regexRoute(/^\/api\/admin\/stickers\/[^/]+\/analyze$/u)),
+      legacy('stickerBatchAnalyze', methodSet('POST'), exactRoute('/api/admin/stickers/analyze-batch')),
+
+      // ---- persona reference images ----
+      legacy('referenceList', methodSet('GET'), exactRoute('/api/admin/persona/references')),
+      legacy('referenceUpload', methodSet('POST'), regexRoute(/^\/api\/admin\/persona\/references\/slot\/[^/]+$/u)),
+      legacy('referenceData', methodSet('GET'), regexRoute(/^\/api\/admin\/persona\/references\/[^/]+\/data$/u)),
+      legacy('referenceDelete', methodSet('DELETE'), regexRoute(/^\/api\/admin\/persona\/references\/[^/]+$/u)),
+
+      // ---- media ----
+      legacy('mediaData', methodSet('GET'), regexRoute(/^\/api\/admin\/media\/[^/]+\/data$/u)),
+      legacy('gallery', methodSet('GET'), exactRoute('/api/admin/gallery')),
+      legacy('mediaDetail', methodSet('GET', 'PATCH', 'DELETE'), regexRoute(/^\/api\/admin\/media\/[^/]+$/u)),
+      legacy('mediaAction', methodSet('POST', 'DELETE', 'GET'), regexRoute(/^\/api\/admin\/media\/[^/]+\/(trash|restore|permanent|usage)$/u)),
+      legacy('mediaList', methodSet('GET'), exactRoute('/api/admin/media')),
+      legacy('mediaBatch', methodSet('POST'), exactRoute('/api/admin/media/batch')),
+
+      // ---- life ----
+      legacy('life', methodSet('GET'), exactRoute('/api/admin/life')),
+      legacy('lifePlans', methodSet('GET', 'POST'), exactRoute('/api/admin/life/plans')),
+      legacy('lifePlans', methodSet('PATCH'), regexRoute(/^\/api\/admin\/life\/plans\/[^/]+$/u)),
+      legacy('lifeSettings', methodSet('PUT', 'PATCH'), exactRoute('/api/admin/life/settings')),
+      legacy('lifeTick', methodSet('POST'), exactRoute('/api/admin/life/tick')),
+      legacy('lifeOverview', methodSet('GET'), exactRoute('/api/admin/life/overview')),
+      legacy('lifeVitals', methodSet('GET'), exactRoute('/api/admin/life/vitals')),
+      legacy('lifeVitals', methodSet('POST'), exactRoute('/api/admin/life/vitals/adjust')),
+      legacy('lifeVitals', methodSet('POST'), exactRoute('/api/admin/life/vitals/reset')),
+      legacy('lifeThreads', methodSet('GET'), exactRoute('/api/admin/life/threads')),
+      legacy('lifeThreads', methodSet('PATCH'), regexRoute(/^\/api\/admin\/life\/threads\/[^/]+$/u)),
+      legacy('lifeEvents', methodSet('GET'), exactRoute('/api/admin/life/events')),
+      legacy('lifeProactive', methodSet('GET'), exactRoute('/api/admin/life/proactive')),
+      legacy('lifeLocations', methodSet('GET', 'POST'), exactRoute('/api/admin/life/locations')),
+      legacy('lifeLocationOverride', methodSet('POST'), exactRoute('/api/admin/life/location/override')),
+      legacy('lifeLocations', methodSet('DELETE'), regexRoute(/^\/api\/admin\/life\/locations\/[^/]+$/u)),
+      legacy('lifeTravel', methodSet('GET'), exactRoute('/api/admin/life/travel')),
+      legacy('lifeCities', methodSet('GET', 'POST'), exactRoute('/api/admin/life/cities')),
+      legacy('lifeCities', methodSet('PATCH'), regexRoute(/^\/api\/admin\/life\/cities\/[^/]+$/u)),
+      legacy('weatherStatus', methodSet('GET'), exactRoute('/api/admin/weather/status')),
+      legacy('weatherForecast', methodSet('GET'), exactRoute('/api/admin/weather/forecast')),
+      legacy('weatherRefresh', methodSet('POST'), exactRoute('/api/admin/weather/refresh')),
+
+      // ---- storage / metrics / audit ----
+      legacy('storage', methodSet('GET'), exactRoute('/api/admin/storage')),
+      legacy('storagePolicy', methodSet('PUT', 'PATCH'), exactRoute('/api/admin/storage/policy')),
+      legacy('storageCleanup', methodSet('POST'), exactRoute('/api/admin/storage/cleanup')),
+      legacy('metrics', methodSet('GET'), exactRoute('/api/admin/metrics')),
+      legacy('metricsDistributions', methodSet('GET'), exactRoute('/api/admin/metrics/distributions')),
+      legacy('audit', methodSet('GET'), exactRoute('/api/admin/audit'))
+    ];
+  }
+
+  /** Legacy shared handler for routes that have not been extracted into
+   * dedicated route handlers yet. The registry above is authoritative for
+   * matching; this method only runs for routes it already declared. */
+  private async adminRequestLegacy<T = unknown>(path: string, options: LocalAdminRequestOptions = {}): Promise<T> {
     const url = new URL(path, 'https://sooya.local');
     const route = url.pathname;
     const method = (options.method ?? 'GET').toUpperCase();
     const rawBody = options.body;
     const body = isRecord(options.body) ? options.body : {};
     if (route === '/api/admin/system') {
+      const [integrity, messages, memories, media, mediaStats, pendingJobs, backupBytes] = await Promise.all([
+        this.options.db.integrityCheck(),
+        this.messagesRepo.count(),
+        this.options.db.query<{ c: number }>('SELECT COUNT(*) c FROM memories WHERE active=1').then((rows) => rows[0]?.c ?? 0),
+        this.mediaRepo.count(false),
+        this.mediaRepo.galleryStats({ deleted: false }),
+        this.jobsRepo.pendingCount(),
+        this.backupBytes()
+      ]);
+      const startedAt = Number.isFinite(this.runtimeStartedAt.getTime()) ? this.runtimeStartedAt.toISOString() : new Date(0).toISOString();
+      const uptimeSec = Number.isFinite(this.runtimeStartedAt.getTime()) ? Math.max(0, Math.floor(((this.options.now?.() ?? new Date()).getTime() - this.runtimeStartedAt.getTime()) / 1000)) : 0;
+      const memoryMb = await this.processMemoryMb();
       return {
-        version: 'local', startedAt: new Date(0).toISOString(), uptimeSec: 0, node: 'native', platform: 'iOS', memoryMb: 0, loadAvg: [],
-        database: await this.options.db.integrityCheck(), storage: { mode: 'app-sandbox' }, stream: { mode: 'in-process', lastEventSeq: this.events.lastSequence }, agent: { mode: 'on-device' }
+        version: this.runtimeVersion,
+        startedAt,
+        uptimeSec,
+        node: 'native',
+        platform: 'iOS',
+        memoryMb,
+        loadAvg: [],
+        healthy: integrity.ok,
+        database: {
+          ...integrity,
+          messages,
+          memories,
+          media: media,
+          pendingJobs,
+          mediaBytes: mediaStats.bytes
+        },
+        storage: { mediaBytes: mediaStats.bytes, backupBytes, freeBytes: null, mode: 'app-sandbox' },
+        stream: { mode: 'in-process', lastEventSeq: this.events.lastSequence },
+        agent: { mode: 'on-device' }
       } as T;
     }
     if (route === '/api/admin/capabilities') return { capabilities: (await this.capabilities()).capabilities, embeddingDimensions: null } as T;
     if (route === '/api/admin/persona') {
       const fallback = { id: 'local', name: 'SOOYA', avatar: '', userAvatar: '', tagline: '在的', systemPrompt: '', language: 'zh-CN', stickerPolicy: {}, voicePolicy: {}, imagePolicy: {} };
-      if (method === 'PUT' || method === 'PATCH') await this.settingsRepo.set('persona', { ...fallback, ...(await this.settingsRepo.get('persona', {})), ...body });
+      if (method === 'PUT' || method === 'PATCH') {
+        const previous = await this.settingsRepo.get('persona', fallback);
+        const next = { ...fallback, ...previous, ...body };
+        await this.syncAvatarMediaFlags(previous, next);
+        await this.settingsRepo.set('persona', next);
+      }
       return { persona: await this.settingsRepo.get('persona', fallback) } as T;
     }
     if (route === '/api/admin/voice-behavior') {
@@ -779,24 +992,12 @@ export class LocalCore implements LocalCoreApi {
       await this.settingsRepo.set('modelPresets', [...presets.filter((item) => item.id !== saved.id), saved]);
       return { preset: saved } as T;
     }
-    const modelAction = route.match(/^\/api\/admin\/models\/([^/]+)\/(discover|test)$/u);
-    if (modelAction) {
-      const capability = decodeURIComponent(modelAction[1]!);
-      if (modelAction[2] === 'discover') {
-        if (!this.options.http) throw new Error('本地 HTTP 传输不可用，无法拉取模型列表');
-        const service = new ModelDiscoveryService(this.options.http, this.configRepo);
-        const result = await service.discover(capability as never, typeof body.baseUrl === 'string' ? body.baseUrl : undefined);
-        if (!result.ok) throw new Error(result.detail);
-        return { models: result.models, source: result.source } as T;
-      }
-      const configured = await this.configRepo.getProvider(capability as never);
-      return { ok: Boolean(configured?.enabled && configured.secretRef), provider: configured?.provider ?? 'none', model: configured?.model ?? '', detail: configured?.secretRef ? '已绑定本地密钥引用' : '尚未配置本地密钥引用', latencyMs: 0 } as T;
-    }
     if (route === '/api/admin/models/web-search/test' && method === 'POST') {
       if (body.provider === 'responses') {
         return { ok: false, provider: 'responses', latencyMs: 0, resultCount: 0, detail: '设备端本地运行时不支持 Responses 原生搜索，请改用豆包或 Tavily' } as T;
       }
-      const runtime = await createWebSearch(this.options.http!, this.configRepo);
+      if (!this.options.http) return { ok: false, provider: body.provider ?? 'unknown', latencyMs: 0, resultCount: 0, detail: '本地 HTTP 传输不可用，无法执行联网搜索测试' } as T;
+      const runtime = await createWebSearch(this.options.http, this.configRepo);
       if (!runtime || runtime.providers.length === 0) return { ok: false, provider: body.provider ?? 'unknown', latencyMs: 0, resultCount: 0, detail: '未配置联网搜索（webSearch provider 未启用或无密钥引用）' } as T;
       const started = Date.now();
       try {
@@ -808,6 +1009,18 @@ export class LocalCore implements LocalCoreApi {
         return { ok: false, provider: body.provider ?? 'unknown', latencyMs: Date.now() - started, resultCount: 0, detail: error instanceof Error ? error.message : String(error) } as T;
       }
     }
+    const modelAction = route.match(/^\/api\/admin\/models\/([^/]+)\/(discover|test)$/u);
+    if (modelAction && modelAction[1] !== 'web-search') {
+      const capability = decodeURIComponent(modelAction[1]!);
+      if (modelAction[2] === 'discover') {
+        if (!this.options.http) throw new Error('本地 HTTP 传输不可用，无法拉取模型列表');
+        const service = new ModelDiscoveryService(this.options.http, this.configRepo);
+        const result = await service.discover(capability as never, typeof body.baseUrl === 'string' ? body.baseUrl : undefined);
+        if (!result.ok) throw new Error(result.detail);
+        return { models: result.models, source: result.source } as T;
+      }
+      return await this.probeModel(capability as (typeof MODEL_CAPABILITY_SLOTS)[number], body) as T;
+    }
     const applyPreset = route.match(/^\/api\/admin\/model-presets\/([^/]+)\/apply$/u)?.[1];
     if (applyPreset && method === 'POST') {
       const presets = await this.settingsRepo.get<Array<Record<string, unknown>>>('modelPresets', []);
@@ -818,21 +1031,22 @@ export class LocalCore implements LocalCoreApi {
       await this.configRepo.setProvider({ capability, provider: normalizeProvider(String(preset.provider ?? '')), model: String(preset.model ?? ''), baseUrl: String(preset.baseUrl ?? ''), secretRef: existing?.secretRef ?? null });
       return { applied: decodeURIComponent(applyPreset), models: (await this.adminRequest<{ models: Record<string, unknown> }>('/api/admin/models')).models } as T;
     }
-    if (route === '/api/admin/memories' || route === '/api/admin/memory/legacy') {
-      const rows = await this.options.db.query<{ id: string; kind: string; content: string; importance: number; confidence: number; created_at: string; updated_at: string; hits: number; has_embedding: number }>('SELECT id,kind,content,importance,confidence,created_at,updated_at,hits,embedding IS NOT NULL AS has_embedding FROM memories WHERE active=1 ORDER BY updated_at DESC LIMIT ?', [route.endsWith('/legacy') ? 100 : 500]);
+    if (route === '/api/admin/voice/preview' && method === 'POST') {
+      const preview = await this.previewVoice(typeof body.text === 'string' ? body.text : undefined, typeof body.emotion === 'string' ? body.emotion : undefined);
+      if (!preview.ok) return preview as T;
+      return { ok: true, dataBase64: bytesToBase64(preview.audio.data), mime: preview.audio.mime, format: preview.audio.format } as T;
+    }
+    if (route === '/api/admin/memories') {
+      const rows = await this.options.db.query<{ id: string; kind: string; content: string; importance: number; confidence: number; created_at: string; updated_at: string; hits: number; has_embedding: number }>('SELECT id,kind,content,importance,confidence,created_at,updated_at,hits,embedding IS NOT NULL AS has_embedding FROM memories WHERE active=1 ORDER BY updated_at DESC LIMIT ?', [500]);
       const memories = rows.map((row) => ({ id: row.id, kind: row.kind, content: row.content, importance: row.importance, confidence: row.confidence, createdAt: row.created_at, updatedAt: row.updated_at, hits: row.hits, hasEmbedding: row.has_embedding === 1 }));
-      return route.endsWith('/legacy') ? { memories, total: memories.length, readOnly: true } as T : { memories, stats: { total: memories.length } } as T;
+      return { memories, stats: { total: memories.length } } as T;
     }
     if (route === '/api/admin/memories/clear' && method === 'POST') {
       if (this.memorySync) await this.memorySync.clearLocal();
       else await this.options.db.run("UPDATE memories SET active=0,updated_at=? WHERE active=1", [(this.options.now?.() ?? new Date()).toISOString()]);
       return { cleared: true } as T;
     }
-    if (route === '/api/admin/memory/status') {
-      const health = await this.memoryProvider.health();
-      const sync = this.memorySync ? await this.memorySync.status() : { state: health.state, provider: 'local', pendingPush: 0, pendingPull: 0, conflicts: 0, lastSyncAt: null };
-      return { backend: sync.provider, connection: health.state === 'unavailable' ? 'disconnected' : health.state === 'degraded' ? 'degraded' : 'connected', health, sync, lastCommit: null, pending: sync.pendingPush, uncertain: 0, lastDream: null, dashboardUrl: null } as T;
-    }
+    if (route === '/api/admin/memory/status') return await this.ombreStatus() as T;
     if (route === '/api/admin/memory/sync' && method === 'POST') {
       if (!this.memorySync) return { state: 'ready', pushed: 0, pulled: 0, conflicts: 0, pending: 0, detail: 'Ombre sync is not configured' } as T;
       return await this.memorySync.syncOnce() as T;
@@ -846,7 +1060,7 @@ export class LocalCore implements LocalCoreApi {
       const memories = await this.memoryRepo.list({ limit: Number(url.searchParams.get('limit') ?? 50) });
       return { backend: 'local', entries: memories.map((row) => ({ id: row.id, kind: row.kind, content: row.content, updatedAt: row.updated_at })), total: memories.length } as T;
     }
-    if (route === '/api/admin/memory/activity') return { activity: [] } as T;
+    if (route === '/api/admin/memory/activity') return { activity: await this.memoryActivity(Number(url.searchParams.get('limit') ?? 50)) } as T;
     const memoryId = route.match(/^\/api\/admin\/memories\/([^/]+)$/u)?.[1];
     if (memoryId && method === 'DELETE') {
       const id = decodeURIComponent(memoryId);
@@ -854,17 +1068,27 @@ export class LocalCore implements LocalCoreApi {
       return { deleted } as T;
     }
     if (route === '/api/admin/chat/history') {
-      const page = await this.messagesRepo.page(Number(url.searchParams.get('limit') ?? 100));
-      return { messages: page.messages, total: await this.messagesRepo.count(), limit: page.messages.length, offset: 0, hasMore: page.hasMore } as T;
+      const hasMediaParam = url.searchParams.get('hasMedia');
+      const page = await this.messagesRepo.adminPage({
+        q: url.searchParams.get('q') ?? undefined,
+        role: url.searchParams.get('role') === 'user' || url.searchParams.get('role') === 'assistant' ? url.searchParams.get('role') as 'user' | 'assistant' : undefined,
+        hasMedia: hasMediaParam === 'true' ? true : hasMediaParam === 'false' ? false : undefined,
+        mediaKind: url.searchParams.get('mediaKind') ?? undefined,
+        from: url.searchParams.get('from') ?? undefined,
+        to: url.searchParams.get('to') ?? undefined,
+        limit: Number(url.searchParams.get('limit') ?? 100),
+        offset: Number(url.searchParams.get('offset') ?? 0)
+      });
+      return { messages: page.messages, total: page.total, limit: page.messages.length, offset: Number(url.searchParams.get('offset') ?? 0), hasMore: page.hasMore } as T;
     }
     const contextId = route.match(/^\/api\/admin\/chat\/history\/([^/]+)\/context$/u)?.[1];
     if (contextId) return await this.messageContext(decodeURIComponent(contextId), { before: Number(url.searchParams.get('before') ?? 10), after: Number(url.searchParams.get('after') ?? 10) }) as T;
     if (route === '/api/admin/chat/clear' && method === 'POST') { const count = await this.messagesRepo.count(); await this.messagesRepo.clearAll(); return { cleared: true, messages: count } as T; }
     if (route === '/api/admin/chat/summary/build' && method === 'POST') return await this.summaryBuilder.build() as T;
     if (route === '/api/admin/jobs') return { jobs: await this.jobsRepo.list(100) } as T;
-    if (route === '/api/admin/errors' && method === 'DELETE') return { cleared: true } as T;
-    if (route === '/api/admin/errors') return { errors: [] } as T;
-    if (route === '/api/admin/backups' && method === 'GET') return { backups: await this.options.db.query('SELECT * FROM local_backup_metadata ORDER BY created_at DESC LIMIT 50') } as T;
+    if (route === '/api/admin/errors' && method === 'DELETE') return { cleared: await this.clearErrors() } as T;
+    if (route === '/api/admin/errors') return { errors: await this.listErrors(Number(url.searchParams.get('limit') ?? 100)) } as T;
+    if (route === '/api/admin/backups' && method === 'GET') return { backups: await this.listBackups() } as T;
     if (route === '/api/admin/backups' && method === 'POST') {
       const name = `sooya-${Date.now().toString(36)}.sqlite3`;
       const started = (this.options.now?.() ?? new Date()).toISOString();
@@ -881,15 +1105,28 @@ export class LocalCore implements LocalCoreApi {
         throw error;
       }
     }
-    if (route.match(/^\/api\/admin\/backups\/[^/]+$/u) && method === 'DELETE') return { deleted: false } as T;
+    if (route.match(/^\/api\/admin\/backups\/[^/]+$/u) && method === 'DELETE') {
+      const name = decodeURIComponent(route.split('/').pop()!);
+      if (!this.options.db.deleteBackup) throw new AdminRouteUnsupportedError(method, route);
+      const deletedFile = await this.options.db.deleteBackup(name);
+      const deletedRow = (await this.options.db.run('DELETE FROM local_backup_metadata WHERE id=?', [name])).changes > 0;
+      return { deleted: deletedFile || deletedRow } as T;
+    }
     const backupName = route.match(/^\/api\/admin\/backups\/([^/]+)\/(verify|restore)$/u);
     if (backupName && method === 'POST') {
       const name = decodeURIComponent(backupName[1]!);
-      if (backupName[2] === 'restore') {
-        if (!this.options.db.restore) throw new Error('database restore is unavailable on this platform');
-        await this.options.db.restore(name);
-        await this.options.db.run(`UPDATE local_backup_metadata SET state='restored',restored_at=? WHERE id=?`, [(this.options.now?.() ?? new Date()).toISOString(), name]);
+      if (backupName[2] === 'verify') {
+        if (!this.options.db.verifyBackup) throw new AdminRouteUnsupportedError(method, route);
+        const result = await this.options.db.verifyBackup(name);
+        const backup = isRecord(result) ? result : {};
+        const verified = typeof backup.verified === 'boolean' ? backup.verified : true;
+        const integrity = 'integrity' in backup && Array.isArray((backup as { integrity?: unknown }).integrity) ? (backup as { integrity: unknown[] }).integrity : [];
+        await this.options.db.run(`UPDATE local_backup_metadata SET verified_at=?,detail_json=json_set(COALESCE(detail_json,'{}'),'$.verifyResult',json(?)) WHERE id=?`, [(this.options.now?.() ?? new Date()).toISOString(), JSON.stringify(backup), name]);
+        return { name, verified, sizeBytes: typeof backup.sizeBytes === 'number' ? backup.sizeBytes : null, sha256: typeof backup.sha256 === 'string' ? backup.sha256 : '', integrity, detail: backup } as T;
       }
+      if (!this.options.db.restore) throw new Error('database restore is unavailable on this platform');
+      await this.options.db.restore(name);
+      await this.options.db.run(`UPDATE local_backup_metadata SET state='restored',restored_at=? WHERE id=?`, [(this.options.now?.() ?? new Date()).toISOString(), name]);
       const integrity = await this.options.db.integrityCheck();
       return { name, verified: integrity.ok, integrity } as T;
     }
@@ -907,10 +1144,11 @@ export class LocalCore implements LocalCoreApi {
       const servers = await this.mcpRepo.listServers();
       const policies = await this.mcpRepo.listPolicies();
       const tools = this.toolRegistry.listForAdmin().map((tool) => ({ ...tool, serverId: tool.serverId ?? null }));
-      return { configSource: 'local-sqlite', globalPolicy: {}, servers: servers.map((server) => {
+      const memory = await this.ombreStatus();
+      return { configSource: 'local-sqlite', globalPolicy: this.toolPolicy.policyState(), servers: servers.map((server) => {
         const { secretKey: _secretKey, ...safe } = server;
         return { ...safe, authConfigured: Boolean(_secretKey), toolCount: policies.filter((policy) => policy.serverId === server.id).length };
-      }), tools, memory: { state: 'ready', provider: 'local' }, dashboardUrl: null } as T;
+      }), tools, memory, dashboardUrl: null } as T;
     }
     const mcpTest = route.match(/^\/api\/admin\/mcp\/([^/]+)\/(test|refresh-tools)$/u);
     if (mcpTest && method === 'POST') {
@@ -919,8 +1157,10 @@ export class LocalCore implements LocalCoreApi {
     }
     const mcpTool = route.match(/^\/api\/admin\/mcp\/tools\/([^/]+)$/u)?.[1];
     if (mcpTool) {
-      const found = this.toolRegistry.listForAdmin().find((tool) => tool.name === decodeURIComponent(mcpTool) || tool.modelName === decodeURIComponent(mcpTool));
-      return { tool: found ?? { name: decodeURIComponent(mcpTool), description: '', inputSchema: { type: 'object' } } } as T;
+      const decodedTool = decodeURIComponent(mcpTool);
+      const found = this.toolRegistry.listForAdmin().find((tool) => tool.name === decodedTool || tool.modelName === decodedTool);
+      if (!found) throw new Error(`MCP 工具 ${decodedTool} 不存在`);
+      return { tool: found } as T;
     }
     const mcpServerId = route.match(/^\/api\/admin\/mcp\/servers\/([^/]+)$/u)?.[1];
     if (mcpServerId && method === 'DELETE') {
@@ -954,7 +1194,7 @@ export class LocalCore implements LocalCoreApi {
       } else {
         secretKey = existing?.secretKey;
       }
-      const server = await this.mcpRepo.upsertServer({ id, name: typeof body.name === 'string' ? body.name : id, url: typeof body.url === 'string' ? body.url : '', transport: body.transport === 'sse' ? 'sse' : 'streamable-http', enabled: body.enabled !== false, required: body.required === true, secretKey });
+      const server = await this.mcpRepo.upsertServer({ id, name: typeof body.name === 'string' ? body.name : id, url: sanitizeMcpUrl(typeof body.url === 'string' ? body.url : ''), transport: body.transport === 'sse' ? 'sse' : 'streamable-http', enabled: body.enabled !== false, required: body.required === true, secretKey });
       return { server: { ...server, authConfigured: Boolean(server.secretKey) } } as T;
     }
     if (route === '/api/admin/stickers' && method === 'POST') {
@@ -969,10 +1209,13 @@ export class LocalCore implements LocalCoreApi {
       return { created: [toAdminSticker(sticker)], failed: [] } as T;
     }
     if (route === '/api/admin/stickers' && method === 'GET') {
-      const stickers = await this.stickersRepo.list({ q: url.searchParams.get('q') ?? undefined, status: (url.searchParams.get('status') as never) || undefined, source: (url.searchParams.get('source') as never) || undefined, emotion: url.searchParams.get('emotion') ?? undefined, enabled: url.searchParams.has('enabled') ? url.searchParams.get('enabled') === 'true' : undefined, sort: (url.searchParams.get('sort') as never) || 'created', limit: Number(url.searchParams.get('limit') ?? 100), offset: Number(url.searchParams.get('offset') ?? 0) });
-      const total = await this.stickersRepo.count(false);
-      const rows = stickers.map(toAdminSticker);
-      return { stickers: rows, total, offset: Number(url.searchParams.get('offset') ?? 0), facets: { status: {}, source: {}, emotion: {} }, analysisVersion: 0 } as T;
+      const filters = { q: url.searchParams.get('q') ?? undefined, status: (url.searchParams.get('status') as never) || undefined, source: (url.searchParams.get('source') as never) || undefined, emotion: url.searchParams.get('emotion') ?? undefined, enabled: url.searchParams.has('enabled') ? url.searchParams.get('enabled') === 'true' : undefined, sort: (url.searchParams.get('sort') as never) || 'created', limit: Number(url.searchParams.get('limit') ?? 100), offset: Number(url.searchParams.get('offset') ?? 0) };
+      const [stickers, total, facets] = await Promise.all([
+        this.stickersRepo.list(filters),
+        this.stickersRepo.countFiltered(filters),
+        this.stickersRepo.facets(filters)
+      ]);
+      return { stickers: stickers.map(toAdminSticker), total, offset: Number(url.searchParams.get('offset') ?? 0), facets, analysisVersion: 0 } as T;
     }
     const stickerId = route.match(/^\/api\/admin\/stickers\/([^/]+)$/u)?.[1];
     if (stickerId && method === 'PATCH') {
@@ -984,14 +1227,16 @@ export class LocalCore implements LocalCoreApi {
     const stickerAction = route.match(/^\/api\/admin\/stickers\/([^/]+)\/analyze$/u)?.[1];
     if (stickerAction && method === 'POST') {
       const stickerId = decodeURIComponent(stickerAction);
-      void this.analyzeSticker(stickerId).catch(() => undefined);
-      return { queued: true, jobId: '', stickerId } as T;
+      void this.analyzeSticker(stickerId, body.force === true).catch((error) => { void this.recordError('sticker.analyze', errorMessage(error)); });
+      return { queued: true, jobId: '', stickerId, force: body.force === true } as T;
     }
     if (route === '/api/admin/stickers/analyze-batch' && method === 'POST') {
-      const pending = await this.stickersRepo.list({ status: 'pending', limit: 500 });
-      const queued = pending.length;
-      for (const sticker of pending) void this.analyzeSticker(sticker.id).catch(() => undefined);
-      return { queued, skipped: 0 } as T;
+      const selectedIds = body.mode === 'selected' && Array.isArray(body.ids) ? body.ids.filter((id): id is string => typeof id === 'string') : [];
+      const pending = selectedIds.length
+        ? (await Promise.all(selectedIds.map(async (id) => await this.stickersRepo.get(id)))).filter((item): item is Sticker => Boolean(item))
+        : await this.stickersRepo.list({ status: 'pending', limit: 500 });
+      for (const sticker of pending) void this.analyzeSticker(sticker.id, true).catch((error) => { void this.recordError('sticker.analyze', errorMessage(error)); });
+      return { queued: pending.length, skipped: selectedIds.length ? Math.max(0, selectedIds.length - pending.length) : 0 } as T;
     }
     // ---- persona reference images (three framing slots, user uploads win) ----
     if (route === '/api/admin/persona/references' && method === 'GET') {
@@ -1007,12 +1252,17 @@ export class LocalCore implements LocalCoreApi {
       const bytes = new Uint8Array(await (file as Blob).arrayBuffer());
       const mime = typeof (file as File).type === 'string' ? (file as File).type : 'image/png';
       if (!mime.startsWith('image/')) throw new Error('只支持 PNG / JPG / WEBP / GIF 图片。');
-      const uploaded = await this.upload([{ name: 'reference', mime, bytes, field: 'image' }]);
-      const media = uploaded.media[0];
+      const uploadResult = await this.upload([{ name: 'reference', mime, bytes, field: 'image' }]);
+      const media = uploadResult.media[0];
       if (!media) throw new Error('reference media could not be stored');
-      const reference = await this.personaReferences.upload(framing, media.id);
+      const uploaded = await this.personaReferences.upload(framing, media.id);
+      const replaced: string[] = [];
+      if (uploaded.previousMediaId && uploaded.previousMediaId !== media.id) {
+        replaced.push(uploaded.previousMediaId);
+        await this.deleteMediaIfUnreferenced(uploaded.previousMediaId);
+      }
       const referenceImages = (await this.personaReferences.list()).map((item) => item.name);
-      return { reference, replaced: [], referenceImages } as T;
+      return { reference: uploaded.item, replaced, referenceImages } as T;
     }
     const referenceData = route.match(/^\/api\/admin\/persona\/references\/([^/]+)\/data$/u)?.[1];
     if (referenceData && method === 'GET') {
@@ -1029,8 +1279,14 @@ export class LocalCore implements LocalCoreApi {
     }
     const referenceDelete = route.match(/^\/api\/admin\/persona\/references\/([^/]+)$/u)?.[1];
     if (referenceDelete && method === 'DELETE') {
-      const result = await this.personaReferences.remove(decodeURIComponent(referenceDelete));
-      return { deleted: result.framing !== null, removedFile: false, referenceImages: result.referenceImages.map((item) => item.name) } as T;
+      const target = decodeURIComponent(referenceDelete);
+      const before = await this.personaReferences.activeSlots();
+      const result = await this.personaReferences.remove(target);
+      let removedFile = false;
+      for (const [framing, mediaId] of Object.entries(before)) {
+        if (mediaId && !(await this.personaReferences.activeSlots())[framing as ReferenceFraming]) removedFile = await this.deleteMediaIfUnreferenced(mediaId) || removedFile;
+      }
+      return { deleted: result.framing !== null, removedFile, referenceImages: result.referenceImages.map((item) => item.name) } as T;
     }
     const localMediaData = route.match(/^\/api\/admin\/media\/([^/]+)\/data$/u)?.[1];
     if (localMediaData && method === 'GET') {
@@ -1043,9 +1299,9 @@ export class LocalCore implements LocalCoreApi {
       const query = Object.fromEntries(url.searchParams.entries());
       const rows = await this.mediaRepo.listGallery({
         deleted: query.trash === 'true', origin: mediaOrigin(query.origin), favorite: query.favorite === 'true', search: query.search,
-        from: query.from, to: query.to, limit: Number(query.limit ?? 60), offset: Number(query.offset ?? 0)
+        from: query.from, to: query.to, limit: Number(query.limit ?? 60), offset: Number(query.offset ?? 0), avatar: false
       });
-      const stats = await this.mediaRepo.galleryStats({ deleted: query.trash === 'true', origin: mediaOrigin(query.origin), favorite: query.favorite === 'true', search: query.search, from: query.from, to: query.to });
+      const stats = await this.mediaRepo.galleryStats({ deleted: query.trash === 'true', origin: mediaOrigin(query.origin), favorite: query.favorite === 'true', search: query.search, from: query.from, to: query.to, avatar: false });
       return { media: await Promise.all(rows.map((row) => this.toAdminMedia(row))), stats, total: stats.count } as T;
     }
     const mediaId = route.match(/^\/api\/admin\/media\/([^/]+)$/u)?.[1];
@@ -1063,33 +1319,51 @@ export class LocalCore implements LocalCoreApi {
         if (!row) throw new Error('media not found');
         return { media: await this.toAdminMedia(row) } as T;
       }
-      if (method === 'DELETE') return { deleted: await this.mediaRepo.delete(id) } as T;
+      if (method === 'DELETE') {
+        await this.assertMediaDeletable(id);
+        await this.removeMediaFile(id);
+        return { deleted: await this.mediaRepo.delete(id) } as T;
+      }
     }
     const mediaAction = route.match(/^\/api\/admin\/media\/([^/]+)\/(trash|restore|permanent|usage)$/u);
     if (mediaAction) {
       const id = decodeURIComponent(mediaAction[1]!);
-      if (mediaAction[2] === 'trash' && method === 'POST') return { trashed: await this.mediaRepo.trash(id) } as T;
+      if (mediaAction[2] === 'trash' && method === 'POST') { await this.assertMediaDeletable(id); return { trashed: await this.mediaRepo.trash(id) } as T; }
       if (mediaAction[2] === 'restore' && method === 'POST') return { restored: await this.mediaRepo.restore(id) } as T;
-      if (mediaAction[2] === 'permanent' && method === 'DELETE') return { deleted: await this.mediaRepo.delete(id) } as T;
-      if (mediaAction[2] === 'usage' && method === 'GET') { const references = await this.mediaRepo.references(id); return { mediaId: id, usageCount: references.total, references, avatar: false } as T; }
+      if (mediaAction[2] === 'permanent' && method === 'DELETE') { await this.assertMediaDeletable(id); await this.removeMediaFile(id); return { deleted: await this.mediaRepo.delete(id) } as T; }
+      if (mediaAction[2] === 'usage' && method === 'GET') { const references = await this.mediaRepo.references(id); return { mediaId: id, usageCount: references.total, references, avatar: await this.mediaRepo.isAvatar(id) } as T; }
     }
     if (route === '/api/admin/media' && method === 'GET') {
       const state = url.searchParams.get('state');
-      const rows = await this.mediaRepo.listGallery({ deleted: state === 'trashed', kind: (url.searchParams.get('kind') as 'image' | 'audio' | 'sticker' | 'file' | null) ?? undefined, origin: (url.searchParams.get('origin') as 'upload' | 'generated' | 'builtin' | 'remote' | null) ?? undefined, search: url.searchParams.get('q') ?? undefined, limit: Number(url.searchParams.get('limit') ?? 200), offset: Number(url.searchParams.get('offset') ?? 0) });
-      return { media: await Promise.all(rows.map((row) => this.toAdminMedia(row))), total: (await this.mediaRepo.galleryStats({ deleted: state === 'trashed' })).count, offset: Number(url.searchParams.get('offset') ?? 0) } as T;
+      const deleted = state === 'trashed' ? true : state === 'all' ? null : false;
+      const filters = { deleted, kind: (url.searchParams.get('kind') as 'image' | 'audio' | 'sticker' | 'file' | null) ?? undefined, origin: (url.searchParams.get('origin') as 'upload' | 'generated' | 'builtin' | 'remote' | null) ?? undefined, search: url.searchParams.get('q') ?? undefined, limit: Number(url.searchParams.get('limit') ?? 200), offset: Number(url.searchParams.get('offset') ?? 0) };
+      const [rows, stats] = await Promise.all([this.mediaRepo.listGallery(filters), this.mediaRepo.galleryStats(filters)]);
+      return { media: await Promise.all(rows.map((row) => this.toAdminMedia(row))), total: stats.count, offset: Number(url.searchParams.get('offset') ?? 0) } as T;
     }
     if (route === '/api/admin/media/batch' && method === 'POST') {
       const ids = Array.isArray(body.ids) ? body.ids.filter((id): id is string => typeof id === 'string') : [];
       const action = body.action;
       let changed = 0;
+      const blocked: Array<{ id: string; reason: string }> = [];
+      const missing: string[] = [];
       for (const id of ids) {
+        const row = await this.mediaRepo.get(id);
+        if (!row) { missing.push(id); continue; }
+        if (action === 'trash' || action === 'permanent') {
+          try {
+            await this.assertMediaDeletable(id);
+          } catch (error) {
+            blocked.push({ id, reason: error instanceof Error ? error.message : String(error) });
+            continue;
+          }
+        }
         if (action === 'trash') changed += Number(await this.mediaRepo.trash(id));
         else if (action === 'restore') changed += Number(await this.mediaRepo.restore(id));
         else if (action === 'favorite') changed += Number(await this.mediaRepo.setFavorite(id, true));
         else if (action === 'unfavorite') changed += Number(await this.mediaRepo.setFavorite(id, false));
-        else if (action === 'permanent') changed += Number(await this.mediaRepo.delete(id));
+        else if (action === 'permanent') { await this.removeMediaFile(id); changed += Number(await this.mediaRepo.delete(id)); }
       }
-      return { changed, blocked: [], missing: [] } as T;
+      return { changed, blocked, missing } as T;
     }
     if (route === '/api/admin/life' && method === 'GET') {
       const snapshot = await this.life();
@@ -1107,7 +1381,7 @@ export class LocalCore implements LocalCoreApi {
         log: await this.lifeRepo.recent(100),
         plans: await this.lifeRepo.listPlans(),
         events: await this.lifeRepo.events(100),
-        proactive: [],
+        proactive: await this.proactiveAttempts(),
         reachOut: {
           reach: reason === 'ok',
           reason,
@@ -1154,12 +1428,23 @@ export class LocalCore implements LocalCoreApi {
       const weather = await this.weatherRepo.latest('active');
       const activePlan = (await this.lifeRepo.listPlans('active'))[0] ?? null;
       const events = await this.lifeRepo.events(10);
-      return { snapshot: current, location: location ? { id: location.id, name: location.name, kind: location.kind } : null, weather: weather ? `${weather.condition}${weather.temperature_c == null ? '' : ` · ${weather.temperature_c}°C`}` : null, vitals: (await this.options.db.query('SELECT * FROM life_vitals WHERE id=1'))[0] ?? null, activePlan: activePlan ? { id: activePlan.id, title: activePlan.title, kind: activePlan.kind, status: activePlan.status } : null, openThreads: [], recentEvents: events.map((event) => ({ id: event.id, eventType: event.event_type, description: event.description, happenedAt: event.happened_at })) } as T;
+      const openThreads = (await this.lifeV2Repo.threads('open')).map((thread) => ({ id: thread.id, title: thread.title, category: thread.category, status: thread.status, progress: thread.progress }));
+      return { snapshot: current, location: location ? { id: location.id, name: location.name, kind: location.kind } : null, weather: weather ? `${weather.condition}${weather.temperature_c == null ? '' : ` · ${weather.temperature_c}°C`}` : null, vitals: (await this.options.db.query('SELECT * FROM life_vitals WHERE id=1'))[0] ?? null, activePlan: activePlan ? { id: activePlan.id, title: activePlan.title, kind: activePlan.kind, status: activePlan.status } : null, openThreads, recentEvents: events.map((event) => ({ id: event.id, eventType: event.event_type, description: event.description, happenedAt: event.happened_at })) } as T;
     }
     if (route === '/api/admin/life/vitals') return { vitals: (await this.options.db.query('SELECT * FROM life_vitals WHERE id=1'))[0] ?? null } as T;
-    if (route === '/api/admin/life/threads') return { threads: [] } as T;
+    if (route === '/api/admin/life/vitals/adjust' && method === 'POST') return { vitals: await this.adjustLifeVitals(body) } as T;
+    if (route === '/api/admin/life/vitals/reset' && method === 'POST') return { vitals: await this.resetLifeVitals() } as T;
+    if (route === '/api/admin/life/threads') return { threads: (await this.lifeV2Repo.threads()).map(toAdminLifeThread) } as T;
+    const lifeThreadId = route.match(/^\/api\/admin\/life\/threads\/([^/]+)$/u)?.[1];
+    if (lifeThreadId && method === 'PATCH') {
+      const current = await this.lifeV2Repo.getThread(decodeURIComponent(lifeThreadId));
+      if (!current) throw new Error('life thread not found');
+      const status = body.status === 'paused' || body.status === 'resolved' || body.status === 'abandoned' || body.status === 'open' ? body.status : current.status;
+      const thread = await this.lifeV2Repo.saveThread({ id: current.id, title: current.title, category: current.category, status, progress: typeof body.progress === 'number' ? Math.max(0, Math.min(1, body.progress)) : current.progress, importance: typeof body.importance === 'number' ? body.importance : current.importance, heat: typeof body.heat === 'number' ? body.heat : current.heat, nextActions: Array.isArray(body.nextActions) ? body.nextActions.filter((item): item is string => typeof item === 'string') : undefined, meta: isRecord(body.meta) ? body.meta : undefined });
+      return { thread: toAdminLifeThread(thread) } as T;
+    }
     if (route === '/api/admin/life/events') return { events: await this.lifeRepo.events(Number(url.searchParams.get('limit') ?? 50)) } as T;
-    if (route === '/api/admin/life/proactive') return { attempts: [] } as T;
+    if (route === '/api/admin/life/proactive') return { attempts: await this.proactiveAttempts() } as T;
     if (route === '/api/admin/life/locations' && method === 'GET') {
       const rows = await this.locationsRepo.list(false);
       const state = await this.locationsRepo.currentState();
@@ -1169,13 +1454,30 @@ export class LocalCore implements LocalCoreApi {
       const location = await this.locationsRepo.create({ name: stringValue(body.name, '未命名地点'), kind: stringValue(body.kind, 'other') as never, city: nullableString(body.city), region: nullableString(body.region), country: nullableString(body.country), timeZone: nullableString(body.timeZone), lat: numberOrNull(body.lat), lng: numberOrNull(body.lng) });
       return { location: toAdminLocation(location) } as T;
     }
+    if (route === '/api/admin/life/location/override' && method === 'POST') {
+      const locationId = stringValue(body.locationId, '');
+      const location = await this.locationsRepo.get(locationId);
+      if (!location) throw new Error('location not found');
+      await this.locationsRepo.setState({ locationId, arrivedAt: (this.options.now?.() ?? new Date()).toISOString(), sourceActivityId: 'admin' });
+      return { location: toAdminLocation(location), presence: await this.presence() } as T;
+    }
     const locationId = route.match(/^\/api\/admin\/life\/locations\/([^/]+)$/u)?.[1];
     if (locationId && method === 'DELETE') return { ok: await this.locationsRepo.deactivate(decodeURIComponent(locationId)) } as T;
     if (route === '/api/admin/life/travel' && method === 'GET') {
       const travel = await this.locationsRepo.currentTravel();
       return { travel: travel ? { fromLocationId: travel.from_location_id, toLocationId: travel.to_location_id, mode: travel.mode, startedAt: travel.started_at, expectedArriveAt: travel.expected_arrive_at } : null } as T;
     }
-    if (route === '/api/admin/life/cities' && method === 'GET') return { cities: await this.lifeCitiesRepo.list() } as T;
+    if (route === '/api/admin/life/cities' && method === 'POST') {
+      const city = await this.lifeCitiesRepo.create({ name: stringValue(body.name, '未命名城市'), region: nullableString(body.region), country: nullableString(body.country) ?? '中国', timeZone: nullableString(body.timeZone) ?? 'Asia/Shanghai' });
+      return { city: toAdminLifeCity(city) } as T;
+    }
+    if (route === '/api/admin/life/cities' && method === 'GET') return { cities: (await this.lifeCitiesRepo.list()).map(toAdminLifeCity) } as T;
+    const lifeCityId = route.match(/^\/api\/admin\/life\/cities\/([^/]+)$/u)?.[1];
+    if (lifeCityId && method === 'PATCH') {
+      const city = await this.lifeCitiesRepo.update(decodeURIComponent(lifeCityId), { name: typeof body.name === 'string' ? body.name : undefined, region: typeof body.region === 'string' ? body.region : undefined, active: typeof body.active === 'boolean' ? body.active : undefined });
+      if (!city) throw new Error('city not found');
+      return { city: toAdminLifeCity(city) } as T;
+    }
     if (route === '/api/admin/weather/status' && method === 'GET') {
       const snapshot = await this.weatherRepo.latest('active');
       return { enabled: Boolean(snapshot), provider: { name: snapshot?.provider ?? null, configured: Boolean(snapshot), active: Boolean(snapshot) }, currentSource: snapshot?.provider ?? null, lastSnapshot: snapshot ? toAdminWeather(snapshot) : null, cacheAgeSec: snapshot ? Math.max(0, Math.floor((Date.now() - Date.parse(snapshot.observed_at)) / 1000)) : null, daylight: null, forecast: await this.forecastSummary() } as T;
@@ -1188,8 +1490,397 @@ export class LocalCore implements LocalCoreApi {
       const forecast = await this.forecastSummary(true);
       return { ok: result.ok, snapshot: result.snapshot, forecast, error: result.error, presence: await this.presence() } as T;
     }
-    if (route.startsWith('/api/admin/metrics')) return { aggregates: [], distributions: [] } as T;
-    return {} as T;
+    if (route === '/api/admin/native-capabilities' && method === 'GET') return await this.nativeAdminCapabilities() as T;
+    if (route === '/api/admin/storage' && method === 'GET') return await this.storageStatus() as T;
+    if (route === '/api/admin/storage/policy' && (method === 'PUT' || method === 'PATCH')) return await this.saveStoragePolicy(body) as T;
+    if (route === '/api/admin/storage/cleanup' && method === 'POST') return await this.previewOrApplyCleanup(body) as T;
+    if (route === '/api/admin/metrics' && method === 'GET') {
+      const days = clampAdminDays(Number(url.searchParams.get('days') ?? 7));
+      const [fromDate, toDate] = adminMetricRange(days, this.options.now?.() ?? new Date());
+      const [aggregates, distributions] = await Promise.all([this.metricsRepo.aggregates(fromDate, toDate), this.metricsRepo.distributions(fromDate, toDate)]);
+      return { aggregates, distributions } as T;
+    }
+    if (route === '/api/admin/metrics/distributions' && method === 'GET') {
+      const days = clampAdminDays(Number(url.searchParams.get('days') ?? 7));
+      const [fromDate, toDate] = adminMetricRange(days, this.options.now?.() ?? new Date());
+      return { distributions: await this.metricsRepo.distributions(fromDate, toDate) } as T;
+    }
+    if (route === '/api/admin/audit' && method === 'GET') {
+      const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit') ?? 50)));
+      const errors = await this.listErrors(limit);
+      const jobs = await this.jobsRepo.list(limit);
+      return { audit: [...errors.map((error) => ({ kind: 'error', id: error.id, createdAt: error.createdAt, scope: error.scope, message: error.message, detail: error.detail })), ...jobs.map((job) => ({ kind: 'job', id: job.id, createdAt: job.created_at, type: job.type, status: job.status, detail: job.last_error }))].sort((a, b) => Date.parse(b.createdAt ?? '') - Date.parse(a.createdAt ?? '')).slice(0, limit) } as T;
+    }
+    throw new AdminRouteUnsupportedError(method, route);
+  }
+
+
+  /** Public seam for platform adapters (OTA updater, native plugins) to feed
+   * runtime failures into the same error_log surfaced by the admin page. */
+  async recordRuntimeError(scope: string, message: string, detail?: unknown): Promise<void> {
+    await this.recordError(scope, message, detail);
+  }
+
+  /** Writes runtime diagnostics into the existing error_log table so the
+   * admin「最近错误」page is not an empty placeholder. */
+  private async recordError(scope: string, message: string, detail?: unknown): Promise<void> {
+    try {
+      await this.options.db.run(
+        'INSERT INTO error_log(id,created_at,scope,message,detail) VALUES(?,?,?,?,?)',
+        [newId('error'), (this.options.now?.() ?? new Date()).toISOString(), scope, message.slice(0, 2000), detail === undefined ? null : JSON.stringify(detail)]
+      );
+    } catch { /* diagnostics must never break the primary path */ }
+  }
+
+  private async processMemoryMb(): Promise<number> {
+    const memory = (globalThis as { performance?: { memory?: { usedJSHeapSize?: number } } }).performance?.memory;
+    return memory && typeof memory.usedJSHeapSize === 'number' ? Math.round((memory.usedJSHeapSize / 1024 / 1024) * 10) / 10 : 0;
+  }
+
+  private async backupBytes(): Promise<number> {
+    const row = await this.options.db.query<{ bytes: number | null }>('SELECT COALESCE(SUM(bytes), 0) bytes FROM local_backup_metadata').then((rows) => rows[0]);
+    return row?.bytes ?? 0;
+  }
+
+  /** Same DTO shape as GET /api/admin/memory/status, reused by the MCP overview. */
+  private async ombreStatus(): Promise<Record<string, unknown>> {
+    const health = await this.memoryProvider.health();
+    const sync = this.memorySync ? await this.memorySync.status() : { state: health.state, provider: 'local', pendingPush: 0, pendingPull: 0, conflicts: 0, lastSyncAt: null };
+    return { backend: sync.provider, connection: health.state === 'unavailable' ? 'disconnected' : health.state === 'degraded' ? 'degraded' : 'connected', health, sync, lastCommit: null, pending: sync.pendingPush, uncertain: 0, lastDream: null, dashboardUrl: null };
+  }
+
+  private async memoryActivity(limit: number): Promise<Array<{ id: string; seq: number; type: string; createdAt: string; detail: Record<string, unknown> }>> {
+    const capped = Math.max(1, Math.min(200, Number.isFinite(limit) ? Math.trunc(limit) : 50));
+    const rows = await this.options.db.query<{ id: string; operation: string; status: string; local_memory_id: string; remote_source_id: string | null; last_error: string | null; created_at: string; updated_at: string }>(
+      'SELECT * FROM memory_sync_outbox ORDER BY updated_at DESC LIMIT ?', [capped]);
+    return rows.map((row, index) => ({
+      id: row.id,
+      seq: index,
+      type: `memory.${row.operation}`,
+      createdAt: row.updated_at,
+      detail: { status: row.status, localMemoryId: row.local_memory_id, remoteSourceId: row.remote_source_id, error: row.last_error }
+    }));
+  }
+
+  private async listErrors(limit: number): Promise<Array<{ id: string; createdAt: string; scope: string; message: string; detail: unknown }>> {
+    const capped = Math.max(1, Math.min(500, Number.isFinite(limit) ? Math.trunc(limit) : 100));
+    const rows = await this.options.db.query<{ id: string; created_at: string; scope: string; message: string; detail: string | null }>('SELECT * FROM error_log ORDER BY created_at DESC LIMIT ?', [capped]);
+    return rows.map((row) => ({ id: row.id, createdAt: row.created_at, scope: row.scope, message: row.message, detail: row.detail == null ? null : parseJsonRecord(row.detail) ?? row.detail }));
+  }
+
+  private async clearErrors(): Promise<boolean> {
+    return (await this.options.db.run('DELETE FROM error_log')).changes >= 0;
+  }
+
+  private async listBackups(): Promise<Array<Record<string, unknown>>> {
+    const rows = await this.options.db.query<{
+      id: string; target: string; state: string; bytes: number | null; sha256: string | null;
+      created_at: string; verified_at: string | null; restored_at: string | null; detail_json: string;
+    }>('SELECT * FROM local_backup_metadata ORDER BY created_at DESC LIMIT 50');
+    return rows.map((row) => ({
+      name: row.id,
+      path: row.target,
+      bytes: row.bytes ?? 0,
+      createdAt: row.created_at,
+      sha256: row.sha256 ?? '',
+      verified: Boolean(row.verified_at) && row.state !== 'failed',
+      state: row.state,
+      restoredAt: row.restored_at,
+      mediaArchived: false
+    }));
+  }
+
+  /** Executes a real, minimal upstream request for the saved model config.
+   * Returns `ok:false` instead of throwing for expected probe failures. */
+  private async probeModel(capability: (typeof MODEL_CAPABILITY_SLOTS)[number], body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (!this.options.http) return { ok: false, slot: capability, provider: 'none', latencyMs: 0, detail: '本地 HTTP 传输不可用，无法执行真实连接测试' };
+    if (capability === 'image' && body.force !== true) {
+      return { ok: false, slot: capability, provider: 'none', latencyMs: 0, detail: '出图会产生真实生成费用，确认后才会执行测试出图' };
+    }
+    let configured = await this.configRepo.getProvider(capability);
+    if (!configured && (CHAT_FALLBACK_SLOTS as readonly string[]).includes(capability)) configured = await this.configRepo.getProvider('chat');
+    if (!configured?.enabled || !configured.baseUrl || !configured.model || !configured.secretRef) {
+      return { ok: false, slot: capability, provider: configured?.provider ?? 'none', model: configured?.model || undefined, latencyMs: 0, detail: '这个能力还没配全（接口协议、地址、模型名、密钥缺一不可）' };
+    }
+    if (capability === 'vision' && configured.options.supportsVision === false) {
+      return { ok: false, slot: capability, provider: configured.provider, model: configured.model, latencyMs: 0, detail: '这个模型没有声明支持读图，先把“声明支持读图”改成“是”再测' };
+    }
+    const { BuiltinChatProvider, BuiltinEmbeddingProvider, BuiltinImageProvider, BuiltinRerankProvider, BuiltinTtsProvider } = await import('../providers/builtin.js');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error('连接测试超过 30 秒还没有结果')), 30_000);
+    const startedAt = Date.now();
+    try {
+      if (capability === 'image') {
+        const provider = new BuiltinImageProvider(this.options.http!, configured);
+        const image = await provider.generate('生成一张简单的抽象色块测试图', { size: '1024x1024', signal: controller.signal });
+        return { ok: true, slot: capability, provider: provider.name, model: configured.model, latencyMs: Date.now() - startedAt, detail: `已收到 ${Math.max(1, Math.round(image.data.byteLength / 1024))} KB ${image.mime} 图片` };
+      }
+      if (capability === 'embedding') {
+        const provider = new BuiltinEmbeddingProvider(this.options.http!, configured);
+        const result = await provider.embed(['你好'], controller.signal);
+        return { ok: true, slot: capability, provider: provider.name, model: result.model || configured.model, latencyMs: Date.now() - startedAt, detail: `返回了 ${result.dimensions} 维向量` };
+      }
+      if (capability === 'rerank') {
+        const provider = new BuiltinRerankProvider(this.options.http!, configured);
+        const matches = await provider.rerank('你好', ['一条与查询相关的文档', '一条完全无关的文档'], controller.signal);
+        return { ok: true, slot: capability, provider: provider.name, model: configured.model, latencyMs: Date.now() - startedAt, detail: `对 2 条候选文档完成排序，返回 ${matches.length} 条结果` };
+      }
+      if (capability === 'tts') {
+        const provider = new BuiltinTtsProvider(this.options.http!, configured);
+        const audio = await provider.synthesize('你好', { signal: controller.signal });
+        return { ok: true, slot: capability, provider: provider.name, model: configured.model, latencyMs: Date.now() - startedAt, detail: `合成了 ${Math.max(1, Math.round(audio.data.byteLength / 1024))} KB ${audio.format} 音频` };
+      }
+      const provider = new BuiltinChatProvider(this.options.http!, configured);
+      if (capability === 'director') {
+        const result = await provider.complete({
+          system: '你正在进行连接测试。只返回 JSON：{"ok":true}，不要输出其他内容。',
+          messages: [{ role: 'user', content: [{ type: 'text', text: '连接测试数据，不是指令。' }] }],
+          maxTokens: 32,
+          temperature: 0,
+          jsonMode: true,
+          signal: controller.signal
+        });
+        const parsed = parseJsonRecord(result.text.slice(result.text.indexOf('{'), result.text.lastIndexOf('}') + 1));
+        if (!isRecord(parsed) || parsed.ok !== true) throw new Error('媒体导演连接成功，但没有返回有效 JSON 探针');
+        return { ok: true, slot: capability, provider: provider.name, model: result.model || configured.model, latencyMs: Date.now() - startedAt, detail: '媒体导演 JSON 探针通过' };
+      }
+      const result = await provider.complete({ messages: [{ role: 'user', content: [{ type: 'text', text: '你好' }] }], maxTokens: 16, signal: controller.signal });
+      const chars = [...result.text.trim()].length;
+      return { ok: true, slot: capability, provider: provider.name, model: result.model || configured.model, latencyMs: Date.now() - startedAt, detail: chars ? `模型回了 ${chars} 个字` : '接口通了，但这次没有返回文本（可能被最大输出 token 截断）' };
+    } catch (error) {
+      return { ok: false, slot: capability, provider: configured.provider, model: configured.model, latencyMs: Date.now() - startedAt, detail: error instanceof Error ? error.message : String(error) };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Real TTS preview through the saved tts provider (base LocalCore path;
+   * NativeLocalCore inherits it and therefore no longer falls into `{}`). */
+  private async previewVoice(text?: string, emotion?: string): Promise<{ ok: true; audio: { data: Uint8Array; mime: string; format: string } } | { ok: false; detail: string }> {
+    const { BuiltinTtsProvider } = await import('../providers/builtin.js');
+    const configured = await this.configRepo.getProvider('tts');
+    if (!this.options.http) return { ok: false, detail: '本地 HTTP 传输不可用，无法执行语音试听' };
+    if (!configured?.enabled || !configured.baseUrl || !configured.model || !configured.secretRef) {
+      return { ok: false, detail: 'TTS 还没配全（接口协议、地址、模型名、密钥缺一不可），请先保存语音合成配置' };
+    }
+    try {
+      const provider = new BuiltinTtsProvider(this.options.http, configured);
+      const audio = await provider.synthesize((text ?? '你好呀，我刚刚想到你了。').slice(0, 200), {
+        voice: typeof configured.options.voice === 'string' ? configured.options.voice : undefined,
+        emotion: emotion && emotion !== 'auto' ? emotion : undefined,
+        speed: typeof configured.options.speed === 'number' ? configured.options.speed : undefined
+      });
+      return { ok: true, audio: { data: audio.data instanceof Uint8Array ? audio.data : new Uint8Array(audio.data), mime: audio.mime, format: audio.format } };
+    } catch (error) {
+      return { ok: false, detail: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  private async syncAvatarMediaFlags(previous: Record<string, unknown>, next: Record<string, unknown>): Promise<void> {
+    const previousIds = new Set([avatarMediaId(previous.avatar), avatarMediaId(previous.userAvatar)].filter((id): id is string => Boolean(id)));
+    const nextIds = new Set([avatarMediaId(next.avatar), avatarMediaId(next.userAvatar)].filter((id): id is string => Boolean(id)));
+    for (const id of previousIds) if (!nextIds.has(id)) await this.mediaRepo.setAvatarFlag(id, false).catch(() => undefined);
+    for (const id of nextIds) await this.mediaRepo.setAvatarFlag(id, true).catch(() => undefined);
+  }
+
+  private async deleteMediaIfUnreferenced(mediaId: string): Promise<boolean> {
+    const [references, avatar] = await Promise.all([this.mediaRepo.references(mediaId), this.mediaRepo.isAvatar(mediaId)]);
+    if (references.total > 0 || avatar) return false;
+    await this.removeMediaFile(mediaId);
+    return await this.mediaRepo.delete(mediaId);
+  }
+
+  private async assertMediaDeletable(mediaId: string): Promise<void> {
+    const row = await this.mediaRepo.get(mediaId);
+    if (!row) throw new Error('media not found');
+    if (row.origin === 'builtin') throw new Error('内置媒体不能删除或移入回收站');
+    const [references, avatar] = await Promise.all([this.mediaRepo.references(mediaId), this.mediaRepo.isAvatar(mediaId)]);
+    if (avatar) throw new Error('该媒体是当前头像，不能删除或移入回收站');
+    if (references.total > 0) throw new Error(`该媒体仍被 ${references.total} 处引用，不能删除或移入回收站`);
+  }
+
+  private async removeMediaFile(mediaId: string): Promise<boolean> {
+    if (!this.media) return false;
+    try {
+      return await this.media.remove(mediaId);
+    } catch {
+      return false;
+    }
+  }
+
+  private async adjustLifeVitals(body: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+    const current = await this.lifeV2Repo.getVitals();
+    const base = {
+      energy: current?.energy ?? 0.5,
+      hunger: current?.hunger ?? 0.5,
+      stress: current?.stress ?? 0.5,
+      social_need: current?.social_need ?? 0.5,
+      loneliness: current?.loneliness ?? 0.5,
+      curiosity: current?.curiosity ?? 0.5,
+      comfort: current?.comfort ?? 0.5,
+      focus: current?.focus ?? 0.5,
+      sleep_debt: current?.sleep_debt ?? 0.5
+    };
+    const field = typeof body.field === 'string' ? body.field : '';
+    const delta = typeof body.delta === 'number' && Number.isFinite(body.delta) ? body.delta : 0;
+    if (!(field in base)) throw new Error(`unknown vital field ${field}`);
+    const next = { ...base, [field]: Math.max(0, Math.min(1, Number(base[field as keyof typeof base]) + delta)) };
+    await this.lifeV2Repo.upsertVitals({ ...next, meta_json: '{}' });
+    return { ...(await this.lifeV2Repo.getVitals()) };
+  }
+
+  private async resetLifeVitals(): Promise<Record<string, unknown> | null> {
+    const defaults = { energy: 0.5, hunger: 0.5, stress: 0.5, social_need: 0.5, loneliness: 0.5, curiosity: 0.5, comfort: 0.5, focus: 0.5, sleep_debt: 0.5 };
+    await this.lifeV2Repo.upsertVitals({ ...defaults, meta_json: '{}' });
+    return { ...(await this.lifeV2Repo.getVitals()) };
+  }
+
+  private async proactiveAttempts(): Promise<Array<Record<string, unknown>>> {
+    const rows = await this.options.db.query<{
+      id: string; candidate_id: string | null; status: string; blocked_reason: string | null; message_id: string | null;
+      requested_mode: string | null; created_at: string;
+    }>('SELECT id,candidate_id,status,blocked_reason,message_id,requested_mode,created_at FROM proactive_attempts ORDER BY created_at DESC LIMIT 100');
+    return rows.map((row) => ({
+      id: row.id,
+      candidateId: row.candidate_id,
+      status: row.status,
+      blockedReason: row.blocked_reason,
+      messageId: row.message_id,
+      requestedMode: row.requested_mode,
+      createdAt: row.created_at
+    }));
+  }
+
+  /** Capability flags for the admin UI. Every implemented route is derived
+   * from the route registry; platform-dependent seams are refined below so
+   * `true` means “implemented and usable on this device”. */
+  private async nativeAdminCapabilities(): Promise<Record<string, unknown>> {
+    const capabilities: Record<string, boolean> = {};
+    for (const entry of this.adminRoutes) capabilities[entry.capability] = true;
+    capabilities.backupVerify = typeof this.options.db.verifyBackup === 'function';
+    capabilities.backupDelete = typeof this.options.db.deleteBackup === 'function';
+    capabilities.backupRestore = typeof this.options.db.restore === 'function';
+    capabilities.memorySync = Boolean(this.memorySync);
+    capabilities.ombreRemoteSearch = Boolean(this.memorySync);
+    capabilities.modelDiscovery = Boolean(this.options.http);
+    capabilities.modelProbe = Boolean(this.options.http);
+    capabilities.webSearchProbe = Boolean(this.options.http);
+    // Canonical UI switches, kept stable even when individual route keys are
+    // split or renamed in the registry.
+    capabilities.runtimeLogs = capabilities.errors === true;
+    capabilities.chatHistoryFilters = capabilities.chatHistory === true;
+    capabilities.mediaStateAll = capabilities.mediaList === true;
+    capabilities.mediaRefProtection = capabilities.mediaDetail === true;
+    capabilities.stickerFacets = capabilities.stickerList === true;
+    capabilities.stickerForceAnalysis = capabilities.stickerAnalyze === true;
+    capabilities.mcpUrlSanitized = capabilities.mcpServerSave === true;
+    return capabilities;
+  }
+
+  private async storagePolicy(): Promise<StoragePolicy> {
+    const stored = await this.settingsRepo.get<Record<string, unknown>>('storagePolicy', {});
+    return {
+      softLimitBytes: clampStorageBytes(stored.softLimitBytes),
+      hardLimitBytes: clampStorageBytes(stored.hardLimitBytes),
+      trashRetentionDays: clampAdminInt(stored.trashRetentionDays, 0, 3650, 30),
+      tempRetentionHours: clampAdminInt(stored.tempRetentionHours, 0, 8760, 24),
+      backupKeep: clampAdminInt(stored.backupKeep, 0, 1000, 7)
+    };
+  }
+
+  private async storageStatus(): Promise<Record<string, unknown>> {
+    const [policy, mediaStats, backupBytes] = await Promise.all([this.storagePolicy(), this.mediaRepo.galleryStats({ deleted: false }), this.backupBytes()]);
+    const warning = policy.hardLimitBytes > 0 && mediaStats.bytes >= policy.hardLimitBytes ? 'hard' : policy.softLimitBytes > 0 && mediaStats.bytes >= policy.softLimitBytes ? 'soft' : null;
+    return {
+      mediaBytes: mediaStats.bytes,
+      backupBytes,
+      freeBytes: null,
+      policy,
+      warning,
+      trashCount: (await this.mediaRepo.galleryStats({ deleted: true })).count,
+      orphanFileBytes: 0,
+      tempFileBytes: 0
+    };
+  }
+
+  private async saveStoragePolicy(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const previous = await this.storagePolicy();
+    const policy = {
+      softLimitBytes: clampStorageBytes(body.softLimitBytes ?? previous.softLimitBytes),
+      hardLimitBytes: clampStorageBytes(body.hardLimitBytes ?? previous.hardLimitBytes),
+      trashRetentionDays: clampAdminInt(body.trashRetentionDays, 0, 3650, previous.trashRetentionDays),
+      tempRetentionHours: clampAdminInt(body.tempRetentionHours, 0, 8760, previous.tempRetentionHours),
+      backupKeep: clampAdminInt(body.backupKeep, 0, 1000, previous.backupKeep)
+    };
+    if (policy.softLimitBytes > 0 && policy.hardLimitBytes > 0 && policy.softLimitBytes > policy.hardLimitBytes) throw new Error('软限额不能大于硬限额');
+    await this.settingsRepo.set('storagePolicy', policy);
+    return await this.storageStatus();
+  }
+
+  private async previewOrApplyCleanup(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const apply = body.apply === true;
+    const policy = await this.storagePolicy();
+    const now = this.options.now?.() ?? new Date();
+    const [trashCutoff, activeRows, backupRows] = await Promise.all([
+      new Date(now.getTime() - policy.trashRetentionDays * 86_400_000).toISOString(),
+      this.mediaRepo.listGallery({ deleted: false, limit: 500 }),
+      this.options.db.query<{ id: string; bytes: number | null; created_at: string }>('SELECT * FROM local_backup_metadata ORDER BY created_at DESC')
+    ]);
+    const expiredTrash = await this.mediaRepo.listExpiredTrash(trashCutoff, 500);
+    const candidates: Record<string, Array<Record<string, unknown>> | undefined> = {
+      expiredTrash: expiredTrash.map(mediaCandidate),
+      missingRecords: [],
+      unreferencedMedia: [],
+      tempFiles: [],
+      oldBackups: backupRows.slice(policy.backupKeep).map((row) => ({ id: row.id, bytes: row.bytes ?? 0, createdAt: row.created_at, path: row.id })),
+      orphanFiles: []
+    };
+    for (const row of activeRows) {
+      if (row.origin === 'builtin') continue;
+      const [references, avatar] = await Promise.all([this.mediaRepo.references(row.id), this.mediaRepo.isAvatar(row.id)]);
+      if (references.total === 0 && !avatar) {
+        const exists = this.media ? !!(await this.media.read(row.id).catch(() => null)) : true;
+        const category = exists ? 'unreferencedMedia' : 'missingRecords';
+        (candidates[category] ??= []).push({ ...mediaCandidate(row), references: references.total });
+      } else if (this.media && !(await this.media.read(row.id).catch(() => null))) {
+        (candidates.missingRecords ??= []).push({ ...mediaCandidate(row), references: references.total });
+      }
+    }
+    const candidateGroups = Object.values(candidates).filter((items): items is Array<Record<string, unknown>> => Array.isArray(items));
+    const reclaimableBytes = candidateGroups.reduce((sum, items) => sum + items.reduce((bytes, item) => bytes + Number(item.bytes ?? 0), 0), 0);
+    const reportId = typeof body.reportId === 'string' ? body.reportId : `cleanup_${Date.now().toString(36)}`;
+    if (!apply) {
+      return { report: { reportId, candidates, generatedAt: now.toISOString(), reclaimableBytes, applied: false }, releasedBytes: 0 };
+    }
+    let releasedBytes = 0;
+    let removedItems = 0;
+    const requested = Array.isArray(body.categories) ? body.categories.filter((category): category is string => typeof category === 'string') : Object.keys(candidates);
+    const safe = new Set(['expiredTrash', 'missingRecords', 'unreferencedMedia', 'oldBackups']);
+    for (const category of requested) {
+      if (!safe.has(category)) continue;
+      const items = candidates[category];
+      if (!items) continue;
+      for (const item of items) {
+        const id = typeof item.id === 'string' ? item.id : '';
+        if (!id) continue;
+        try {
+          if (category === 'oldBackups') {
+            if (!this.options.db.deleteBackup) continue;
+            await this.options.db.deleteBackup(id);
+            await this.options.db.run('DELETE FROM local_backup_metadata WHERE id=?', [id]);
+          } else {
+            await this.assertMediaDeletable(id);
+            await this.removeMediaFile(id);
+            if (await this.mediaRepo.delete(id)) removedItems += 1;
+          }
+          releasedBytes += Number(item.bytes ?? 0);
+        } catch { /* an item may have become referenced between preview and apply */ }
+      }
+    }
+    return {
+      report: { reportId, candidates, generatedAt: now.toISOString(), reclaimableBytes, applied: true, removedItems },
+      releasedBytes
+    };
   }
 
   private async refreshMcpServer(id: string): Promise<Awaited<ReturnType<McpRepository['getServer']>>> {
@@ -1222,7 +1913,9 @@ export class LocalCore implements LocalCoreApi {
       await this.mcpRepo.setRefreshed(id);
       await this.mcpRepo.setState(id, 'ready', null);
     } catch (error) {
-      await this.mcpRepo.setState(id, 'degraded', error instanceof Error ? error.message : String(error));
+      const message = errorMessage(error);
+      await this.mcpRepo.setState(id, 'degraded', message);
+      await this.recordError(`mcp.${id}`, message);
       throw error;
     }
     return await this.mcpRepo.getServer(id);
@@ -1418,6 +2111,77 @@ function toAdminWeather(row: { observed_at: string; condition: string; temperatu
 
 function toAdminSticker(row: Sticker): Record<string, unknown> {
   return { id: row.id, name: row.name, tags: row.tags, emotion: row.emotion, enabled: row.enabled, useCount: row.useCount, assistantUseCount: row.assistantUseCount, assistantLastUsedAt: row.assistantLastUsedAt, userUseCount: row.userUseCount, userLastUsedAt: row.userLastUsedAt, description: row.description, imageText: row.imageText, userMeaning: row.userMeaning, analysisStatus: row.analysisStatus, analysisSource: row.analysisSource, analysisVersion: row.analysisVersion, analysisError: row.analysisError, favorite: row.favorite, url: row.url, mime: 'image/*', createdAt: row.createdAt, updatedAt: row.updatedAt, available: row.enabled };
+}
+
+interface StoragePolicy {
+  softLimitBytes: number;
+  hardLimitBytes: number;
+  trashRetentionDays: number;
+  tempRetentionHours: number;
+  backupKeep: number;
+}
+
+function avatarMediaId(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const raw = value.trim();
+  if (raw.startsWith('local-media://')) return raw.slice('local-media://'.length) || null;
+  return raw;
+}
+
+function sanitizeMcpUrl(value: string): string {
+  const raw = value.trim();
+  if (!raw) return '';
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error('MCP Server URL 无效，请填写完整的 http(s) 地址');
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('MCP Server URL 只支持 http/https');
+  parsed.search = '';
+  parsed.hash = '';
+  return parsed.toString();
+}
+
+function toAdminLifeCity(row: { id: string; name: string; region: string | null; country: string | null; time_zone: string; active: number }): Record<string, unknown> {
+  return { id: row.id, name: row.name, region: row.region, country: row.country, timeZone: row.time_zone, active: row.active === 1 };
+}
+
+function toAdminLifeThread(row: { id: string; title: string; category: string; status: string; progress: number; heat: number; next_actions_json: string; meta_json: string }): Record<string, unknown> {
+  return { id: row.id, title: row.title, category: row.category, status: row.status, progress: row.progress, heat: row.heat, next_actions_json: row.next_actions_json, meta_json: row.meta_json };
+}
+
+function mediaCandidate(row: { id: string; rel_path: string; bytes: number; origin: string; created_at: string; deleted_at: string | null }): Record<string, unknown> {
+  return { id: row.id, path: row.rel_path, relPath: row.rel_path, bytes: row.bytes, origin: row.origin, createdAt: row.created_at, deletedAt: row.deleted_at };
+}
+
+function clampStorageBytes(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
+}
+
+function clampAdminInt(value: unknown, minimum: number, maximum: number, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(minimum, Math.min(maximum, Math.trunc(value))) : fallback;
+}
+
+function clampAdminDays(value: number): number {
+  return Math.max(1, Math.min(90, Number.isFinite(value) ? Math.trunc(value) : 7));
+}
+
+function adminMetricRange(days: number, now: Date): [string, string] {
+  const to = localDateKey(now);
+  const from = localDateKey(new Date(now.getTime() - (days - 1) * 86_400_000));
+  return [from, to];
+}
+
+function localDateKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function bytesToBase64(value: Uint8Array): string {

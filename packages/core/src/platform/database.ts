@@ -40,6 +40,10 @@ export interface LocalDatabase {
   integrityCheck(): Promise<DatabaseIntegrityResult>;
   backup(target: string): Promise<DatabaseBackupResult | void>;
   restore?(target: string): Promise<void>;
+  /** Optional admin-only backup file operations. When absent the admin bridge
+   * must report the operation as unsupported instead of faking success. */
+  verifyBackup?(target: string): Promise<DatabaseBackupResult | void>;
+  deleteBackup?(target: string): Promise<boolean>;
 }
 
 export interface DatabaseRunResult {

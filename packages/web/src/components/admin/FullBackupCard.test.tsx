@@ -57,4 +57,11 @@ describe('FullBackupCard server migration', () => {
     expect(container!.textContent).toContain('迁入服务器数据');
     expect(container!.querySelector('input[placeholder="未包含密钥可留空"]')).toBeNull();
   });
+
+  it('distinguishes the full archive from ordinary database rollback points', async () => {
+    await act(async () => root!.render(<FullBackupCard onNotice={vi.fn()} />));
+    expect(container!.textContent).toContain('导出 IPA 完整备份');
+    expect(container!.textContent).toContain('它不是数据库回滚点');
+    expect(container!.textContent).toContain('运维与备份');
+  });
 });

@@ -78,6 +78,15 @@ export class ToolPolicy {
     return this.registry.getByModelName(modelName) ?? this.registry.get(modelName);
   }
 
+  /** Effective global switches used by the admin overview. */
+  policyState(): { readEnabled: boolean; writeEnabled: boolean; maintenanceEnabled: boolean } {
+    return {
+      readEnabled: this.readEnabled,
+      writeEnabled: this.writeEnabled,
+      maintenanceEnabled: this.maintenanceEnabled
+    };
+  }
+
   private enabledFor<K extends keyof ToolServerPolicyOptions>(tool: ToolDescriptor, key: K, global: boolean): boolean {
     if (tool.source !== 'mcp' || !tool.serverId) return global;
     return global && (this.serverPolicies[tool.serverId]?.[key] ?? true);

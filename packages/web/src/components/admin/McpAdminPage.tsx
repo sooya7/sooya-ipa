@@ -115,7 +115,8 @@ export function McpAdminPage({ onNotice }: { onNotice: (message: string) => void
     if (!window.confirm(`删除 MCP Server「${server.id}」？其工具将立即从聊天中移除。`)) return;
     setBusy(`delete:${server.id}`);
     try {
-      await adminApi.deleteMcpServer(server.id);
+      const result = await adminApi.deleteMcpServer(server.id);
+      if (!result.deleted) throw new Error('MCP Server 未删除');
       onNotice('MCP Server 已删除');
       await load();
     } catch (cause) {
@@ -132,6 +133,7 @@ export function McpAdminPage({ onNotice }: { onNotice: (message: string) => void
       const result = action === 'test'
         ? await adminApi.testMcpServer(server.id)
         : await adminApi.refreshMcpTools(server.id);
+      if (result.ok !== true) throw new Error(`${server.id} ${action === 'test' ? '连接测试' : '工具刷新'}未成功`);
       setOverview((current) => current ? { ...current, servers: current.servers.map((item) => item.id === server.id ? result.server : item) } : current);
       onNotice(action === 'test' ? `${server.id} 连接测试完成` : `${server.id} 工具列表已刷新`);
     } catch (cause) {

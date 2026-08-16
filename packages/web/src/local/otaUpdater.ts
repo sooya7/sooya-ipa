@@ -105,6 +105,7 @@ export class LocalOtaUpdater {
       return { checked: true, downloaded: true, releaseId: value.releaseId };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      await this.core.recordRuntimeError('ota.check', reason.slice(0, 1000));
       await this.core.database.run(`UPDATE local_update_state SET last_error=?,updated_at=? WHERE id=1`, [reason.slice(0, 1000), new Date().toISOString()]).catch(() => undefined);
       return { checked: true, downloaded: false, reason };
     }
@@ -143,6 +144,7 @@ export class LocalOtaUpdater {
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       const now = new Date().toISOString();
+      await this.core.recordRuntimeError('ota.apply', reason.slice(0, 1000));
       await this.core.database.run(`UPDATE local_update_state SET failed_web_version=?,blocked_web_version=?,last_failed_at=?,last_error=?,updated_at=? WHERE id=1`, [state.pending_web_version, state.pending_web_version, now, reason.slice(0, 1000), now]).catch(() => undefined);
       return { applied: false, releaseId: state.pending_web_version, reason };
     }

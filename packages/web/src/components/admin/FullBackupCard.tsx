@@ -76,7 +76,7 @@ export function FullBackupCard({ onNotice }: { onNotice: (message: string) => vo
         <div>
           <span className="admin-card-kicker">FULL BACKUP</span>
           <h2>完整导入 / 导出</h2>
-          <p>一份文件带走聊天、记忆、人设、Life、模型/MCP 配置、头像、参考图、表情和所有用户媒体。也支持直接选择服务器版生成的 SOOYA-server-to-IPA 迁移包。</p>
+          <p>一份 IPA 完整备份可以带走聊天、记忆、人设、Life、模型/MCP 配置、头像、参考图、表情和所有用户媒体；也可以单独选择服务器版生成的 SOOYA-server-to-IPA 迁移包。</p>
         </div>
         <span className="admin-status-chip is-ready">Native Base 11</span>
       </div>
@@ -99,11 +99,11 @@ export function FullBackupCard({ onNotice }: { onNotice: (message: string) => vo
           </label>
         )}
         <p className="admin-muted" style={{ margin: 0 }}>
-          这里是 IPA 自己导出完整备份时的规则：默认不写 Keychain，勾选后使用密码加密。服务器 → IPA 迁移包是另一条简化链路，会携带服务器模型配置和 API Key，不要求密码。
+          这里是 IPA 自己导出完整备份时的规则：默认不写 Keychain，勾选后使用密码加密。服务器 → IPA 迁移包是另一条简化链路，会携带服务器模型配置和 API Key，不要求密码。它不是数据库回滚点；需要「回到某次修改前」请使用「运维与备份」里的普通备份。
         </p>
         <div className="admin-actions">
           <button type="button" onClick={() => void doExport()} disabled={busy !== null}>
-            {busy === 'export' ? '正在打包…' : '导出全部内容'}
+            {busy === 'export' ? '正在打包…' : '导出 IPA 完整备份'}
           </button>
           <button type="button" onClick={() => void chooseImport()} disabled={busy !== null}>
             {busy === 'pick' ? '正在打开文件…' : '选择备份文件'}

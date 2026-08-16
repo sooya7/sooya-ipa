@@ -63,10 +63,10 @@ export class NativeLocalCore extends LocalCore {
     }
 
     const match = url.pathname.match(/^\/api\/admin\/models\/([^/]+)\/test$/u);
-    if (!match || method !== 'POST') return await super.adminRequest<T>(path, options);
+    const rawCapability = match ? decodeURIComponent(match[1]!) : '';
+    if (!match || method !== 'POST' || !(MODEL_CAPABILITY_SLOTS as readonly string[]).includes(rawCapability)) return await super.adminRequest<T>(path, options);
 
-    const capability = decodeURIComponent(match[1]!) as ModelCapabilitySlot;
-    if (!(MODEL_CAPABILITY_SLOTS as readonly string[]).includes(capability)) throw new Error('未知的能力槽位');
+    const capability = rawCapability as ModelCapabilitySlot;
 
     let configured = await this.configRepo.getProvider(capability);
     if (!configured && (CHAT_FALLBACK_SLOTS as readonly string[]).includes(capability)) configured = await this.configRepo.getProvider('chat');

@@ -61,11 +61,12 @@ export class PersonaReferenceService {
     };
   }
 
-  async upload(framing: ReferenceFraming, mediaId: string): Promise<PersonaReferenceItem> {
+  async upload(framing: ReferenceFraming, mediaId: string): Promise<{ item: PersonaReferenceItem; previousMediaId: string | null }> {
     const slots = await this.settings.get<Record<string, string | null>>(SLOT_KEY, {});
+    const previousMediaId = slots[framing] ?? null;
     slots[framing] = mediaId;
     await this.settings.set(SLOT_KEY, slots);
-    return await this.item(framing, mediaId);
+    return { item: await this.item(framing, mediaId), previousMediaId };
   }
 
   /** Removes a user image by media id or by slot; bundled assets stay put. */

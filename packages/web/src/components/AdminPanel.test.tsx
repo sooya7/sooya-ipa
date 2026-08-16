@@ -66,6 +66,10 @@ const adminMocks = vi.hoisted(() => ({
   testWebSearch: vi.fn(async (provider: string) => ({ ok: true, provider, latencyMs: 1, resultCount: 1 })),
   uploadSticker: vi.fn(async () => ({ created: [], failed: [] })),
   analyzeStickerBatch: vi.fn(async () => ({ queued: 0, skipped: 0 })),
+  verifyBackup: vi.fn(async () => ({ name: 'b.sqlite3', verified: true })),
+  restoreBackup: vi.fn(async () => ({ name: 'b.sqlite3', verified: true })),
+  deleteBackup: vi.fn(async () => ({ deleted: true })),
+  createBackup: vi.fn(async () => ({ backup: { name: 'b.sqlite3', path: 'b.sqlite3', bytes: 0, createdAt: '2026-08-16T00:00:00.000Z', sha256: '', verified: true, mediaArchived: false } })),
   errors: vi.fn(async () => ({ errors: [
     { id: 'e1', createdAt: '2026-08-12T04:55:00.000Z', scope: 'job.sticker.analyze', message: 'invalid_analysis_json', detail: { raw: 'bad' } },
     { id: 'e2', createdAt: '2026-08-12T04:54:00.000Z', scope: 'job.sticker.analyze', message: 'invalid_analysis_json: schema', detail: null }
@@ -226,7 +230,7 @@ describe('AdminPanel 子页首屏', () => {
     expect(container.querySelector('[data-testid="admin-dashboard"]')).toBeNull();
   });
 
-  it('内容页把召回策略、匹配依据和丢弃原因显示为中文', async () => {
+  it('内容页旧路径只渲染新版内容管理，不再加载可硬删媒体的旧面板', async () => {
     window.history.replaceState(null, '', '/admin/content');
     container = document.createElement('div');
     document.body.append(container);
@@ -238,12 +242,12 @@ describe('AdminPanel 子页首屏', () => {
       await Promise.resolve();
     });
 
-    const recall = container.querySelector('[data-testid="admin-memory-recall"]')!;
-    expect(recall.textContent).toContain('关键词检索');
-    expect(recall.textContent).toContain('与近期对话重复');
-    expect(recall.textContent).toContain('关键词匹配');
-    expect(recall.textContent).not.toContain('deduplicated_recent');
-    expect(recall.textContent).not.toContain('FTS lexical match');
+    expect(container.querySelector('[data-testid="admin-content-management"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="admin-content"]')).toBeNull();
+    expect(adminMocks.memories).not.toHaveBeenCalled();
+    expect(adminMocks.stickers).not.toHaveBeenCalled();
+    expect(adminMocks.media).not.toHaveBeenCalled();
+    expect(adminMocks.legacyMemories).not.toHaveBeenCalled();
   });
 
   it('运维页按人话问题类型和任务状态聚合日志', async () => {
@@ -359,6 +363,42 @@ describe('AdminPanel 子页首屏', () => {
     expect(adminMocks.addModelPreset).not.toHaveBeenCalled();
     expect(adminMocks.saveModelPresets).not.toHaveBeenCalled();
     expect(container.textContent).toContain('请先点击“保存模型配置”，再存入模型库');
+  });
+
+  it('模型测试返回 ok:false 时不会显示连接正常', async () => {
+    window.history.replaceState(null, '', '/admin/models');
+    adminMocks.testModel.mockResolvedValueOnce({ ok: false, slot: 'chat', provider: 'test', model: 'm', latencyMs: 1, detail: '接口拒绝了这次请求' } as never);
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(<AdminPanel initialTab="models" />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => { (container!.querySelector('[data-testid="admin-model-test"]') as HTMLButtonElement).click(); await Promise.resolve(); });
+    expect(container!.textContent).toContain('接口拒绝了这次请求');
+    expect(container!.textContent).not.toContain('连接正常');
+  });
+
+  it('备份删除返回 deleted:false 时不会显示删除成功', async () => {
+    window.history.replaceState(null, '', '/admin/operations');
+    adminMocks.backups.mockResolvedValueOnce({ backups: [{ name: 'b.sqlite3', path: 'b.sqlite3', bytes: 0, createdAt: '2026-08-16T00:00:00.000Z', sha256: '', verified: true, mediaArchived: false }] } as never);
+    adminMocks.deleteBackup.mockResolvedValueOnce({ deleted: false });
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(<AdminPanel initialTab="operations" />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const buttons = [...container!.querySelectorAll('button')];
+    const deleteButton = buttons.find((button) => button.textContent === '删除') as HTMLButtonElement;
+    window.confirm = vi.fn(() => true);
+    await act(async () => { deleteButton.click(); await Promise.resolve(); await Promise.resolve(); });
+    expect(container!.textContent).toContain('备份删除失败');
+    expect(container!.textContent).not.toContain('备份已删除');
   });
 
   it('语音收敛后导航不再出现「情绪语音」页', async () => {

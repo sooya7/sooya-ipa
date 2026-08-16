@@ -112,7 +112,8 @@ export function ReferencesEditor({ onNotice }: { onNotice: (s: string) => void }
   const remove = async (name: string) => {
     if (!window.confirm(`删除参考图「${name}」？之后该视角自动回退内置参考图。`)) return;
     try {
-      await featureApi.deleteReference(name);
+      const result = await featureApi.deleteReference(name);
+      if (!result.deleted) throw new Error('内置参考图不能删除');
       onNotice('参考图已删除，该视角回退内置图');
       await load();
     } catch (error) {
@@ -147,7 +148,7 @@ export function ReferencesEditor({ onNotice }: { onNotice: (s: string) => void }
                 ? <small style={{ wordBreak: 'break-all' }}>{ref.name} · {ref.exists ? bytes(ref.bytes) : '文件缺失'}{ref.configured ? '' : ' · 未启用'}</small>
                 : <small>还没有这个视角的参考图</small>}
               <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={busy} onChange={(event) => { void upload(framing, event.target.files?.[0]); event.target.value = ''; }} />
-              {ref && <button type="button" onClick={(event) => { event.preventDefault(); void remove(ref.name); }}>删除</button>}
+              {ref?.mediaId && <button type="button" onClick={(event) => { event.preventDefault(); void remove(ref.name); }}>删除</button>}
             </label>
           );
         })}

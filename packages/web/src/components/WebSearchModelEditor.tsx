@@ -100,6 +100,7 @@ export function WebSearchModelEditor({
     setTestResult('');
     try {
       const result = await adminApi.testWebSearch(provider, query.trim() || 'OpenAI');
+      if (!result.ok) throw new Error(result.detail || '搜索测试失败');
       const text = `${PROVIDERS.find((item) => item.id === provider)?.label ?? provider}：连接正常，${result.resultCount} 条结果，耗时 ${result.latencyMs} ms`;
       setTestResult(text);
       onNotice(text);

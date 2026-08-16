@@ -47,7 +47,7 @@ describe('merged admin console', () => {
     expect(EDITORS).not.toContain('export function LifePanel(');
     expect(EDITORS).not.toContain('export function LifeAdminLink(');
     const featureImports = PANEL.match(/import \{([^}]+)\} from '\.\/FeatureAdminPage\.js';/)?.[1];
-    for (const imported of ['AvatarEditor', 'emotionLabel', 'ReferencesEditor', 'StorageEditor']) {
+    for (const imported of ['AvatarEditor', 'ReferencesEditor', 'StorageEditor']) {
       expect(featureImports).toContain(imported);
     }
     expect(featureImports).not.toContain('VoiceEditor');

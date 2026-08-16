@@ -482,6 +482,33 @@ final class SOOYADatabaseStore {
         }
     }
 
+    func verifyBackup(named name: String) throws -> SOOYABackupInfo {
+        try lock.sooyaWithLock {
+            let backupURL = try existingBackupURLLocked(named: name)
+            let source = try openSQLiteConnectionLocked(at: backupURL, readOnly: true, operation: "backup verify open")
+            defer { _ = sqlite3_close_v2(source) }
+            let verification = try integrityLocked(source)
+            guard verification.ok else {
+                throw SOOYADatabaseError.invalidBackup
+            }
+            return SOOYABackupInfo(
+                fileName: name,
+                fileURL: backupURL,
+                sizeBytes: fileSizeLocked(at: backupURL),
+                verified: true,
+                createdAt: Date()
+            )
+        }
+    }
+
+    func deleteBackup(named name: String) throws -> Bool {
+        try lock.sooyaWithLock {
+            let backupURL = try existingBackupURLLocked(named: name)
+            try fileManager.removeItem(at: backupURL)
+            return true
+        }
+    }
+
     func restore(named name: String) throws -> SOOYARestoreInfo {
         try lock.sooyaWithLock {
             let connection = try requireConnectionLocked()
@@ -1102,6 +1129,8 @@ public final class SOOYADatabasePlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "integrity", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "backup", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "restore", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "verifyBackup", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "deleteBackup", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "databaseInfo", returnType: CAPPluginReturnPromise)
     ]
 
@@ -1194,6 +1223,24 @@ public final class SOOYADatabasePlugin: CAPPlugin, CAPBridgedPlugin {
                 throw SOOYADatabaseError.invalidRequest
             }
             return try self.store.restore(named: name).bridgeObject
+        }
+    }
+
+    @objc public func verifyBackup(_ call: CAPPluginCall) {
+        resolve(call) {
+            guard let name = call.getString("name") else {
+                throw SOOYADatabaseError.invalidRequest
+            }
+            return try self.store.verifyBackup(named: name).bridgeObject
+        }
+    }
+
+    @objc public func deleteBackup(_ call: CAPPluginCall) {
+        resolve(call) {
+            guard let name = call.getString("name") else {
+                throw SOOYADatabaseError.invalidRequest
+            }
+            return ["deleted": try self.store.deleteBackup(named: name)]
         }
     }
 

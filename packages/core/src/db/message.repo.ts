@@ -204,6 +204,60 @@ export class MessageRepo {
     return { messages: await this.hydrate(rows.slice(0, capped).reverse()), hasMore: rows.length > capped };
   }
 
+  /** Admin chat-history query: every filter is applied in SQLite instead of
+   * being silently ignored. */
+  async adminPage(options: {
+    q?: string;
+    role?: 'user' | 'assistant' | 'system';
+    hasMedia?: boolean;
+    mediaKind?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<{ messages: ChatMessage[]; total: number; hasMore: boolean }> {
+    const capped = clampInteger(options.limit ?? 100, 1, 200);
+    const offset = Math.max(0, Math.trunc(options.offset ?? 0));
+    const where: string[] = ['m.conversation_id = ?'];
+    const values: Array<string | number> = [CONVERSATION_ID];
+    const q = options.q?.trim();
+    if (options.role === 'user' || options.role === 'assistant' || options.role === 'system') {
+      where.push('m.role = ?'); values.push(options.role);
+    }
+    if (options.from) { where.push('m.created_at >= ?'); values.push(options.from); }
+    if (options.to) { where.push('m.created_at <= ?'); values.push(options.to); }
+    if (options.hasMedia === true) {
+      where.push(`EXISTS (SELECT 1 FROM message_parts p WHERE p.message_id = m.id AND p.media_id IS NOT NULL${options.mediaKind ? ' AND p.type = ?' : ''})`);
+      if (options.mediaKind) values.push(options.mediaKind);
+    } else if (options.hasMedia === false) {
+      where.push(`NOT EXISTS (SELECT 1 FROM message_parts p WHERE p.message_id = m.id AND p.media_id IS NOT NULL)`);
+    } else if (options.mediaKind) {
+      where.push(`EXISTS (SELECT 1 FROM message_parts p WHERE p.message_id = m.id AND p.type = ?)`);
+      values.push(options.mediaKind);
+    }
+    if (q) {
+      where.push(`EXISTS (
+        SELECT 1 FROM message_parts p
+        LEFT JOIN media md ON md.id = p.media_id
+        LEFT JOIN media_text mt ON mt.media_id = p.media_id
+        WHERE p.message_id = m.id AND (
+          lower(COALESCE(p.text, p.transcript, md.rel_path, mt.text, '')) LIKE lower(?) OR
+          lower(COALESCE(md.meta_json, '')) LIKE lower(?)
+        )
+      )`);
+      const like = `%${q}%`;
+      values.push(like, like);
+    }
+    const whereSql = where.join(' AND ');
+    const total = (await queryOne<{ c: number }>(this.db, `SELECT COUNT(*) c FROM messages m WHERE ${whereSql}`, values))?.c ?? 0;
+    const rows = await this.db.query<MessageRow>(
+      `SELECT m.* FROM messages m WHERE ${whereSql} ORDER BY m.seq DESC LIMIT ? OFFSET ?`,
+      [...values, capped + 1, offset]
+    );
+    const page = rows.slice(0, capped);
+    return { messages: await this.hydrate(page), total, hasMore: rows.length > capped };
+  }
+
   async search(query: string, limit = 30, cursor?: string | null): Promise<{ hits: MessageSearchHit[]; nextCursor: string | null }> {
     const normalized = query.trim();
     if (!normalized) return { hits: [], nextCursor: null };

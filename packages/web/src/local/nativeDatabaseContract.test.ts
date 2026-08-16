@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { CapacitorDatabase, databaseTransactionCallOptions } from './nativeBoot.js';
@@ -23,6 +23,19 @@ describe('SOOYADatabase bridge contract', () => {
     expect(swift).toContain('case "execute":');
     expect(swift).toContain('case "query":');
     expect(swift).toContain('sqlite3_exec(connection, statement.sql');
+  });
+
+  it('exposes real backup verify/delete instead of faking admin success', async () => {
+    const swift = readFileSync(path.resolve('../../ios/App/App/Plugins/SOOYADatabasePlugin.swift'), 'utf8');
+    expect(swift).toContain('CAPPluginMethod(name: "verifyBackup"');
+    expect(swift).toContain('CAPPluginMethod(name: "deleteBackup"');
+    const database = Object.create(CapacitorDatabase.prototype) as unknown as CapacitorDatabase;
+    const plugin = {
+      call: vi.fn(async (method: string) => method === 'deleteBackup' ? { deleted: true } : { fileName: 'b.sqlite3', verified: true })
+    };
+    Object.defineProperty(database, 'plugin', { value: plugin });
+    await expect(database.verifyBackup('b.sqlite3')).resolves.toMatchObject({ fileName: 'b.sqlite3' });
+    await expect(database.deleteBackup('b.sqlite3')).resolves.toBe(true);
   });
 
   it('keeps public queries read-only while allowing the trusted journal-mode inspection', () => {

@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import { existsSync, rmSync, statSync } from 'node:fs';
 
 interface NativeRunResult { changes: number; lastInsertRowid: number | bigint; }
 interface NativeStatement {
@@ -90,6 +91,26 @@ export class NodeLocalDatabase {
 
   async backup(target: string): Promise<void> {
     await this.raw.backup(target);
+  }
+
+  async verifyBackup(target: string): Promise<{ fileName: string; sizeBytes: number; verified: boolean }> {
+    if (!existsSync(target)) throw new Error('backup not found');
+    const check = new Database(target);
+    try {
+      const integrity = check.pragma('integrity_check') as Array<{ integrity_check: string }>;
+      return { fileName: target, sizeBytes: statSync(target).size, verified: integrity.every((row) => row.integrity_check === 'ok') };
+    } finally {
+      check.close();
+    }
+  }
+
+  async deleteBackup(target: string): Promise<boolean> {
+    try {
+      rmSync(target, { force: true });
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 

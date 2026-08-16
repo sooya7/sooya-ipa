@@ -7,7 +7,7 @@ import { AppLink } from './AppLink.js';
 import { currentSooyaClient, type SooyaClient } from '../lib/sooyaClient.js';
 import { formatAdminDateTime } from '../lib/adminDisplay.js';
 import { featureApi } from '../lib/features.js';
-import { AvatarEditor, emotionLabel, ReferencesEditor, StorageEditor } from './FeatureAdminPage.js';
+import { AvatarEditor, ReferencesEditor, StorageEditor } from './FeatureAdminPage.js';
 import { LifeObservationPanel } from './life/LifeObservationPanel.js';
 import { WebSearchModelEditor } from './WebSearchModelEditor.js';
 import { McpAdminPage } from './admin/McpAdminPage.js';
@@ -38,12 +38,8 @@ import {
   type AdminCapabilities,
   type AdminError,
   type AdminJob,
-  type AdminMedia,
-  type AdminMemory,
-  type AdminRecallTrace,
   type AdminModels,
   type AdminPersona,
-  type AdminSticker,
   type AdminSystemStatus,
   type AdminWebSearchConfig
 } from '../lib/admin.js';
@@ -151,53 +147,6 @@ function formatUptime(seconds: number): string {
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : '操作失败';
-}
-
-const RECALL_STRATEGY_LABELS: Record<string, string> = {
-  none: '未召回',
-  embedding: '语义向量',
-  fts: '关键词检索'
-};
-const RECALL_FALLBACK_LABELS: Record<string, string> = {
-  'no memories stored': '尚未存储记忆',
-  'memory disabled': '记忆功能未启用',
-  'embedding provider not configured': '未配置向量模型',
-  'no memories carry embeddings of the current dimension': '现有记忆没有可用的同维度向量'
-};
-const MEMORY_KIND_LABELS: Record<string, string> = {
-  fact: '事实', preference: '偏好', event: '事件', relationship: '关系', summary: '摘要'
-};
-const MEDIA_KIND_LABELS: Record<string, string> = {
-  image: '图片', sticker: '表情包', audio: '语音', file: '文件'
-};
-const RECALL_DROP_LABELS: Record<string, string> = {
-  deduplicated_persona: '与人设重复',
-  deduplicated_summary: '与阶段摘要重复',
-  deduplicated_recent: '与近期对话重复',
-  budget: '超出上下文预算'
-};
-
-function recallStrategyLabel(value: string): string {
-  return RECALL_STRATEGY_LABELS[value] ?? value;
-}
-
-function recallFallbackLabel(value: string): string {
-  if (RECALL_FALLBACK_LABELS[value]) return RECALL_FALLBACK_LABELS[value]!;
-  if (value.startsWith('embedding dimension mismatch')) return '向量维度不匹配';
-  if (value.startsWith('embedding provider failed')) return '向量服务调用失败';
-  return value;
-}
-
-function recallDropLabel(value: string | undefined): string {
-  if (!value) return '未知';
-  return RECALL_DROP_LABELS[value] ?? value;
-}
-
-function recallMatchReasonLabel(value: string): string {
-  if (value === 'FTS lexical match') return '关键词匹配';
-  const embedding = value.match(/^embedding cosine ([\d.]+)(, reranked)?$/);
-  if (embedding) return `语义相似度 ${embedding[1]}${embedding[2] ? '，经重排' : ''}`;
-  return value;
 }
 
 function capabilityCounts(c: Record<string, unknown>) {
@@ -383,7 +332,7 @@ function ModelLibrary({ onNotice, onApplied, reloadKey = 0 }: { onNotice: (v: st
 
   return (
     <section className="admin-model-library" data-testid="admin-model-library" data-admin-dirty-scope="model-library">
-      <PanelHeading title="模型库" description="保存模型及其服务器端密钥绑定，指派时一起切换；密钥不会返回浏览器。旧预设仍沿用该能力当前的密钥。" />
+      <PanelHeading title="模型库" description="保存模型及其设备端密钥绑定，指派时一起切换；密钥只进本机 Keychain，不回传界面。旧预设仍沿用该能力当前的密钥。" />
       {groups.length === 0 && <p className="admin-muted">还没有预设。把下面的配置填好后点「存入模型库」，就能在不同模型之间随时切换。</p>}
       {groups.map(([slot, items]) => (
         <div className="admin-preset-group" key={slot}>
@@ -539,6 +488,7 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
     setTestResult(null);
     try {
       const r = await adminApi.testModel(selected, selected === 'image');
+      if (!r.ok) throw new Error(r.detail || '连接测试失败');
       const text = `连接正常：${r.provider}${r.model ? ` / ${r.model}` : ''}，${r.detail}，耗时 ${r.latencyMs} ms`;
       setTestResult({ ok: true, text });
       onNotice(text);
@@ -598,7 +548,7 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
             onNotice={onNotice}
           />
         </> : <>
-        <PanelHeading title={CAPABILITIES.find(([k]) => k === selected)?.[1] ?? '模型配置'} description={CAPABILITY_DESCRIPTIONS[selected] ?? '编辑当前能力使用的真实服务端配置。'} />
+        <PanelHeading title={CAPABILITIES.find(([k]) => k === selected)?.[1] ?? '模型配置'} description={CAPABILITY_DESCRIPTIONS[selected] ?? '编辑当前能力在设备端使用的真实服务配置。'} />
         <ModelLibrary onNotice={onNotice} onApplied={setModels} reloadKey={libraryKey} />
         <label>接口协议<select value={String(config.provider ?? 'none')} onChange={(e) => update('provider', e.target.value)}>
           {interfaceOptions(selected, config.provider == null ? null : String(config.provider)).map((option) => (
@@ -619,7 +569,7 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
               ? `拉取到 ${available.length} 个模型，点输入框可选；列表可能不全，仍可手填。`
               : discoveryUnsupported
                 ? 'Anuma 不提供模型列表接口，请直接填写供应商提供的模型名。'
-                : '从接口地址拉取该服务提供的模型名。密钥不会离开服务器。'}
+                : '从接口地址拉取该服务提供的模型名。密钥只进本机 Keychain，不会离开设备。'}
           </small>
         </label>
         <label className="admin-form-wide">
@@ -709,11 +659,6 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
             <input value={String((config as Record<string, unknown>).referenceId ?? '')} placeholder="例如 f729a143b9a34005bdae0b21697fa41a" onChange={(e) => update('referenceId', e.target.value)} />
             <small>Fish 持久声线 ID（voice model）。留空则使用 Fish 默认音色。</small>
           </label>
-          <label className="admin-form-wide">
-            API Key 环境变量名
-            <input value={String((config as Record<string, unknown>).apiKeyEnv ?? '')} placeholder="FISH_API_KEY" onChange={(e) => update('apiKeyEnv', e.target.value)} />
-            <small>密钥不写入 models.json，从该环境变量读取。例如 FISH_API_KEY。</small>
-          </label>
           <label>采样温度（0.55–0.75 角色更稳）<input type="number" step="0.05" min="0" max="2" value={String((config as Record<string, unknown>).temperature ?? 0.65)} onChange={(e) => update('temperature', Number(e.target.value))} /></label>
           <label>Top-P<input type="number" step="0.05" min="0" max="1" value={String((config as Record<string, unknown>).topP ?? 0.7)} onChange={(e) => update('topP', Number(e.target.value))} /></label>
           <label>分块长度（字符）<input type="number" step="10" min="50" max="500" value={String((config as Record<string, unknown>).chunkLength ?? 200)} onChange={(e) => update('chunkLength', Number(e.target.value))} /></label>
@@ -771,144 +716,6 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
       </div>
     </section>
   );
-}
-
-function ContentPanel({ onNotice }: { onNotice: (v: string) => void }) {
-  const [memories, setMemories] = useState<AdminMemory[]>([]);
-  const [recall, setRecall] = useState<AdminRecallTrace | null>(null);
-  const [stickers, setStickers] = useState<AdminSticker[]>([]);
-  const [media, setMedia] = useState<AdminMedia[]>([]);
-
-  const load = useCallback(async () => {
-    try {
-      const [m, s, d] = await Promise.all([adminApi.memories(), adminApi.stickers(), adminApi.media()]);
-      setMemories(m.memories);
-      setRecall(m.recall ?? null);
-      setStickers(s.stickers);
-      setMedia(d.media);
-    } catch (e) {
-      onNotice(errorText(e));
-    }
-  }, [onNotice]);
-
-  useEffect(() => { void load(); }, [load]);
-
-  return (
-    <section className="admin-content" data-testid="admin-content">
-      <article className="admin-card" data-testid="admin-memory-list">
-        <div className="admin-card-subtitle"><h2>记忆</h2><span className="admin-count-badge">{memories.length}</span></div>
-        {memories.length ? memories.slice(0, 8).map((m) => <div className="admin-list-row" key={m.id}><span>{m.content}</span><button type="button" onClick={() => void adminApi.deleteMemory(m.id).then(load).catch((e) => onNotice(errorText(e)))}>删除</button></div>) : <EmptyState>暂无长期记忆</EmptyState>}
-        <div className="admin-actions"><button type="button" className="admin-danger" onClick={() => { if (confirmAction('确认清空全部记忆？')) void adminApi.clearMemories().then(load).catch((e) => onNotice(errorText(e))); }}>清空记忆</button></div>
-      </article>
-
-      {recall && <article className="admin-card" data-testid="admin-memory-recall">
-        <div className="admin-card-subtitle"><h2>最近一次记忆召回</h2><span>{recallStrategyLabel(recall.strategy)}</span></div>
-        <p>查询：{recall.query || '（无）'}</p>
-        <p>候选 {recall.stats.recalled} · 纳入 {recall.stats.included} · 去重 {recall.stats.deduplicated} · 超预算 {recall.stats.budgetDropped}</p>
-        {recall.fallbackReason && <p>回退原因：{recallFallbackLabel(recall.fallbackReason)}</p>}
-        {recall.entries.slice(0, 8).map((entry) => <div className="admin-list-row" key={entry.id}>
-          <span>{entry.included ? '已纳入' : `已丢弃（${recallDropLabel(entry.droppedReason)}）`} · {MEMORY_KIND_LABELS[entry.kind] ?? entry.kind} · {entry.content}</span>
-          <small>{recallStrategyLabel(entry.strategy)} · {recallMatchReasonLabel(entry.reason)}</small>
-        </div>)}
-        {!recall.entries.length && <EmptyState>最近一次没有召回记忆</EmptyState>}
-      </article>}
-
-      <article className="admin-card" data-testid="admin-sticker-list">
-        <div className="admin-card-subtitle"><h2>表情包</h2><span className="admin-count-badge">{stickers.length}</span></div>
-        {stickers.length ? <>
-          <div className="admin-actions">
-            <button type="button" onClick={() => void adminApi.analyzeStickerBatch().then((result) => { onNotice(`已排队 ${result.queued} 个表情包分析任务`); return load(); }).catch((e) => onNotice(errorText(e)))}>补齐/更新语义</button>
-          </div>
-          {stickers.slice(0, 20).map((sticker) => <StickerAdminRow key={sticker.id} sticker={sticker} onDone={load} onNotice={onNotice} />)}
-        </> : <EmptyState>暂无表情包</EmptyState>}
-        <StickerUpload onDone={load} onNotice={onNotice} />
-      </article>
-
-      <article className="admin-card" data-testid="admin-media-list">
-        <div className="admin-card-subtitle"><h2>媒体文件</h2><span className="admin-count-badge">{media.length}</span></div>
-        {media.length ? media.slice(0, 8).map((m) => <div className="admin-list-row" key={m.id}><span>{MEDIA_KIND_LABELS[m.kind] ?? m.kind} · {m.id.slice(-8)} · {formatBytes(m.bytes)}</span><button type="button" onClick={() => { if (confirmAction(`删除媒体 ${m.id.slice(-8)}？`)) void adminApi.deleteMedia(m.id).then(load).catch((e) => onNotice(errorText(e))); }}>删除</button></div>) : <EmptyState>暂无媒体文件</EmptyState>}
-      </article>
-
-      <article className="admin-card">
-        <h2>聊天记录</h2>
-        <p>永久会话仅支持整体清空，避免误删单条上下文造成记忆断裂。</p>
-        <div className="admin-actions"><button type="button" className="admin-danger" onClick={() => { if (confirmAction('确认清空全部聊天记录？此操作不可撤销。')) void adminApi.clearChat().then(() => onNotice('聊天记录已清空')).catch((e) => onNotice(errorText(e))); }}>清空聊天记录</button></div>
-      </article>
-    </section>
-  );
-}
-
-function stickerStatusLabel(status: AdminSticker['analysisStatus']): string {
-  return status === 'ready' ? '语义就绪' : status === 'processing' ? '分析中' : status === 'failed' ? '分析失败' : '待分析';
-}
-
-function StickerAdminRow({ sticker, onDone, onNotice }: { sticker: AdminSticker; onDone: () => Promise<void>; onNotice: (text: string) => void }) {
-  const [description, setDescription] = useState(sticker.description ?? '');
-  const [userMeaning, setUserMeaning] = useState(sticker.userMeaning ?? '');
-  const [busy, setBusy] = useState(false);
-  const saveSemantics = async () => {
-    setBusy(true);
-    try {
-      await adminApi.updateSticker(sticker.id, { description, userMeaning });
-      onNotice(`已保存「${sticker.name}」的语义`);
-      await onDone();
-      notifyAdminSaved(`sticker:${sticker.id}`);
-    } catch (error) {
-      onNotice(errorText(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-  const analyze = async () => {
-    setBusy(true);
-    try {
-      await adminApi.analyzeSticker(sticker.id, true);
-      onNotice(`已排队分析「${sticker.name}」`);
-      await onDone();
-    } catch (error) {
-      onNotice(errorText(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-  return <div className="admin-sticker-row" data-testid={`admin-sticker-${sticker.id}`} data-admin-dirty-scope={`sticker:${sticker.id}`}>
-    <div className="admin-list-row">
-      <span><strong>{sticker.name}</strong> · {emotionLabel(sticker.emotion)} · {stickerStatusLabel(sticker.analysisStatus)}{sticker.hasEmbedding ? ' · 已建向量' : ''}</span>
-      <span className="admin-actions">
-        <button type="button" disabled={busy || sticker.analysisStatus === 'processing'} onClick={() => void analyze()}>AI 重分析</button>
-        <button type="button" className="admin-danger" onClick={() => { if (confirmAction(`删除表情包“${sticker.name}”？`)) void adminApi.deleteSticker(sticker.id).then(onDone).catch((e) => onNotice(errorText(e))); }}>删除</button>
-      </span>
-    </div>
-    <details>
-      <summary>查看/编辑语义</summary>
-      <p className="admin-muted">{sticker.description || '暂无图像含义'}{sticker.imageText ? ` · 图片文字：${sticker.imageText}` : ''}</p>
-      {sticker.analysisError && <p className="admin-inline-error">分析错误：{sticker.analysisError}</p>}
-      <label>标准含义<textarea value={description} onChange={(event) => setDescription(event.target.value)} /></label>
-      <label>用户常见用法<textarea value={userMeaning} onChange={(event) => setUserMeaning(event.target.value)} /></label>
-      <button type="button" disabled={busy} onClick={() => void saveSemantics()}>保存语义</button>
-    </details>
-  </div>;
-}
-
-function StickerUpload({ onDone, onNotice }: { onDone: () => Promise<void>; onNotice: (s: string) => void }) {
-  const [file, setFile] = useState<File | null>(null);
-  const upload = async () => {
-    if (!file) return;
-    const form = new FormData();
-    form.append('name', file.name.replace(/\.[^.]+$/, ''));
-    form.append('emotion', 'neutral');
-    form.append('tags', 'neutral');
-    form.append('file', file);
-    try {
-      await adminApi.uploadSticker(form);
-      setFile(null);
-      await onDone();
-      onNotice('表情包已上传');
-    } catch (e) {
-      onNotice(errorText(e));
-    }
-  };
-  return <div className="admin-upload"><input type="file" accept="image/*" onChange={(e) => setFile(e.target.files?.[0] ?? null)} /><button type="button" disabled={!file} onClick={() => void upload()}>上传表情包</button></div>;
 }
 
 type AdminErrorGroup = {
@@ -1096,9 +903,10 @@ function OperationsPanel({ onNotice }: { onNotice: (v: string) => void }) {
 
   useEffect(() => { void load(); }, [load]);
 
-  const run = async (work: () => Promise<unknown>, message: string) => {
+  const run = async (work: () => Promise<unknown>, message: string, success?: (result: unknown) => void) => {
     try {
-      await work();
+      const result = await work();
+      if (success) success(result);
       await load();
       onNotice(message);
     } catch (e) {
@@ -1154,7 +962,7 @@ function OperationsPanel({ onNotice }: { onNotice: (v: string) => void }) {
 
       <article className="admin-card" data-testid="admin-backup-list">
         <div className="admin-card-heading"><div><h2>备份</h2><p>{backups.length} 份可用备份</p></div><button type="button" onClick={() => void run(() => adminApi.createBackup(), '备份已创建')}>创建备份</button></div>
-        {backups.length ? backups.map((b) => <div className="admin-list-row" key={b.name}><span>{b.name} · {formatBytes(b.bytes)}</span><div><button type="button" onClick={() => void run(() => adminApi.verifyBackup(b.name), '备份校验完成')}>校验</button><button type="button" onClick={() => { if (confirmAction(`确认恢复备份“${b.name}”？`)) void run(() => adminApi.restoreBackup(b.name), '备份已恢复，请刷新聊天页面'); }}>恢复</button><button type="button" className="admin-danger" onClick={() => { if (confirmAction(`确认删除备份“${b.name}”？`)) void run(() => adminApi.deleteBackup(b.name), '备份已删除'); }}>删除</button></div></div>) : <EmptyState>暂无备份，可先创建一份</EmptyState>}
+        {backups.length ? backups.map((b) => <div className="admin-list-row" key={b.name}><span>{b.name} · {formatBytes(b.bytes)}</span><div><button type="button" onClick={() => void run(() => adminApi.verifyBackup(b.name), '备份校验完成', (result) => { const value = result as { verified?: boolean }; if (value.verified === false) throw new Error('备份校验未通过'); })}>校验</button><button type="button" onClick={() => { if (confirmAction(`确认恢复备份“${b.name}”？`)) void run(() => adminApi.restoreBackup(b.name), '备份已恢复，请刷新聊天页面', (result) => { const value = result as { verified?: boolean }; if (value.verified === false) throw new Error('备份恢复未通过校验'); }); }}>恢复</button><button type="button" className="admin-danger" onClick={() => { if (confirmAction(`确认删除备份“${b.name}”？`)) void run(() => adminApi.deleteBackup(b.name), '备份已删除', (result) => { if (!(result as { deleted?: boolean }).deleted) throw new Error('备份删除失败'); }); }}>删除</button></div></div>) : <EmptyState>暂无备份，可先创建一份</EmptyState>}
       </article>
     </section>
   );
@@ -1199,14 +1007,15 @@ function Overview({ data, counts, onRefresh }: { data: Dashboard; counts: { avai
   const storage = data.system.storage;
   const tiles = [
     { label: '消息与记忆', value: `${Number(db.messages ?? 0).toLocaleString()} 条消息`, detail: `${Number(db.memories ?? 0).toLocaleString()} 条记忆`, icon: 'message' as const },
-    { label: '模型能力', value: `${counts.available} / ${counts.total} 可用`, detail: '按服务端实际能力统计', icon: 'cpu' as const },
+    { label: '模型能力', value: `${counts.available} / ${counts.total} 可用`, detail: '按设备端实际能力统计', icon: 'cpu' as const },
     { label: '存储占用', value: formatBytes(storage.mediaBytes), detail: `${Number(db.media ?? 0).toLocaleString()} 个媒体文件`, icon: 'storage' as const },
     { label: '备份', value: `${data.backups.length} 份`, detail: `待处理任务 ${Number(db.pendingJobs ?? 0)}`, icon: 'backup' as const }
   ];
 
+  const healthy = data.system.database.ok !== false && data.system.healthy !== false;
   return <>
     <section className="admin-status-card" data-testid="admin-system-status">
-      <div><span className="admin-health-dot" /><strong>运行正常</strong></div>
+      <div><span className={`admin-health-dot${healthy ? '' : ' degraded'}`} /><strong>{healthy ? '运行正常' : '需要检查'}</strong></div>
       <span>版本 {data.system.version}</span>
       <span>已运行 {formatUptime(data.system.uptimeSec)}</span>
       <button type="button" onClick={onRefresh}>刷新状态</button>
@@ -1277,8 +1086,7 @@ export default function AdminPanel({ initialTab = 'overview' }: { initialTab?: T
   useEffect(() => {
     const routeTab = tabFromAdminPath(window.location.pathname, initialTab);
     const normalizedPath = window.location.pathname.replace(/\/+$/, '') || '/admin';
-    const preserveLegacyContent = routeTab === 'content' && normalizedPath === '/admin/content' && initialTab === 'content';
-    const canonicalPath = preserveLegacyContent || (routeTab === 'content' && isContentSubroute(normalizedPath))
+    const canonicalPath = routeTab === 'content' && isContentSubroute(normalizedPath)
       ? window.location.pathname
       : adminPathForTab(routeTab);
     if (window.location.pathname !== canonicalPath) {
@@ -1402,7 +1210,7 @@ export default function AdminPanel({ initialTab = 'overview' }: { initialTab?: T
                 : tab === 'mcp'
                   ? <McpAdminPage onNotice={setNotice} />
                 : tab === 'content'
-                  ? isContentSubroute(window.location.pathname) ? <ContentManagementPage onNotice={setNotice} /> : <ContentPanel onNotice={setNotice} />
+                  ? <ContentManagementPage onNotice={setNotice} />
                   : tab === 'storage'
                     ? <StorageEditor onNotice={setNotice} />
                     : <OperationsPanel onNotice={setNotice} />;

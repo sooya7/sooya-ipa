@@ -66,6 +66,11 @@ export class CapacitorDatabase implements LocalDatabase {
   }
   async backup(name: string): Promise<DatabaseBackupResult> { return await this.plugin.call<DatabaseBackupResult>('backup', { name }); }
   async restore(name: string): Promise<void> { await this.plugin.call('restore', { name }); }
+  async verifyBackup(name: string): Promise<DatabaseBackupResult> { return await this.plugin.call<DatabaseBackupResult>('verifyBackup', { name }); }
+  async deleteBackup(name: string): Promise<boolean> {
+    const result = await this.plugin.call<{ deleted?: boolean }>('deleteBackup', { name });
+    return result.deleted === true;
+  }
 }
 
 export class CapacitorSecrets implements SecretsPlatform {
@@ -181,7 +186,12 @@ export async function installNativeLocalCore(): Promise<boolean> {
   const secrets = new CapacitorSecrets();
   const http = new CapacitorHttp();
   nativeBuiltinMedia = mediaStore;
-  const core = new NativeLocalCore({ db, secrets, mediaStore, http, mcp: new CapacitorMcp(), toolRegistry: registry, toolPolicy: policy, toolRuntime: runtime });
+  let runtimeVersion = 'local';
+  try {
+    const release = await getNativeReleaseInfo();
+    runtimeVersion = `${release.nativeBaseVersion}.${release.bridgeVersion}`;
+  } catch { /* release plugin is optional for diagnostics */ }
+  const core = new NativeLocalCore({ db, secrets, mediaStore, http, mcp: new CapacitorMcp(), toolRegistry: registry, toolPolicy: policy, toolRuntime: runtime, version: runtimeVersion });
   await ensureNativeCompanionState(core);
   await seedServerPersonaOnce(core.settingsRepo);
   installReplyFeatureRuntime({

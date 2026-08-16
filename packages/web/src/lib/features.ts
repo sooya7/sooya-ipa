@@ -29,6 +29,8 @@ export interface PersonaReference {
   exists: boolean;
   bytes: number;
   framing: 'side' | 'full-body' | 'front';
+  /** Set for user-uploaded slots; null means the bundled asset is active. */
+  mediaId?: string | null;
 }
 
 export interface LifeSnapshot {
@@ -256,7 +258,18 @@ export const featureApi = {
     return request<Record<string, any>>('/api/admin/voice');
   },
   /** 语音试听：模型配置 → 语音合成 使用；Fish 与 OpenAI/Volc 同样可用。 */
-  previewVoice: (text: string, emotion: string) => request<Blob>('/api/admin/voice/preview', { method: 'POST', body: { text, emotion }, raw: true }),
+  previewVoice: async (text: string, emotion: string): Promise<Blob> => {
+    const local = currentSooyaClient();
+    if (local?.adminRequest) {
+      const result = await local.adminRequest<{ ok?: boolean; dataBase64?: string; mime?: string; detail?: string }>('/api/admin/voice/preview', { method: 'POST', body: { text, emotion } });
+      if (result.ok !== true || !result.dataBase64) throw new Error(result.detail ?? '语音试听没有返回音频');
+      const binary = atob(result.dataBase64);
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+      return new Blob([bytes], { type: result.mime ?? 'audio/mpeg' });
+    }
+    return await request<Blob>('/api/admin/voice/preview', { method: 'POST', body: { text, emotion }, raw: true });
+  },
 
   life: () => request<LifePanelData>('/api/admin/life'),
   createLifePlan: (body: { title: string; kind: string; plannedStart?: string | null; plannedEnd?: string | null; priority?: number }) =>

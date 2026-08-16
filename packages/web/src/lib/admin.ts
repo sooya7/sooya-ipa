@@ -111,8 +111,9 @@ export interface AdminSystemStatus {
   platform: string;
   memoryMb: number;
   loadAvg: number[];
-  database: Record<string, unknown>;
-  storage: Record<string, unknown>;
+  healthy?: boolean;
+  database: { ok?: boolean; integrity?: string[]; foreignKeys?: unknown[]; messages?: number; memories?: number; media?: number; pendingJobs?: number; mediaBytes?: number };
+  storage: { mode?: string; mediaBytes?: number; backupBytes?: number; freeBytes?: number | null };
   stream: Record<string, unknown>;
   agent: Record<string, unknown>;
 }
@@ -120,6 +121,43 @@ export interface AdminSystemStatus {
 export interface AdminCapabilities {
   capabilities: Record<string, unknown>;
   embeddingDimensions: number | null;
+}
+
+export interface AdminNativeCapabilities {
+  [capability: string]: boolean;
+  storage: boolean;
+  storagePolicy: boolean;
+  storageCleanup: boolean;
+  runtimeLogs: boolean;
+  audit: boolean;
+  metrics: boolean;
+  errors: boolean;
+  jobs: boolean;
+  backupCreate: boolean;
+  backupVerify: boolean;
+  backupDelete: boolean;
+  backupRestore: boolean;
+  chatHistoryFilters: boolean;
+  mediaStateAll: boolean;
+  mediaRefProtection: boolean;
+  stickerFacets: boolean;
+  stickerForceAnalysis: boolean;
+  memoryLocalSearch: boolean;
+  memoryActivity: boolean;
+  memorySync: boolean;
+  ombreRemoteSearch: boolean;
+  modelDiscovery: boolean;
+  modelProbe: boolean;
+  webSearchProbe: boolean;
+  ttsPreview: boolean;
+  lifeThreads: boolean;
+  lifeProactive: boolean;
+  lifeVitals: boolean;
+  lifeCities: boolean;
+  lifeLocationOverride: boolean;
+  mcpOverview: boolean;
+  mcpUrlSanitized: boolean;
+  mcpToolSchema: boolean;
 }
 
 export interface AdminBackup {
@@ -165,12 +203,9 @@ export interface AdminWebSearchConfig {
   };
 }
 
-export interface WebSearchTestResult {
-  ok: true;
-  provider: AdminWebSearchProvider;
-  latencyMs: number;
-  resultCount: number;
-}
+export type WebSearchTestResult =
+  | { ok: true; provider: AdminWebSearchProvider; latencyMs: number; resultCount: number; citations?: Array<{ title: string; url: string }>; detail?: string }
+  | { ok: false; provider: AdminWebSearchProvider | 'unknown'; latencyMs: number; resultCount: number; detail: string };
 
 export type AdminModels = Record<string, Record<string, unknown> | AdminWebSearchConfig | number | undefined>;
 
@@ -328,14 +363,9 @@ export interface AdminError {
 }
 
 /** Reply of a one-shot connectivity probe against the slot's saved config. */
-export interface ModelTestResult {
-  ok: true;
-  slot: ModelSlot;
-  provider: string;
-  model?: string;
-  latencyMs: number;
-  detail: string;
-}
+export type ModelTestResult =
+  | { ok: true; slot: ModelSlot; provider: string; model?: string; latencyMs: number; detail: string }
+  | { ok: false; slot: ModelSlot; provider: string; model?: string; latencyMs: number; detail: string };
 
 export interface AdminJob {
   id: string;
@@ -452,6 +482,7 @@ export interface MetricAggregate { category: string; metric: string; sum: number
 export const adminApi = {
   system: () => adminRequest<AdminSystemStatus>('/api/admin/system'),
   capabilities: () => adminRequest<AdminCapabilities>('/api/admin/capabilities'),
+  nativeCapabilities: () => adminRequest<AdminNativeCapabilities>('/api/admin/native-capabilities'),
   persona: () => adminRequest<{ persona: AdminPersona }>('/api/admin/persona'),
   updatePersona: (patch: Partial<AdminPersona>) =>
     adminRequest<{ persona: AdminPersona }>('/api/admin/persona', { method: 'PUT', body: patch }),
@@ -548,7 +579,6 @@ export const adminApi = {
   ombreSearch: (query: string, limit = 10) => adminRequest<{ query: string; results: Array<Record<string, unknown>>; raw: string; resultCount: number }>(`/api/admin/memory/ombre/search?q=${encodeURIComponent(query)}&limit=${limit}`),
   ombreCatalog: (limit = 50) => adminRequest<Record<string, unknown>>(`/api/admin/memory/ombre/catalog?limit=${limit}`),
   ombreActivity: (limit = 50) => adminRequest<{ activity: AdminActivityItem[] }>(`/api/admin/memory/activity?limit=${limit}`),
-  legacyMemories: (limit = 100, offset = 0) => adminRequest<{ memories: AdminMemory[]; total: number; readOnly: true }>(`/api/admin/memory/legacy?limit=${limit}&offset=${offset}`),
   deleteMemory: (id: string) =>
     adminRequest<{ deleted: boolean }>(`/api/admin/memories/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   clearMemories: () => adminRequest<{ cleared: boolean }>('/api/admin/memories/clear', { method: 'POST' }),

@@ -98,5 +98,14 @@ describe('WebSearchModelEditor', () => {
     expect(api.testWebSearch).toHaveBeenCalledWith('doubao', 'OpenAI');
     expect(container!.textContent).toContain('2 条结果');
   });
+
+  it('does not report success when the native probe returns ok:false', async () => {
+    api.testWebSearch.mockResolvedValueOnce({ ok: false, provider: 'doubao', latencyMs: 8, resultCount: 0, detail: '接口拒绝了这次请求' } as never);
+    await act(async () => root!.render(<WebSearchModelEditor config={config} responsesAvailable onSaved={vi.fn()} onNotice={vi.fn()} />));
+    await act(async () => (container!.querySelector('[aria-label="测试豆包"]') as HTMLButtonElement).click());
+
+    expect(container!.textContent).toContain('接口拒绝了这次请求');
+    expect(container!.textContent).not.toContain('连接正常');
+  });
 });
 

@@ -41,6 +41,7 @@
     "@capacitor/cli": "8.5.0",
     "@capacitor/ios": "8.5.0",
     "@types/better-sqlite3": "^7.6.12",
+    "@vitejs/plugin-react": "^4.7.0",
     "better-sqlite3": "^12.11.1"
   }
 }

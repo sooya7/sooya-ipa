@@ -44,11 +44,13 @@ export interface GalleryQuery {
   offset?: number;
   kind?: MediaRow['kind'];
   origin?: MediaRow['origin'];
-  deleted?: boolean;
+  /** true = trash only, false = active only, null/undefined = both. */
+  deleted?: boolean | null;
   favorite?: boolean;
   search?: string;
   from?: string;
   to?: string;
+  /** true = avatars only, false = non-avatars only, undefined = all. */
   avatar?: boolean;
 }
 
@@ -164,6 +166,16 @@ export class MediaRepo {
   async restore(id: string): Promise<boolean> { return (await this.db.run('UPDATE media SET deleted_at = NULL WHERE id = ?', [id])).changes > 0; }
   async setFavorite(id: string, favorite: boolean): Promise<boolean> { return (await this.db.run('UPDATE media SET favorite = ? WHERE id = ?', [favorite ? 1 : 0, id])).changes > 0; }
 
+  async setAvatarFlag(id: string, avatar: boolean): Promise<boolean> {
+    const row = await this.get(id);
+    if (!row) return false;
+    let meta: Record<string, unknown> = {};
+    try { meta = JSON.parse(row.meta_json) as Record<string, unknown>; } catch { /* invalid legacy metadata */ }
+    if (avatar) meta.avatar = true;
+    else delete meta.avatar;
+    return (await this.db.run('UPDATE media SET meta_json = ? WHERE id = ?', [JSON.stringify(meta), id])).changes > 0;
+  }
+
   async setTags(id: string, tags: string[]): Promise<boolean> {
     const normalized = [...new Set(tags.map((value) => value.trim()).filter(Boolean))].slice(0, 30);
     return (await this.db.run('UPDATE media SET tags_json = ? WHERE id = ?', [JSON.stringify(normalized), id])).changes > 0;
@@ -184,6 +196,11 @@ export class MediaRepo {
     return { messageParts, stickers, moments, voiceGenerations, total: messageParts + stickers + moments + voiceGenerations };
   }
 
+  async isAvatar(id: string): Promise<boolean> {
+    const row = await queryOne<{ avatar: unknown }>(this.db, `SELECT ${AVATAR_META} avatar FROM media m WHERE m.id = ?`, [id]);
+    return row?.avatar !== null && row?.avatar !== undefined && row.avatar !== 0;
+  }
+
   async allRows(): Promise<MediaRow[]> { return await this.db.query<MediaRow>('SELECT * FROM media ORDER BY created_at DESC'); }
   async listExpiredTrash(cutoff: string, limit = 500): Promise<MediaRow[]> { return await this.db.query<MediaRow>('SELECT * FROM media WHERE deleted_at IS NOT NULL AND deleted_at < ? ORDER BY deleted_at LIMIT ?', [cutoff, clampInteger(limit, 1, 5000)]); }
   async findBySha(sha: string, kind: MediaRow['kind']): Promise<MediaRow | undefined> { return await queryOne<MediaRow>(this.db, 'SELECT * FROM media WHERE sha256 = ? AND kind = ? AND deleted_at IS NULL LIMIT 1', [sha, kind]); }
@@ -195,8 +212,9 @@ function galleryWhere(input: GalleryQuery): { where: string[]; values: Array<str
   if (input.kind) { where.push('m.kind = ?'); values.push(input.kind); }
   if (input.origin) { where.push('m.origin = ?'); values.push(input.origin); }
   if (input.deleted === true) where.push('m.deleted_at IS NOT NULL');
-  else where.push('m.deleted_at IS NULL');
-  where.push(input.avatar === true ? `${AVATAR_META} IS NOT NULL` : `${AVATAR_META} IS NULL`);
+  else if (input.deleted === false) where.push('m.deleted_at IS NULL');
+  if (input.avatar === true) where.push(`${AVATAR_META} IS NOT NULL`);
+  else if (input.avatar === false) where.push(`${AVATAR_META} IS NULL`);
   if (input.favorite) where.push('m.favorite = 1');
   if (input.from) { where.push('m.created_at >= ?'); values.push(input.from); }
   if (input.to) { where.push('m.created_at <= ?'); values.push(input.to); }

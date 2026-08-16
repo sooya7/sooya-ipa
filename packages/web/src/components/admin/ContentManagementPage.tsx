@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { AuthenticatedAudio, AuthenticatedImage } from '../AuthenticatedMedia.js';
 import { mediaThumbnailPath } from '../../lib/authenticatedMedia.js';
-import { adminApi, type AdminActivityItem, type AdminChatMessage, type AdminMedia, type AdminMemory, type AdminOmbreStatus, type AdminSticker } from '../../lib/admin.js';
+import { adminApi, type AdminActivityItem, type AdminChatMessage, type AdminMedia, type AdminOmbreStatus, type AdminSticker } from '../../lib/admin.js';
 import { featureApi } from '../../lib/features.js';
 import { navigate, APP_NAVIGATION_EVENT } from '../../lib/navigation.js';
 import { AdminState, adminStateFromError } from './AdminState.js';
@@ -46,7 +46,6 @@ function PageFrame({ title, description, children, actions }: { title: string; d
 function MemoryPage({ onNotice }: { onNotice: (message: string) => void }) {
   const [status, setStatus] = useState<AdminOmbreStatus | null>(null);
   const [activity, setActivity] = useState<AdminActivityItem[]>([]);
-  const [legacy, setLegacy] = useState<{ memories: AdminMemory[]; total: number } | null>(null);
   const [query, setQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState<Array<Record<string, unknown>> | null>(null);
@@ -57,10 +56,9 @@ function MemoryPage({ onNotice }: { onNotice: (message: string) => void }) {
 
   const load = useCallback(async () => {
     try {
-      const [nextStatus, nextActivity, nextLegacy] = await Promise.all([adminApi.ombreStatus(), adminApi.ombreActivity(50), adminApi.legacyMemories(100)]);
+      const [nextStatus, nextActivity] = await Promise.all([adminApi.ombreStatus(), adminApi.ombreActivity(50)]);
       setStatus(nextStatus);
       setActivity(nextActivity.activity);
-      setLegacy(nextLegacy);
       setError(null);
     } catch (cause) {
       const mapped = adminStateFromError(cause);
@@ -97,8 +95,9 @@ function MemoryPage({ onNotice }: { onNotice: (message: string) => void }) {
   const syncMemory = async () => {
     setSyncing(true);
     try {
-      await adminApi.syncMemory();
-      onNotice('记忆同步已完成');
+      const result = await adminApi.syncMemory();
+      if (result.state === 'unavailable' || result.state === 'failed') throw new Error(result.detail || `记忆同步未完成（${result.state}）`);
+      onNotice(`记忆同步已完成：推送 ${result.pushed} 条，拉取 ${result.pulled} 条`);
       await load();
     } catch (cause) {
       onNotice(cause instanceof Error ? cause.message : '记忆同步失败');
@@ -107,22 +106,21 @@ function MemoryPage({ onNotice }: { onNotice: (message: string) => void }) {
     }
   };
 
-  return <PageFrame title="她的记忆" description="Ombre 在线时优先召回，Local SQLite 永久保留可用镜像；断网时自动降级，不影响聊天。">
+  return <PageFrame title="她的记忆" description="本地记忆优先可用；Ombre 在线时自动同步，断网时自动降级，不影响聊天。">
     {error && <AdminState kind="error" message={error} onRetry={() => void load()} />}
     {status && <section className="admin-memory-status" data-testid="admin-ombre-status">
       <article className="admin-card"><span className="admin-card-kicker">连接状态</span><strong>{status.connection === 'connected' ? 'Ombre Brain' : 'Ombre Brain · degraded'}</strong><span className={`admin-status-chip ${status.connection === 'connected' ? 'is-ready' : 'is-warn'}`}>{status.connection === 'connected' ? '已连接' : '降级'}</span></article>
       <article className="admin-card"><span className="admin-card-kicker">同步状态</span><strong>{status.sync?.state ?? (status.connection === 'connected' ? 'ready' : 'degraded')}</strong><small>待推送 {status.sync?.pendingPush ?? status.pending} · 冲突 {status.sync?.conflicts ?? 0}</small></article>
-      <article className="admin-card"><span className="admin-card-kicker">最近整理</span><strong>{dateText(status.lastDream)}</strong><small>Dashboard {status.dashboardUrl ? <a href={status.dashboardUrl} target="_blank" rel="noreferrer">打开</a> : '仅服务器本地可用或未配置'}</small></article>
+      <article className="admin-card"><span className="admin-card-kicker">最近同步</span><strong>{dateText(status.sync?.lastSyncAt ?? null)}</strong><small>Ombre {status.backend} · {status.connection === 'connected' ? '已连接' : '本地可用'}</small></article>
     </section>}
     <section className="admin-card admin-memory-search">
-      <div className="admin-card-heading"><div><h3>搜索她的记忆</h3><p>查询通过 Ombre MCP 的只读 breath_search；搜索结果不会进入回复上下文。</p></div></div>
+      <div className="admin-card-heading"><div><h3>搜索她的记忆</h3><p>搜索本地 SQLite 记忆镜像；结果只读展示，不会进入回复上下文。</p></div></div>
       <form onSubmit={search} className="admin-inline-search"><input aria-label="搜索她的记忆" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="例如：她喜欢的事情…" /><button type="submit" disabled={searching || !query.trim()}>{searching ? '搜索中…' : '搜索'}</button></form>
       {results && <div className="admin-memory-results">{results.map((result, index) => <article className="admin-memory-result" key={`${index}-${String(result.bucketId ?? '')}`}><strong>{typeof result.bucketId === 'string' ? `bucket ${result.bucketId}` : '记忆结果'}</strong><p>{String(result.raw ?? '')}</p>{typeof result.score === 'number' && <small>score {result.score}</small>}</article>)}</div>}
       <div className="admin-actions"><button type="button" onClick={() => void browseCatalog()} disabled={catalogState === 'loading'}>{catalogState === 'loading' ? '读取目录中…' : '浏览记忆目录'}</button><button type="button" onClick={() => void syncMemory()} disabled={syncing}>{syncing ? '同步中…' : '立即同步'}</button>{catalogState === 'unsupported' && <span className="admin-muted">当前 Ombre schema 未提供 catalog 能力</span>}</div>
       {catalog && <pre className="admin-safe-pre">{JSON.stringify(catalog, null, 2)}</pre>}
     </section>
-    <section className="admin-card"><div className="admin-card-heading"><div><h3>最近记忆活动</h3><p>仅保留安全摘要，不展示 prompt、tool args 或完整记忆正文。</p></div></div>{activity.length ? activity.map((item) => <div className="admin-list-row" key={item.id}><span><strong>{item.type}</strong><small>{JSON.stringify(item.detail)}</small></span><small>{dateText(item.createdAt)}</small></div>) : <AdminState kind="empty" message="暂无 Ombre 活动" />}</section>
-    <details className="admin-card admin-legacy-memory"><summary>旧 SOOYA 记忆 · 只读回滚观察（{legacy?.total ?? 0}）</summary><p>当前 Ombre 模式不读取、不编辑、不删除这批数据。</p>{legacy?.memories.map((memory) => <div className="admin-list-row" key={memory.id}><span>{memory.content}</span><small>{memory.kind} · {dateText(memory.updatedAt)}</small></div>)}</details>
+    <section className="admin-card"><div className="admin-card-heading"><div><h3>最近记忆操作</h3><p>显示本地与 Ombre 同步队列最近的操作，不展示记忆正文或 prompt。</p></div></div>{activity.length ? activity.map((item) => <div className="admin-list-row" key={item.id}><span><strong>{item.type}</strong><small>{JSON.stringify(item.detail)}</small></span><small>{dateText(item.createdAt)}</small></div>) : <AdminState kind="empty" message="暂无最近记忆操作" />}</section>
   </PageFrame>;
 }
 
@@ -156,7 +154,8 @@ function StickerPage({ onNotice }: { onNotice: (message: string) => void }) {
       form.append('emotion', emotion || 'neutral');
       form.append('tags', emotion || 'neutral');
       form.append('file', uploadFile);
-      await adminApi.uploadSticker(form);
+      const uploaded = await adminApi.uploadSticker(form);
+      if (uploaded.created.length === 0) throw new Error(uploaded.failed[0]?.error ?? '表情包上传失败');
       setUploadFile(null);
       onNotice('表情包已上传');
       await load();
@@ -201,13 +200,13 @@ function MediaPage({ onNotice }: { onNotice: (message: string) => void }) {
   const load = useCallback(async () => { setLoading(true); try { const result = await adminApi.adminMedia({ q: query, kind: kind || undefined, origin: origin || undefined, state, limit: 40 }); setItems(result.media); setTotal(result.total); } catch (cause) { onNotice(cause instanceof Error ? cause.message : '媒体库加载失败'); } finally { setLoading(false); } }, [kind, onNotice, origin, query, state]);
   useEffect(() => { void load(); }, [load]);
   const open = async (item: AdminMedia) => { setSelected(item); try { setUsage(await adminApi.mediaUsage(item.id)); } catch (cause) { onNotice(cause instanceof Error ? cause.message : '媒体引用加载失败'); } };
-  const trash = async (item: AdminMedia) => { try { await featureApi.trashMedia(item.id); onNotice('媒体已移入回收站'); await load(); setSelected(null); } catch (cause) { onNotice(cause instanceof Error ? cause.message : '媒体回收失败'); } };
-  const restore = async (item: AdminMedia) => { try { await featureApi.restoreMedia(item.id); onNotice('媒体已恢复'); await load(); setSelected(null); } catch (cause) { onNotice(cause instanceof Error ? cause.message : '媒体恢复失败'); } };
-  const removePermanently = async (item: AdminMedia) => { if (!window.confirm('确认永久删除这个媒体？该操作不可撤销。')) return; try { await featureApi.deleteMedia(item.id); onNotice('媒体已永久删除'); await load(); setSelected(null); } catch (cause) { onNotice(cause instanceof Error ? cause.message : '媒体永久删除失败'); } };
+  const trash = async (item: AdminMedia) => { try { const result = await featureApi.trashMedia(item.id); if (!result.trashed) throw new Error('媒体未移入回收站'); onNotice('媒体已移入回收站'); await load(); setSelected(null); } catch (cause) { onNotice(cause instanceof Error ? cause.message : '媒体回收失败'); } };
+  const restore = async (item: AdminMedia) => { try { const result = await featureApi.restoreMedia(item.id); if (!result.restored) throw new Error('媒体恢复失败'); onNotice('媒体已恢复'); await load(); setSelected(null); } catch (cause) { onNotice(cause instanceof Error ? cause.message : '媒体恢复失败'); } };
+  const removePermanently = async (item: AdminMedia) => { if (!window.confirm('确认永久删除这个媒体？该操作不可撤销。')) return; try { const result = await featureApi.deleteMedia(item.id); if (!result.deleted) throw new Error('媒体永久删除失败'); onNotice('媒体已永久删除'); await load(); setSelected(null); } catch (cause) { onNotice(cause instanceof Error ? cause.message : '媒体永久删除失败'); } };
   return <PageFrame title="媒体库" description="查看图片、音频、表情和文件的预览、来源与引用；被引用或作为头像的媒体不会被回收。" actions={<span className="admin-count-badge">{total}</span>}>
     <div className="admin-content-toolbar"><input aria-label="搜索媒体" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文件名、标签或消息内容" /><select aria-label="媒体类型" value={kind} onChange={(event) => setKind(event.target.value)}><option value="">全部类型</option><option value="image">图片</option><option value="audio">音频</option><option value="sticker">表情</option><option value="file">文件</option></select><select aria-label="媒体来源" value={origin} onChange={(event) => setOrigin(event.target.value)}><option value="">全部来源</option><option value="upload">上传</option><option value="generated">生成</option><option value="builtin">内置</option><option value="remote">远程</option></select><select aria-label="媒体状态" value={state} onChange={(event) => setState(event.target.value as typeof state)}><option value="active">当前媒体</option><option value="trashed">回收站</option><option value="all">全部</option></select><button type="button" onClick={() => void load()} disabled={loading}>应用</button></div>
     {loading ? <AdminState kind="loading" /> : items.length === 0 ? <AdminState kind="empty" message="没有符合条件的媒体" /> : <div className="admin-media-grid" data-testid="admin-media-grid">{items.map((item) => <button type="button" className="admin-media-card" key={item.id} onClick={() => void open(item)}>{item.kind === 'image' || item.kind === 'sticker' ? <AuthenticatedImage path={mediaThumbnailPath(item.url, 240)} scope="admin" alt={item.name ?? item.id} /> : <span className="admin-media-file" aria-label={`${item.kind} 文件`}>{item.kind.toUpperCase()}</span>}<span><strong>{item.name ?? item.id.slice(-12)}</strong><small>{item.origin} · {formatBytes(item.bytes)}</small><small>引用 {item.usageCount ?? 0}</small></span></button>)}</div>}
-    <ModalSheet open={Boolean(selected)} title="媒体详情" onClose={() => setSelected(null)} description="媒体引用由服务端统一检查；详情页不会把引用关系隐藏在前端缓存里。" testId="media-detail">{selected && <div className="admin-media-detail">{selected.kind === 'image' || selected.kind === 'sticker' ? <AuthenticatedImage path={selected.url} scope="admin" alt={selected.name ?? selected.id} /> : selected.kind === 'audio' ? <AuthenticatedAudio path={selected.url} scope="admin" aria-label={selected.name ?? selected.id} /> : <div className="admin-media-file large">{selected.kind.toUpperCase()}</div>}<dl><dt>ID</dt><dd>{selected.id}</dd><dt>来源</dt><dd>{selected.origin}</dd><dt>大小</dt><dd>{formatBytes(selected.bytes)}</dd><dt>使用情况</dt><dd>{usage ? `${usage.usageCount} 个引用${usage.avatar ? ' · 头像保护' : ''}` : '读取中…'}</dd></dl>{usage && <pre className="admin-safe-pre">{JSON.stringify(usage.references, null, 2)}</pre>}<div className="admin-actions">{selected.deletedAt ? <><button type="button" onClick={() => void restore(selected)}>恢复</button><button type="button" className="admin-danger" onClick={() => void removePermanently(selected)} disabled={Boolean(usage?.usageCount) || Boolean(usage?.avatar)}>永久删除</button></> : <button type="button" onClick={() => void trash(selected)} disabled={Boolean(usage?.usageCount) || Boolean(usage?.avatar)}>移入回收站</button>}</div></div>}</ModalSheet>
+    <ModalSheet open={Boolean(selected)} title="媒体详情" onClose={() => setSelected(null)} description="媒体引用由设备端 Core 统一检查，被引用或作为头像的媒体无法删除。" testId="media-detail">{selected && <div className="admin-media-detail">{selected.kind === 'image' || selected.kind === 'sticker' ? <AuthenticatedImage path={selected.url} scope="admin" alt={selected.name ?? selected.id} /> : selected.kind === 'audio' ? <AuthenticatedAudio path={selected.url} scope="admin" aria-label={selected.name ?? selected.id} /> : <div className="admin-media-file large">{selected.kind.toUpperCase()}</div>}<dl><dt>ID</dt><dd>{selected.id}</dd><dt>来源</dt><dd>{selected.origin}</dd><dt>大小</dt><dd>{formatBytes(selected.bytes)}</dd><dt>使用情况</dt><dd>{usage ? `${usage.usageCount} 个引用${usage.avatar ? ' · 头像保护' : ''}` : '读取中…'}</dd></dl>{usage && <pre className="admin-safe-pre">{JSON.stringify(usage.references, null, 2)}</pre>}<div className="admin-actions">{selected.deletedAt ? <><button type="button" onClick={() => void restore(selected)}>恢复</button><button type="button" className="admin-danger" onClick={() => void removePermanently(selected)} disabled={Boolean(usage?.usageCount) || Boolean(usage?.avatar)}>永久删除</button></> : <button type="button" onClick={() => void trash(selected)} disabled={Boolean(usage?.usageCount) || Boolean(usage?.avatar)}>移入回收站</button>}</div></div>}</ModalSheet>
   </PageFrame>;
 }
 

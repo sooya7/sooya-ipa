@@ -166,6 +166,29 @@ export class StickerRepo {
     return (await queryOne<{ c: number }>(this.db, enabledOnly ? 'SELECT COUNT(*) c FROM stickers WHERE enabled = 1' : 'SELECT COUNT(*) c FROM stickers'))?.c ?? 0;
   }
 
+  /** Count matching the same filters as list (q included, limit/offset excluded). */
+  async countFiltered(options: StickerListOptions = {}): Promise<number> {
+    if (options.q?.trim()) {
+      const all = await this.list({ ...options, q: undefined, limit: undefined, offset: undefined });
+      const needle = options.q.trim().toLocaleLowerCase();
+      return all.filter((sticker) => stickerSemanticText(sticker).toLocaleLowerCase().includes(needle)).length;
+    }
+    const { where, values } = stickerWhere(options);
+    return (await queryOne<{ c: number }>(this.db, `SELECT COUNT(*) c FROM stickers${where.length ? ` WHERE ${where.join(' AND ')}` : ''}`, values))?.c ?? 0;
+  }
+
+  async facets(options: Omit<StickerListOptions, 'limit' | 'offset' | 'sort' | 'scope' | 'enabledOnly' | 'q'> = {}): Promise<{ status: Record<string, number>; source: Record<string, number>; emotion: Record<string, number> }> {
+    const { where, values } = stickerWhere(options);
+    const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
+    const [status, source, emotion] = await Promise.all([
+      this.db.query<{ value: string; count: number }>(`SELECT analysis_status value, COUNT(*) count FROM stickers${whereSql} GROUP BY analysis_status ORDER BY analysis_status`, values),
+      this.db.query<{ value: string; count: number }>(`SELECT analysis_source value, COUNT(*) count FROM stickers${whereSql} GROUP BY analysis_source ORDER BY analysis_source`, values),
+      this.db.query<{ value: string; count: number }>(`SELECT emotion value, COUNT(*) count FROM stickers${whereSql} GROUP BY emotion ORDER BY emotion`, values)
+    ]);
+    const map = (rows: Array<{ value: string; count: number }>): Record<string, number> => Object.fromEntries(rows.map((row) => [row.value, row.count]));
+    return { status: map(status), source: map(source), emotion: map(emotion) };
+  }
+
   async update(id: string, patch: {
     tags?: string[];
     emotion?: string;
