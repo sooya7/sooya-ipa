@@ -2,6 +2,7 @@ import type { McpPlatform, McpServerConfig, McpTool } from '../platform/mcp.js';
 import type { McpToolCallResult } from '../tools/mcp-result.js';
 import type { MemoryCommitInput, MemoryCommitResult, MemoryEntry, MemoryKind, MemoryProvider, MemoryRecall, MemoryRecallInput } from './types.js';
 import type { OmbreMemorySyncPort } from './sync-types.js';
+import { pullOmbre276LegacyPage } from './ombre-legacy-sync.js';
 
 const SOOYA_SYNC_SCHEMA = 'sooya.memory.sync.v1';
 const SOOYA_SYNC_SENTINEL = '__sooya_sync_v1__';
@@ -169,17 +170,39 @@ export class OmbreMcpMemoryProvider implements MemoryProvider, OmbreMemorySyncPo
     }
 
     if (listTool === 'breath_advanced') {
-      // Ombre 2.7.6 exposes only a human-readable breath_advanced catalog. Do
-      // not scrape that prose. Send a reserved compatibility probe instead so
-      // a server-side adapter can return a versioned JSON page without adding
-      // a new public MCP tool or changing the advertised schema.
+      // First offer a versioned structured compatibility probe. A future Ombre
+      // server can support it without adding a new public tool or changing the
+      // advertised breath_advanced schema.
       const compatibilityCursor = cursor ?? '0';
       const result = await this.invoke('list', {
         query: '',
         catalog: true,
         domain: `${SOOYA_SYNC_SENTINEL}:${compatibilityCursor}:${pageLimit}`
       }, signal);
-      return parseSyncPage(result, listTool, SOOYA_SYNC_SCHEMA);
+      try {
+        return parseSyncPage(result, listTool, SOOYA_SYNC_SCHEMA);
+      } catch (error) {
+        // Ombre 2.7.6 returns a prose catalog. It also exposes pulse plus an
+        // explicit exact-bucket-ID read path in breath_advanced. Use those as
+        // a narrow compatibility bridge, but only after proving this is the
+        // known non-structured response. Any unrelated failure still bubbles.
+        if (!isStructuredSyncUnavailable(error) || !this.availableTools.has('pulse')) throw error;
+        const pulse = await this.invokeNamed('pulse', { include_archive: false }, signal);
+        return await pullOmbre276LegacyPage({
+          pulseText: textPayload(pulse),
+          cursor,
+          limit: pageLimit,
+          readBucket: async (bucketId) => {
+            const exact = await this.invokeNamed('breath_advanced', {
+              query: bucketId,
+              max_tokens: 20_000,
+              max_results: 1,
+              catalog: false
+            }, signal);
+            return textPayload(exact);
+          }
+        });
+      }
     }
 
     const result = await this.invoke('list', { limit: pageLimit, ...(cursor ? { cursor } : {}) }, signal);
@@ -193,6 +216,10 @@ export class OmbreMcpMemoryProvider implements MemoryProvider, OmbreMemorySyncPo
     await this.ensureReady(signal);
     const name = this.resolveTool(operation);
     if (!name) throw new Error(`Ombre MCP tool for ${operation} is unavailable`);
+    return await this.invokeNamed(name, arguments_, signal);
+  }
+
+  private async invokeNamed(name: string, arguments_: Record<string, unknown>, signal?: AbortSignal): Promise<McpToolCallResult> {
     try {
       const result = await callWithTimeout(
         (callSignal) => this.options.mcp.callTool(this.serverId, name, arguments_, callSignal),
@@ -382,9 +409,17 @@ function toEntry(value: unknown): MemoryEntry[] {
 
 function payloadValue(result: McpToolCallResult): unknown {
   if (result.structuredContent !== undefined) return result.structuredContent;
-  const text = (result.content ?? []).filter((item): item is { type: 'text'; text: string } => item.type === 'text' && typeof item.text === 'string').map((item) => item.text).join('\n').trim();
+  const text = textPayload(result);
   if (!text) return null;
   try { return JSON.parse(text) as unknown; } catch { return text; }
+}
+
+function textPayload(result: McpToolCallResult): string {
+  return (result.content ?? [])
+    .filter((item): item is { type: 'text'; text: string } => item.type === 'text' && typeof item.text === 'string')
+    .map((item) => item.text)
+    .join('\n')
+    .trim();
 }
 
 function firstArray(value: Record<string, unknown>, keys: readonly string[]): unknown[] {
@@ -427,6 +462,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isMissingToolError(error: unknown): boolean {
   return error instanceof Error && /tool .* unavailable/iu.test(error.message);
+}
+
+function isStructuredSyncUnavailable(error: unknown): boolean {
+  return error instanceof Error && /^structured memory sync unavailable:/iu.test(error.message);
 }
 
 function safeError(error: unknown): string {
