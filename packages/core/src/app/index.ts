@@ -40,6 +40,18 @@ export type { SummaryBuildResult, SummaryBuilderOptions } from './summary-builde
 export { StickerAnalyzer, STICKER_ANALYSIS_VERSION } from './sticker-analyzer.js';
 export type { StickerAnalysisResult } from './sticker-analyzer.js';
 export { LocalLifeCatchUp } from '../life/catch-up-service.js';
+export { LifeV2Source } from '../life/v2/source.js';
+export type { LifeV2SourceOptions } from '../life/v2/source.js';
+export { LIFE_ACTIVITIES, activityById } from '../life/v2/activities.js';
+export { settleVitals, applyActivityToVitals, DEFAULT_LIFE_VITALS } from '../life/v2/vitals.js';
+export { pickDayTheme, localDateKey } from '../life/v2/theme.js';
+export { scoreActivities } from '../life/v2/scoring.js';
+export { resolveOutcome } from '../life/v2/outcomes.js';
+export type { LifeVitals, LifeActivityDefinition, ScoredActivity, LifeOutcome } from '../life/v2/types.js';
+export { LocalLocationService } from '../world/location/service.js';
+export type { LocalLocationServiceOptions } from '../world/location/service.js';
+export { selectLocationCandidate } from '../world/location/selector.js';
+export { findPath, planTravel } from '../world/location/travel.js';
 export { MomentComposer } from '../moments/composer.js';
 export { LocalMediaResolver } from './media-resolver.js';
 export type { MediaLocationRow } from './media-resolver.js';

@@ -30,10 +30,13 @@ import { ModelDiscoveryService } from './model-discovery.js';
 import { CHAT_FALLBACK_SLOTS, MODEL_CAPABILITY_SLOTS, MODEL_DEFAULTS, type ModelCapabilitySlot } from './model-defaults.js';
 import { PersonaReferenceService, REFERENCE_FRAMINGS, type ReferenceFraming } from './persona-reference-service.js';
 import { ContextBuilder } from './context-builder.js';
+import type { WorldSnapshot } from './context/types.js';
 import { SummaryBuilder } from './summary-builder.js';
 import { StickerAnalyzer } from './sticker-analyzer.js';
 import { extractText } from '../util/text-extractor.js';
 import { LocalLifeCatchUp } from '../life/catch-up-service.js';
+import { LifeV2Source } from '../life/v2/source.js';
+import { LocalLocationService } from '../world/location/service.js';
 import { MomentComposer } from '../moments/composer.js';
 import { MomentPolicy } from '../moments/moment-policy.js';
 import { LATEST_SCHEMA_VERSION } from '../db/migrations.js';
@@ -133,6 +136,8 @@ export class LocalCore implements LocalCoreApi {
   readonly lifeClockRepo: LifeClockRepo;
   readonly lifeCatchUp: LocalLifeCatchUp;
   readonly lifeCitiesRepo: LifeCityRepo;
+  /** Durable location runtime: travel is only created through edges. */
+  readonly locationRuntime: LocalLocationService;
   readonly locationsRepo: LocationRepo;
   readonly weatherRepo: WeatherRepo;
   readonly batchesRepo: ReplyBatchRepo;
@@ -185,10 +190,25 @@ export class LocalCore implements LocalCoreApi {
     this.stickersRepo = new StickerRepo(db, now);
     this.lifeRepo = new LifeRepo(db, now);
     this.lifeClockRepo = new LifeClockRepo(db, now);
-    this.lifeCatchUp = new LocalLifeCatchUp({ clock: this.lifeClockRepo, now, detailedWindowMs: 7 * 86_400_000, maxTransitions: 200 });
     this.lifeCitiesRepo = new LifeCityRepo(db, now);
     this.locationsRepo = new LocationRepo(db, now);
     this.weatherRepo = new WeatherRepo(db, now);
+    this.lifeV2Repo = new LifeV2Repo(db, now);
+    this.locationRuntime = new LocalLocationService({ locations: this.locationsRepo, now });
+    this.lifeCatchUp = new LocalLifeCatchUp({
+      clock: this.lifeClockRepo,
+      now,
+      detailedWindowMs: 7 * 86_400_000,
+      maxTransitions: 200,
+      source: new LifeV2Source({
+        life: this.lifeV2Repo,
+        lifeState: this.lifeRepo,
+        locations: this.locationsRepo,
+        weather: this.weatherRepo,
+        locationRuntime: this.locationRuntime,
+        now
+      })
+    });
     this.batchesRepo = new ReplyBatchRepo(db, now);
     this.jobsRepo = new JobRepo(db, now);
     this.settingsRepo = new SettingsRepo(db, now);
@@ -202,7 +222,6 @@ export class LocalCore implements LocalCoreApi {
     this.voicesRepo = new VoiceRepo(db, now);
     this.metricsRepo = new MetricsRepo(db, now);
     this.mediaRepo = new MediaRepo(db, now);
-    this.lifeV2Repo = new LifeV2Repo(db, now);
     this.runtimeStartedAt = options.startedAt ? new Date(options.startedAt) : now();
     this.runtimeVersion = options.version ?? 'local';
     this.media = options.mediaStore ? new LocalMediaResolver(this.mediaRepo, options.mediaStore) : undefined;
@@ -255,9 +274,7 @@ export class LocalCore implements LocalCoreApi {
       summaries: this.summaryRepo,
       memory: this.memoryProvider,
       settings: this.settingsRepo,
-      life: this.lifeRepo,
-      locations: this.locationsRepo,
-      weather: this.weatherRepo,
+      world: () => this.worldSnapshot(),
       stickers: this.stickersRepo,
       media: this.media,
       mediaRepo: this.mediaRepo,
@@ -320,6 +337,24 @@ export class LocalCore implements LocalCoreApi {
 
   subscribe(listener: LocalEventListener): () => void {
     return this.events.subscribe(listener);
+  }
+
+  /** Single world producer consumed by ContextBuilder (Life/Location/Weather). */
+  private async worldSnapshot(): Promise<WorldSnapshot> {
+    const [presence, life] = await Promise.all([this.presence(), this.life()]);
+    const state = await this.locationsRepo.currentState().catch(() => undefined);
+    const location = state ? await this.locationsRepo.get(state.location_id).catch(() => undefined) : undefined;
+    return {
+      city: presence.city,
+      location: presence.location,
+      travel: presence.travel,
+      weather: presence.weather,
+      timeZone: location?.time_zone ?? null,
+      life: {
+        current: { activity: life.activity, kind: life.kind, mood: life.mood },
+        recent: life.recent
+      }
+    };
   }
 
   /** Persona voice policy with server defaults applied (enabled, 300 chars). */
@@ -564,15 +599,33 @@ export class LocalCore implements LocalCoreApi {
   }
 
   async presence(): Promise<WorldPresence> {
-    const [state, weather] = await Promise.all([
+    const [state, travel, weather, activeCity] = await Promise.all([
       this.locationsRepo.currentState(),
-      this.weatherRepo.latest('active')
+      this.locationsRepo.currentTravel(),
+      this.weatherRepo.latest('active'),
+      this.lifeCitiesRepo.activeCity()
     ]);
     const location = state ? await this.locationsRepo.get(state.location_id) : undefined;
+    const from = travel ? await this.locationsRepo.get(travel.from_location_id) : undefined;
+    const to = travel ? await this.locationsRepo.get(travel.to_location_id) : undefined;
+    const cityId = location?.city_id ?? activeCity?.id ?? (location?.city ? `city:${location.city}` : undefined);
+    const cityName = location?.city ?? activeCity?.name ?? undefined;
     return {
-      city: null,
+      city: cityId && cityName ? {
+        id: cityId,
+        name: cityName,
+        ...(location?.region || activeCity?.region ? { region: location?.region ?? activeCity?.region ?? undefined } : {}),
+        ...(location?.country || activeCity?.country ? { country: location?.country ?? activeCity?.country ?? undefined } : {})
+      } : null,
       location: location ? { id: location.id, name: location.name, kind: location.kind } : null,
-      travel: null,
+      travel: travel ? {
+        fromLocationId: travel.from_location_id,
+        fromName: from?.name ?? null,
+        toLocationId: travel.to_location_id,
+        toName: to?.name ?? null,
+        mode: travel.mode,
+        expectedArriveAt: travel.expected_arrive_at
+      } : null,
       weather: weather ? {
         condition: weather.condition,
         temperatureC: weather.temperature_c,
@@ -581,7 +634,7 @@ export class LocalCore implements LocalCoreApi {
         stale: (this.options.now?.() ?? new Date()).getTime() - Date.parse(weather.observed_at) > 3 * 3600_000,
         provider: weather.provider
       } : null,
-      updatedAt: new Date().toISOString()
+      updatedAt: (this.options.now?.() ?? new Date()).toISOString()
     };
   }
 

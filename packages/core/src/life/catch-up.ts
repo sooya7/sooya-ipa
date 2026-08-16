@@ -15,6 +15,8 @@ export interface LifeClockState {
 
 export interface LifeTransition extends LifeCurrentState {
   occurredAt: string;
+  /** Deterministic transition metadata used by durable publishers. */
+  meta?: Record<string, unknown>;
 }
 
 export interface LifeClockStore {

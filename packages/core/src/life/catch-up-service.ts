@@ -5,10 +5,10 @@ import { LifeClockRepo } from '../db/life-clock.repo.js';
 export class LocalLifeCatchUp {
   private readonly engine: LifeCatchUpEngine;
 
-  constructor(private readonly options: { clock: LifeClockRepo; now?: () => Date; detailedWindowMs?: number; maxTransitions?: number }) {
+  constructor(private readonly options: { clock: LifeClockRepo; now?: () => Date; detailedWindowMs?: number; maxTransitions?: number; source?: LifeTransitionSource }) {
     this.engine = new LifeCatchUpEngine({
       store: options.clock,
-      source: new DeterministicLifeSource(),
+      source: options.source ?? new DeterministicLifeSource(),
       detailedWindowMs: options.detailedWindowMs,
       maxTransitions: options.maxTransitions
     });

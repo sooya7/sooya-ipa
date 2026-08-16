@@ -27,14 +27,22 @@ export class LifeClockRepo {
       operations.push(runOperation('INSERT INTO life_log(id,activity,kind,mood,started_at,ended_at,shared,created_at) VALUES(?,?,?,?,?,?,0,?)', [logId, transition.activity, transition.kind, transition.mood, transition.occurredAt, transition.endsAt ?? transition.occurredAt, timestamp]));
       const eventId = newId('life_event');
       const shareable = SHAREABLE_KINDS.has(transition.kind) ? 1 : 0;
-      const meta = JSON.stringify({ activity: transition.activity, occurredAt: transition.occurredAt, topicKey: transition.kind });
+      const transitionMeta = transition.meta && typeof transition.meta === 'object' ? transition.meta as Record<string, unknown> : {};
+      const shareScores = transitionMeta.shareScores && typeof transitionMeta.shareScores === 'object'
+        ? transitionMeta.shareScores as Record<string, unknown>
+        : {};
+      const meta = JSON.stringify({ ...transitionMeta, activity: transition.activity, occurredAt: transition.occurredAt, topicKey: transition.kind });
       operations.push(runOperation(`INSERT INTO life_events(id,plan_id,log_id,event_type,activity,kind,description,mood_before,mood_after,happened_at,shareable,shared_at,meta_json,created_at)
         VALUES(?,?,?,'activity.completed',?,?,?,?,?,?,?,NULL,?,?)`, [eventId, null, logId, transition.activity, transition.kind, `完成了${transition.activity}`, transition.mood, transition.mood, transition.occurredAt, shareable, meta, timestamp]));
       if (shareable) {
         const occurredAt = Date.parse(transition.occurredAt);
         const expiresAt = new Date(Math.max(occurredAt + 7 * 86_400_000, Date.parse(timestamp) + 3_600_000)).toISOString();
+        const novelty = numberScore(shareScores.novelty, noveltyFor(transition.kind));
+        const relevance = numberScore(shareScores.relevanceToUser, 0.5);
+        const emotional = numberScore(shareScores.emotionalValue, 0.45);
+        const urgency = numberScore(shareScores.urgency, 0.1);
         operations.push(runOperation(`INSERT INTO life_share_candidates(id,source_type,source_id,novelty,relevance_to_user,emotional_value,urgency,repetition_penalty,status,created_at,expires_at,shared_at,meta_json)
-          VALUES(?,?,?,?,?,?,?,?,'pending',?,?,NULL,?)`, [newId('share'), 'event', eventId, noveltyFor(transition.kind), 0.5, 0.45, 0.1, 0, timestamp, expiresAt, meta]));
+          VALUES(?,?,?,?,?,?,?,?,'pending',?,?,NULL,?)`, [newId('share'), 'event', eventId, novelty, relevance, emotional, urgency, 0, timestamp, expiresAt, meta]));
       }
     }
     operations.push(runOperation(`INSERT INTO life_state(id,activity,kind,mood,started_at,ends_at,updated_at,meta_json)
@@ -60,4 +68,8 @@ function noveltyFor(kind: string): number {
     case 'chore': return 0.45;
     default: return 0.35;
   }
+}
+
+function numberScore(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : fallback;
 }
