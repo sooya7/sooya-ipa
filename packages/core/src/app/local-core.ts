@@ -39,6 +39,8 @@ import { LifeV2Source } from '../life/v2/source.js';
 import { LocalLocationService } from '../world/location/service.js';
 import { MomentComposer } from '../moments/composer.js';
 import { MomentPolicy } from '../moments/moment-policy.js';
+import { MomentImagePolicy } from '../moments/moment-image-policy.js';
+import { currentReplyFeatureRuntime } from './reply-feature-runtime.js';
 import { LATEST_SCHEMA_VERSION } from '../db/migrations.js';
 import { newId } from '../db/database.js';
 import { exactRoute, methodSet, prefixRoute, regexRoute, type NativeAdminMethod, type NativeAdminRoute, type NativeAdminRouteContext } from './admin-routes.js';
@@ -267,6 +269,12 @@ export class LocalCore implements LocalCoreApi {
       life: new LifeV2Repo(db, now),
       moments: this.momentsRepo,
       provider: async () => options.chatProvider ?? await options.chatProviderFactory?.() ?? (await this.configuredProviders?.())?.chat ?? null,
+      imageProvider: async () => (await this.configuredProviders?.())?.image ?? null,
+      mediaDirector: () => this.mediaDirector,
+      media: this.media,
+      personaReferences: this.personaReferences,
+      referenceImages: async (hint) => (await currentReplyFeatureRuntime()?.referenceImages?.(hint)) ?? [],
+      imagePolicy: new MomentImagePolicy(),
       now
     });
     this.contextBuilder = new ContextBuilder({

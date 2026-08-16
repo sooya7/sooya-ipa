@@ -17,6 +17,8 @@ import type { InlineVoiceOutcome } from './voice/service.js';
 import type { LocalVoiceService } from './voice/service.js';
 import { buildImageFallbackPrompt, stripModelMediaExecutionClaims } from './reply-media-policy.js';
 import { decideWebSearch } from './web-search-policy.js';
+import { StickerRetriever } from '../stickers/retriever.js';
+import { StickerPicker } from '../stickers/picker.js';
 
 /** Maximum number of image/sticker binaries read into the model context per reply. */
 const MAX_CONTEXT_IMAGES = 4;
@@ -256,6 +258,7 @@ export class ReplyCoordinator {
       const voicePublishedReplace = media.voiceOutcome?.kind === 'published' && media.voiceOutcome.mode === 'replace';
       const voicePublishedText = media.voiceOutcome?.kind === 'published-as-text' ? media.voiceOutcome.text : undefined;
       if (voicePublishedText !== undefined) visibleText = voicePublishedText;
+      else if (directives.stickerOnly && media.appended === 0) visibleText = semanticText;
       else if (directives.voiceOnly || directives.stickerOnly || voicePublishedReplace) visibleText = '';
       if (!holdDraft && partId) await this.options.messages.updatePart(partId, { text: visibleText });
       if (!assistantId) throw new Error('hidden reply lost its shell');
@@ -419,13 +422,31 @@ export class ReplyCoordinator {
     if (directives.stickers?.length && !directives.noSticker && runtime.stickers) {
       this.options.emit('reply.sticker.selecting', { batchId, revision, messageId });
       const seen = new Set<string>();
+      const recentUsed = await runtime.stickers.list({ enabledOnly: true, scope: 'recent', limit: 24 }).catch(() => []);
+      const recentUsedIds = recentUsed.map((sticker) => sticker.id);
+      const fallbackQuery = sourceMessages.filter((message) => message.role === 'user').map((message) => textOf(message)).filter(Boolean).join(' ').slice(0, 200);
+      const retriever = new StickerRetriever({
+        searchFts: (query, listOptions) => runtime.stickers!.searchFts(query, listOptions),
+        list: (listOptions) => runtime.stickers!.list(listOptions),
+        recentUsedIds
+      });
+      const picker = new StickerPicker();
       for (const intent of directives.stickers.slice(0, 3)) {
         try {
-          const matches = intent && intent !== 'auto' ? await runtime.stickers.searchFts(intent, { enabledOnly: true, limit: 12 }) : await runtime.stickers.list({ enabledOnly: true, scope: 'recent', limit: 24 });
-          const sticker = matches.find((item) => !seen.has(item.id)) ?? (await runtime.stickers.list({ enabledOnly: true, sort: 'usage', limit: 24 })).find((item) => !seen.has(item.id));
-          if (!sticker) continue; seen.add(sticker.id);
-          await this.options.messages.appendPart(messageId, { type: 'sticker', mediaId: sticker.mediaId, meta: { stickerId: sticker.id, intent } });
-          await runtime.stickers.markAssistantUsed(sticker.id); this.options.emit('reply.media.created', { batchId, revision, messageId, type: 'sticker', mediaId: sticker.mediaId, stickerId: sticker.id }); result.appended += 1;
+          const query = intent && intent !== 'auto' ? intent : (fallbackQuery || '开心');
+          const retrieval = await retriever.retrieve({ query, desiredIntent: intent && intent !== 'auto' ? intent : undefined, recentUsedIds: [...seen] });
+          const picked = picker.pick({ semantic: query, candidates: retrieval.candidates, recentUsedIds: [...seen], desiredIntent: intent && intent !== 'auto' ? intent : undefined });
+          if (!picked.stickerId) {
+            this.options.emit('reply.sticker.none', { batchId, revision, messageId, intent, confidence: picked.confidence, reason: picked.reason });
+            continue;
+          }
+          const sticker = retrieval.candidates.find((candidate) => candidate.sticker.id === picked.stickerId)?.sticker;
+          if (!sticker) continue;
+          seen.add(sticker.id);
+          await this.options.messages.appendPart(messageId, { type: 'sticker', mediaId: sticker.mediaId, meta: { stickerId: sticker.id, intent, confidence: picked.confidence } });
+          await runtime.stickers.markAssistantUsed(sticker.id);
+          this.options.emit('reply.media.created', { batchId, revision, messageId, type: 'sticker', mediaId: sticker.mediaId, stickerId: sticker.id, confidence: picked.confidence });
+          result.appended += 1;
         } catch (error) { this.options.emit('reply.media.failed', { batchId, revision, messageId, type: 'sticker', error: errorMessage(error) }); }
       }
     }
