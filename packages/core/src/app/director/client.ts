@@ -116,8 +116,8 @@ export class DirectorClient {
     this.opts.onEvent?.({ event: 'fallback', task, reason });
   }
 
-  private fail<T>(
-    task: DirectorTask,
+  private fail(
+    _task: DirectorTask,
     startedAt: number,
     emit: (event: DirectorEvent['event'], extra?: Omit<DirectorEvent, 'event' | 'task'>) => void,
     reason: string,

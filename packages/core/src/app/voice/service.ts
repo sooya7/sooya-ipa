@@ -16,7 +16,7 @@ import { decideVoiceMode } from './planner.js';
 import type { VoiceDecision, VoiceDecisionInput } from './planner.js';
 import { DEFAULT_SPEECH_STYLE, stylePromptHints } from './style.js';
 import type { PersonaSpeechStyle } from './style.js';
-import type { UserVoicePreferences, VoiceMode, VoiceRequestedBy, VoiceScript, VoicePartMeta, VoiceDeliveryPlan } from './types.js';
+import type { UserVoicePreferences, VoiceMode, VoiceScript, VoicePartMeta } from './types.js';
 
 export type { VoiceIntent } from './types.js';
 export { parseVoiceIntent, mergeVoiceDirectives } from './intent.js';
