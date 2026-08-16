@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { Capacitor } from '@capacitor/core';
 import { exportFullBackup, fullBackupAvailable, importFullBackup, pickFullBackup, type PickedFullBackup } from '../../local/fullBackup.js';
 
 function readableBytes(bytes: number): string {
@@ -12,12 +13,44 @@ function isServerMigration(file: PickedFullBackup | null): boolean {
   return Boolean(file && /^SOOYA-server-to-IPA-/iu.test(file.displayName));
 }
 
+function isArchiveMissing(error: unknown): boolean {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return code === 'ARCHIVE_MISSING' || /Backup archive was not found/iu.test(message);
+}
+
+function samePickedBackup(a: PickedFullBackup, b: PickedFullBackup): boolean {
+  return a.displayName === b.displayName && a.bytes === b.bytes;
+}
+
+interface NativeReleasePlugin {
+  call<T = Record<string, unknown>>(method: string, options: Record<string, unknown>): Promise<T>;
+}
+
+function useNativeBaseVersion(): number | null {
+  const [version, setVersion] = useState<number | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const plugins = (Capacitor as unknown as { Plugins?: Record<string, unknown> }).Plugins ?? {};
+    const release = plugins.SOOYARelease as NativeReleasePlugin | undefined;
+    if (!release) return () => { cancelled = true; };
+    void release.call<{ nativeBaseVersion?: number }>('getReleaseInfo', {})
+      .then((result) => {
+        if (!cancelled && Number.isSafeInteger(result.nativeBaseVersion)) setVersion(result.nativeBaseVersion ?? null);
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+  return version;
+}
+
 export function FullBackupCard({ onNotice }: { onNotice: (message: string) => void }) {
   const [includeSecrets, setIncludeSecrets] = useState(false);
   const [exportPassword, setExportPassword] = useState('');
   const [importPassword, setImportPassword] = useState('');
   const [selected, setSelected] = useState<PickedFullBackup | null>(null);
   const [busy, setBusy] = useState<'export' | 'pick' | 'import' | null>(null);
+  const nativeBaseVersion = useNativeBaseVersion();
 
   if (!fullBackupAvailable()) return null;
   const serverMigration = isServerMigration(selected);
@@ -49,6 +82,15 @@ export function FullBackupCard({ onNotice }: { onNotice: (message: string) => vo
     }
   };
 
+  const finishImport = (picked: PickedFullBackup, result: Awaited<ReturnType<typeof importFullBackup>>) => {
+    const migration = isServerMigration(picked);
+    onNotice(migration
+      ? `服务器数据已迁入（源 schema ${result.schemaVersion}${result.importedModelCount ? `，迁入 ${result.importedModelCount} 个模型配置` : ''}${result.importedSecretCount ? `，写入 ${result.importedSecretCount} 个密钥` : ''}），正在重新载入…`
+      : `完整备份已恢复（schema ${result.schemaVersion}），正在重新载入…`);
+    setSelected(null);
+    window.setTimeout(() => window.location.reload(), 250);
+  };
+
   const doImport = async () => {
     if (!selected) return;
     const question = serverMigration
@@ -58,13 +100,30 @@ export function FullBackupCard({ onNotice }: { onNotice: (message: string) => vo
     setBusy('import');
     try {
       const result = await importFullBackup(selected, serverMigration ? undefined : importPassword);
-      onNotice(serverMigration
-        ? `服务器数据已迁入（源 schema ${result.schemaVersion}${result.importedModelCount ? `，迁入 ${result.importedModelCount} 个模型配置` : ''}${result.importedSecretCount ? `，写入 ${result.importedSecretCount} 个密钥` : ''}），正在重新载入…`
-        : `完整备份已恢复（schema ${result.schemaVersion}），正在重新载入…`);
-      setSelected(null);
-      window.setTimeout(() => window.location.reload(), 250);
+      finishImport(selected, result);
     } catch (error) {
-      onNotice(error instanceof Error ? error.message : '完整备份导入失败，已尝试回滚');
+      if (!isArchiveMissing(error)) {
+        onNotice(error instanceof Error ? error.message : '完整备份导入失败，已尝试回滚');
+        return;
+      }
+
+      onNotice('iOS 暂存的备份副本已失效，请重新选择同一份文件；选完会立即继续恢复。');
+      try {
+        const picked = await pickFullBackup();
+        if (!picked) return;
+        if (!samePickedBackup(selected, picked)) {
+          setSelected(picked);
+          setImportPassword('');
+          onNotice('重新选择的文件与刚才那份备份不一致，请确认后再恢复。');
+          return;
+        }
+        setSelected(picked);
+        const migration = isServerMigration(picked);
+        const result = await importFullBackup(picked, migration ? undefined : importPassword);
+        finishImport(picked, result);
+      } catch (retryError) {
+        onNotice(retryError instanceof Error ? retryError.message : '完整备份重新选择后仍无法导入');
+      }
     } finally {
       setBusy(null);
     }
@@ -78,7 +137,7 @@ export function FullBackupCard({ onNotice }: { onNotice: (message: string) => vo
           <h2>完整导入 / 导出</h2>
           <p>一份 IPA 完整备份可以带走聊天、记忆、人设、Life、模型/MCP 配置、头像、参考图、表情和所有用户媒体；也可以单独选择服务器版生成的 SOOYA-server-to-IPA 迁移包。</p>
         </div>
-        <span className="admin-status-chip is-ready">Native Base 11</span>
+        <span className="admin-status-chip is-ready">Native Base {nativeBaseVersion ?? '未知'}</span>
       </div>
 
       <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
