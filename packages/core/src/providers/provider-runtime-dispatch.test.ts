@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ConfigRepository, ProviderConfig } from '../db/config.repo.js';
 import type { HttpPlatform } from '../platform/http.js';
 import { createConfiguredProviders } from './provider-factory.js';
-import { BuiltinImageProvider as ProtocolAwareImageProvider } from './media-providers.js';
+import { DurableAnumaImageProvider } from './durable-image-provider.js';
 
 const imageConfig: ProviderConfig = {
   capability: 'image',
@@ -17,7 +17,7 @@ const imageConfig: ProviderConfig = {
 };
 
 describe('configured provider runtime dispatch', () => {
-  it('uses the protocol-aware image provider for IPA runtime factory calls', async () => {
+  it('uses the durable Anuma image provider for IPA runtime factory calls', async () => {
     const config = {
       getProvider: async (capability: ProviderConfig['capability']) => capability === 'image' ? imageConfig : undefined
     } as unknown as ConfigRepository;
@@ -25,6 +25,6 @@ describe('configured provider runtime dispatch', () => {
 
     const providers = await createConfiguredProviders(http, config);
 
-    expect(providers.image).toBeInstanceOf(ProtocolAwareImageProvider);
+    expect(providers.image).toBeInstanceOf(DurableAnumaImageProvider);
   });
 });
