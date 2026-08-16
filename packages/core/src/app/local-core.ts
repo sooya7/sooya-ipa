@@ -782,13 +782,89 @@ export class LocalCore implements LocalCoreApi {
   /** Builds the ordered route registry in the same precedence order as the
    * original admin if-chain. Every implemented route must be declared here;
    * the dispatcher rejects everything else before any handler runs. */
+  private adminRouteHandler(capability: string): (context: NativeAdminRouteContext) => Promise<unknown> {
+    switch (capability) {
+      case 'system':
+      case 'capabilities': return (context) => this.adminSystemRoutes(context);
+      case 'persona':
+      case 'voiceBehavior': return (context) => this.adminPersonaRoutes(context);
+      case 'models':
+      case 'modelPresets':
+      case 'webSearchProbe':
+      case 'modelProbe':
+      case 'ttsPreview': return (context) => this.adminModelRoutes(context);
+      case 'memories':
+      case 'memoryStatus':
+      case 'memorySync':
+      case 'memoryLocalSearch':
+      case 'memoryCatalog':
+      case 'memoryActivity': return (context) => this.adminMemoryRoutes(context);
+      case 'chatHistory':
+      case 'chatContext':
+      case 'chatSummary': return (context) => this.adminChatRoutes(context);
+      case 'jobs':
+      case 'errors':
+      case 'backupList':
+      case 'backupCreate':
+      case 'backupDelete':
+      case 'backupVerify':
+      case 'notifications':
+      case 'ota': return (context) => this.adminOperationsRoutes(context);
+      case 'lifeCatchUp':
+      case 'momentsCompose': return (context) => this.adminLifeEngineRoutes(context);
+      case 'mcpOverview':
+      case 'mcpTest':
+      case 'mcpToolSchema':
+      case 'mcpServerDelete':
+      case 'mcpServerSave': return (context) => this.adminMcpRoutes(context);
+      case 'stickerUpload':
+      case 'stickerList':
+      case 'stickerUpdate':
+      case 'stickerAnalyze':
+      case 'stickerBatchAnalyze': return (context) => this.adminStickerRoutes(context);
+      case 'referenceList':
+      case 'referenceUpload':
+      case 'referenceData':
+      case 'referenceDelete': return (context) => this.adminReferenceRoutes(context);
+      case 'mediaData':
+      case 'gallery':
+      case 'mediaDetail':
+      case 'mediaAction':
+      case 'mediaList':
+      case 'mediaBatch': return (context) => this.adminMediaRoutes(context);
+      case 'life':
+      case 'lifePlans':
+      case 'lifeSettings':
+      case 'lifeTick':
+      case 'lifeOverview':
+      case 'lifeVitals':
+      case 'lifeThreads':
+      case 'lifeEvents':
+      case 'lifeProactive':
+      case 'lifeLocations':
+      case 'lifeLocationOverride':
+      case 'lifeTravel':
+      case 'lifeCities': return (context) => this.adminLifeRoutes(context);
+      case 'weatherStatus':
+      case 'weatherForecast':
+      case 'weatherRefresh': return (context) => this.adminWeatherRoutes(context);
+      case 'nativeCapabilities':
+      case 'storage':
+      case 'storagePolicy':
+      case 'storageCleanup':
+      case 'metrics':
+      case 'metricsDistributions':
+      case 'audit': return (context) => this.adminStorageMetricsRoutes(context);
+      default: throw new Error(`missing native admin route handler: ${capability}`);
+    }
+  }
+
   private buildAdminRoutes(): NativeAdminRoute[] {
-    const handler = (context: NativeAdminRouteContext) => this.adminRequestLegacy(context.path, context.options);
     const legacy = (capability: string, methods: readonly NativeAdminMethod[] | undefined, matches: (route: string) => boolean): NativeAdminRoute => ({
       capability,
       methods,
       matches,
-      handler
+      handler: (context) => this.adminRouteHandler(capability)(context)
     });
 
     return [
@@ -906,15 +982,9 @@ export class LocalCore implements LocalCoreApi {
     ];
   }
 
-  /** Legacy shared handler for routes that have not been extracted into
-   * dedicated route handlers yet. The registry above is authoritative for
-   * matching; this method only runs for routes it already declared. */
-  private async adminRequestLegacy<T = unknown>(path: string, options: LocalAdminRequestOptions = {}): Promise<T> {
-    const url = new URL(path, 'https://sooya.local');
-    const route = url.pathname;
-    const method = (options.method ?? 'GET').toUpperCase();
-    const rawBody = options.body;
-    const body = isRecord(options.body) ? options.body : {};
+  private async adminSystemRoutes(context: NativeAdminRouteContext): Promise<unknown> {
+    const route = context.route;
+    const method = context.method;
     if (route === '/api/admin/system') {
       const [integrity, messages, memories, media, mediaStats, pendingJobs, backupBytes] = await Promise.all([
         this.options.db.integrityCheck(),
@@ -948,9 +1018,16 @@ export class LocalCore implements LocalCoreApi {
         storage: { mediaBytes: mediaStats.bytes, backupBytes, freeBytes: null, mode: 'app-sandbox' },
         stream: { mode: 'in-process', lastEventSeq: this.events.lastSequence },
         agent: { mode: 'on-device' }
-      } as T;
+      };
     }
-    if (route === '/api/admin/capabilities') return { capabilities: (await this.capabilities()).capabilities, embeddingDimensions: null } as T;
+    if (route === '/api/admin/capabilities') return { capabilities: (await this.capabilities()).capabilities, embeddingDimensions: null };
+    throw new AdminRouteUnsupportedError(method, route);
+  }
+
+  private async adminPersonaRoutes(context: NativeAdminRouteContext): Promise<unknown> {
+    const route = context.route;
+    const method = context.method;
+    const body = context.body;
     if (route === '/api/admin/persona') {
       const fallback = { id: 'local', name: 'SOOYA', avatar: '', userAvatar: '', tagline: '在的', systemPrompt: '', language: 'zh-CN', stickerPolicy: {}, voicePolicy: {}, imagePolicy: {} };
       if (method === 'PUT' || method === 'PATCH') {
@@ -959,7 +1036,7 @@ export class LocalCore implements LocalCoreApi {
         await this.syncAvatarMediaFlags(previous, next);
         await this.settingsRepo.set('persona', next);
       }
-      return { persona: await this.settingsRepo.get('persona', fallback) } as T;
+      return { persona: await this.settingsRepo.get('persona', fallback) };
     }
     if (route === '/api/admin/voice-behavior') {
       // Default mirrors the server's DEFAULT_VOICE_PREFERENCES so voice stays
@@ -967,8 +1044,15 @@ export class LocalCore implements LocalCoreApi {
       // enforced by the runtime and only misled the panel).
       const fallback = { enabled: true, maxVoiceSeconds: 30 };
       if (method === 'PUT' || method === 'PATCH') await this.settingsRepo.set('voiceBehavior', body);
-      return await this.settingsRepo.get('voiceBehavior', fallback) as T;
+      return await this.settingsRepo.get('voiceBehavior', fallback);
     }
+    throw new AdminRouteUnsupportedError(method, route);
+  }
+
+  private async adminModelRoutes(context: NativeAdminRouteContext): Promise<unknown> {
+    const route = context.route;
+    const method = context.method;
+    const body = context.body;
     if (route === '/api/admin/models') {
       if (method === 'PUT' || method === 'PATCH') {
         const input = isRecord(body.models) ? body.models : body;
@@ -1023,34 +1107,34 @@ export class LocalCore implements LocalCoreApi {
         if (savedWebSearch.maxResults != null) mergedWebSearch.maxResults = savedWebSearch.maxResults;
         if (savedWebSearch.timeoutMs != null) mergedWebSearch.timeoutMs = savedWebSearch.timeoutMs;
       }
-      return { models: { ...saved, ...models } } as T;
+      return { models: { ...saved, ...models } };
     }
     if (route === '/api/admin/model-presets') {
       if (method === 'PUT') await this.settingsRepo.set('modelPresets', body.presets ?? []);
-      return { presets: await this.settingsRepo.get('modelPresets', []), slots: await this.settingsRepo.get('modelSlots', []) } as T;
+      return { presets: await this.settingsRepo.get('modelPresets', []), slots: await this.settingsRepo.get('modelSlots', []) };
     }
     if (route === '/api/admin/model-presets/from-current' && method === 'POST') {
       const preset = isRecord(body.preset) ? body.preset : {};
       const presets = await this.settingsRepo.get<Array<Record<string, unknown>>>('modelPresets', []);
       const saved = { ...preset, id: typeof preset.id === 'string' ? preset.id : `preset_${Date.now().toString(36)}` };
       await this.settingsRepo.set('modelPresets', [...presets.filter((item) => item.id !== saved.id), saved]);
-      return { preset: saved } as T;
+      return { preset: saved };
     }
     if (route === '/api/admin/models/web-search/test' && method === 'POST') {
       if (body.provider === 'responses') {
-        return { ok: false, provider: 'responses', latencyMs: 0, resultCount: 0, detail: '设备端本地运行时不支持 Responses 原生搜索，请改用豆包或 Tavily' } as T;
+        return { ok: false, provider: 'responses', latencyMs: 0, resultCount: 0, detail: '设备端本地运行时不支持 Responses 原生搜索，请改用豆包或 Tavily' };
       }
-      if (!this.options.http) return { ok: false, provider: body.provider ?? 'unknown', latencyMs: 0, resultCount: 0, detail: '本地 HTTP 传输不可用，无法执行联网搜索测试' } as T;
+      if (!this.options.http) return { ok: false, provider: body.provider ?? 'unknown', latencyMs: 0, resultCount: 0, detail: '本地 HTTP 传输不可用，无法执行联网搜索测试' };
       const runtime = await createWebSearch(this.options.http, this.configRepo);
-      if (!runtime || runtime.providers.length === 0) return { ok: false, provider: body.provider ?? 'unknown', latencyMs: 0, resultCount: 0, detail: '未配置联网搜索（webSearch provider 未启用或无密钥引用）' } as T;
+      if (!runtime || runtime.providers.length === 0) return { ok: false, provider: body.provider ?? 'unknown', latencyMs: 0, resultCount: 0, detail: '未配置联网搜索（webSearch provider 未启用或无密钥引用）' };
       const started = Date.now();
       try {
         const provider = runtime.providers.find((item) => item.name === body.provider) ?? runtime.providers[0]!;
         const query = typeof body.query === 'string' && body.query.trim() ? body.query.trim().slice(0, 200) : '今日新闻';
         const result = await provider.search({ query, maxResults: runtime.maxResults, signal: undefined });
-        return { ok: true, provider: provider.name, latencyMs: Date.now() - started, resultCount: result.citations.length, citations: result.citations.slice(0, 5), detail: `${result.citations.length} 条结果` } as T;
+        return { ok: true, provider: provider.name, latencyMs: Date.now() - started, resultCount: result.citations.length, citations: result.citations.slice(0, 5), detail: `${result.citations.length} 条结果` };
       } catch (error) {
-        return { ok: false, provider: body.provider ?? 'unknown', latencyMs: Date.now() - started, resultCount: 0, detail: error instanceof Error ? error.message : String(error) } as T;
+        return { ok: false, provider: body.provider ?? 'unknown', latencyMs: Date.now() - started, resultCount: 0, detail: error instanceof Error ? error.message : String(error) };
       }
     }
     const modelAction = route.match(/^\/api\/admin\/models\/([^/]+)\/(discover|test)$/u);
@@ -1061,9 +1145,9 @@ export class LocalCore implements LocalCoreApi {
         const service = new ModelDiscoveryService(this.options.http, this.configRepo);
         const result = await service.discover(capability as never, typeof body.baseUrl === 'string' ? body.baseUrl : undefined);
         if (!result.ok) throw new Error(result.detail);
-        return { models: result.models, source: result.source } as T;
+        return { models: result.models, source: result.source };
       }
-      return await this.probeModel(capability as (typeof MODEL_CAPABILITY_SLOTS)[number], body) as T;
+      return await this.probeModel(capability as (typeof MODEL_CAPABILITY_SLOTS)[number], body);
     }
     const applyPreset = route.match(/^\/api\/admin\/model-presets\/([^/]+)\/apply$/u)?.[1];
     if (applyPreset && method === 'POST') {
@@ -1073,44 +1157,58 @@ export class LocalCore implements LocalCoreApi {
       const capability = typeof preset.slot === 'string' && (MODEL_CAPABILITY_SLOTS as readonly string[]).includes(preset.slot) ? preset.slot as (typeof MODEL_CAPABILITY_SLOTS)[number] : 'chat';
       const existing = await this.configRepo.getProvider(capability);
       await this.configRepo.setProvider({ capability, provider: normalizeProvider(String(preset.provider ?? '')), model: String(preset.model ?? ''), baseUrl: String(preset.baseUrl ?? ''), secretRef: existing?.secretRef ?? null });
-      return { applied: decodeURIComponent(applyPreset), models: (await this.adminRequest<{ models: Record<string, unknown> }>('/api/admin/models')).models } as T;
+      return { applied: decodeURIComponent(applyPreset), models: (await this.adminRequest<{ models: Record<string, unknown> }>('/api/admin/models')).models };
     }
     if (route === '/api/admin/voice/preview' && method === 'POST') {
       const preview = await this.previewVoice(typeof body.text === 'string' ? body.text : undefined, typeof body.emotion === 'string' ? body.emotion : undefined);
-      if (!preview.ok) return preview as T;
-      return { ok: true, dataBase64: bytesToBase64(preview.audio.data), mime: preview.audio.mime, format: preview.audio.format } as T;
+      if (!preview.ok) return preview;
+      return { ok: true, dataBase64: bytesToBase64(preview.audio.data), mime: preview.audio.mime, format: preview.audio.format };
     }
+    throw new AdminRouteUnsupportedError(method, route);
+  }
+
+  private async adminMemoryRoutes(context: NativeAdminRouteContext): Promise<unknown> {
+    const route = context.route;
+    const method = context.method;
+    const url = context.url;
     if (route === '/api/admin/memories') {
       const rows = await this.options.db.query<{ id: string; kind: string; content: string; importance: number; confidence: number; created_at: string; updated_at: string; hits: number; has_embedding: number }>('SELECT id,kind,content,importance,confidence,created_at,updated_at,hits,embedding IS NOT NULL AS has_embedding FROM memories WHERE active=1 ORDER BY updated_at DESC LIMIT ?', [500]);
       const memories = rows.map((row) => ({ id: row.id, kind: row.kind, content: row.content, importance: row.importance, confidence: row.confidence, createdAt: row.created_at, updatedAt: row.updated_at, hits: row.hits, hasEmbedding: row.has_embedding === 1 }));
-      return { memories, stats: { total: memories.length } } as T;
+      return { memories, stats: { total: memories.length } };
     }
     if (route === '/api/admin/memories/clear' && method === 'POST') {
       if (this.memorySync) await this.memorySync.clearLocal();
       else await this.options.db.run("UPDATE memories SET active=0,updated_at=? WHERE active=1", [(this.options.now?.() ?? new Date()).toISOString()]);
-      return { cleared: true } as T;
+      return { cleared: true };
     }
-    if (route === '/api/admin/memory/status') return await this.ombreStatus() as T;
+    if (route === '/api/admin/memory/status') return await this.ombreStatus();
     if (route === '/api/admin/memory/sync' && method === 'POST') {
-      if (!this.memorySync) return { state: 'ready', pushed: 0, pulled: 0, conflicts: 0, pending: 0, detail: 'Ombre sync is not configured' } as T;
-      return await this.memorySync.syncOnce() as T;
+      if (!this.memorySync) return { state: 'ready', pushed: 0, pulled: 0, conflicts: 0, pending: 0, detail: 'Ombre sync is not configured' };
+      return await this.memorySync.syncOnce();
     }
     if (route.startsWith('/api/admin/memory/ombre/search')) {
       const query = url.searchParams.get('q') ?? '';
       const results = await this.memoryRepo.searchFts(query, Number(url.searchParams.get('limit') ?? 10));
-      return { query, results: results.map((row) => ({ id: row.id, content: row.content })), raw: '', resultCount: results.length } as T;
+      return { query, results: results.map((row) => ({ id: row.id, content: row.content })), raw: '', resultCount: results.length };
     }
     if (route.startsWith('/api/admin/memory/ombre/catalog')) {
       const memories = await this.memoryRepo.list({ limit: Number(url.searchParams.get('limit') ?? 50) });
-      return { backend: 'local', entries: memories.map((row) => ({ id: row.id, kind: row.kind, content: row.content, updatedAt: row.updated_at })), total: memories.length } as T;
+      return { backend: 'local', entries: memories.map((row) => ({ id: row.id, kind: row.kind, content: row.content, updatedAt: row.updated_at })), total: memories.length };
     }
-    if (route === '/api/admin/memory/activity') return { activity: await this.memoryActivity(Number(url.searchParams.get('limit') ?? 50)) } as T;
+    if (route === '/api/admin/memory/activity') return { activity: await this.memoryActivity(Number(url.searchParams.get('limit') ?? 50)) };
     const memoryId = route.match(/^\/api\/admin\/memories\/([^/]+)$/u)?.[1];
     if (memoryId && method === 'DELETE') {
       const id = decodeURIComponent(memoryId);
       const deleted = this.memorySync ? await this.memorySync.forgetLocal(id) : await this.memoryRepo.forget(id);
-      return { deleted } as T;
+      return { deleted };
     }
+    throw new AdminRouteUnsupportedError(method, route);
+  }
+
+  private async adminChatRoutes(context: NativeAdminRouteContext): Promise<unknown> {
+    const route = context.route;
+    const method = context.method;
+    const url = context.url;
     if (route === '/api/admin/chat/history') {
       const hasMediaParam = url.searchParams.get('hasMedia');
       const page = await this.messagesRepo.adminPage({
@@ -1123,16 +1221,24 @@ export class LocalCore implements LocalCoreApi {
         limit: Number(url.searchParams.get('limit') ?? 100),
         offset: Number(url.searchParams.get('offset') ?? 0)
       });
-      return { messages: page.messages, total: page.total, limit: page.messages.length, offset: Number(url.searchParams.get('offset') ?? 0), hasMore: page.hasMore } as T;
+      return { messages: page.messages, total: page.total, limit: page.messages.length, offset: Number(url.searchParams.get('offset') ?? 0), hasMore: page.hasMore };
     }
     const contextId = route.match(/^\/api\/admin\/chat\/history\/([^/]+)\/context$/u)?.[1];
-    if (contextId) return await this.messageContext(decodeURIComponent(contextId), { before: Number(url.searchParams.get('before') ?? 10), after: Number(url.searchParams.get('after') ?? 10) }) as T;
-    if (route === '/api/admin/chat/clear' && method === 'POST') { const count = await this.messagesRepo.count(); await this.messagesRepo.clearAll(); return { cleared: true, messages: count } as T; }
-    if (route === '/api/admin/chat/summary/build' && method === 'POST') return await this.summaryBuilder.build() as T;
-    if (route === '/api/admin/jobs') return { jobs: await this.jobsRepo.list(100) } as T;
-    if (route === '/api/admin/errors' && method === 'DELETE') return { cleared: await this.clearErrors() } as T;
-    if (route === '/api/admin/errors') return { errors: await this.listErrors(Number(url.searchParams.get('limit') ?? 100)) } as T;
-    if (route === '/api/admin/backups' && method === 'GET') return { backups: await this.listBackups() } as T;
+    if (contextId) return await this.messageContext(decodeURIComponent(contextId), { before: Number(url.searchParams.get('before') ?? 10), after: Number(url.searchParams.get('after') ?? 10) });
+    if (route === '/api/admin/chat/clear' && method === 'POST') { const count = await this.messagesRepo.count(); await this.messagesRepo.clearAll(); return { cleared: true, messages: count }; }
+    if (route === '/api/admin/chat/summary/build' && method === 'POST') return await this.summaryBuilder.build();
+    throw new AdminRouteUnsupportedError(method, route);
+  }
+
+  private async adminOperationsRoutes(context: NativeAdminRouteContext): Promise<unknown> {
+    const route = context.route;
+    const method = context.method;
+    const url = context.url;
+    const body = context.body;
+    if (route === '/api/admin/jobs') return { jobs: await this.jobsRepo.list(100) };
+    if (route === '/api/admin/errors' && method === 'DELETE') return { cleared: await this.clearErrors() };
+    if (route === '/api/admin/errors') return { errors: await this.listErrors(Number(url.searchParams.get('limit') ?? 100)) };
+    if (route === '/api/admin/backups' && method === 'GET') return { backups: await this.listBackups() };
     if (route === '/api/admin/backups' && method === 'POST') {
       const name = `sooya-${Date.now().toString(36)}.sqlite3`;
       const started = (this.options.now?.() ?? new Date()).toISOString();
@@ -1143,7 +1249,7 @@ export class LocalCore implements LocalCoreApi {
         const finished = (this.options.now?.() ?? new Date()).toISOString();
         const detail = { ...integrity, native: backup ?? null };
         await this.options.db.run(`UPDATE local_backup_metadata SET state=?,bytes=?,sha256=?,verified_at=?,detail_json=? WHERE id=?`, [integrity.ok ? 'ready' : 'failed', backup && typeof backup === 'object' ? backup.sizeBytes ?? null : null, backup && typeof backup === 'object' ? backup.sha256 ?? null : null, finished, JSON.stringify(detail), name]);
-        return { backup: { name, path: name, bytes: backup && typeof backup === 'object' ? backup.sizeBytes ?? 0 : 0, createdAt: started, sha256: backup && typeof backup === 'object' ? backup.sha256 ?? '' : '', verified: integrity.ok && (backup && typeof backup === 'object' ? backup.verified !== false : true), mediaArchived: false } } as T;
+        return { backup: { name, path: name, bytes: backup && typeof backup === 'object' ? backup.sizeBytes ?? 0 : 0, createdAt: started, sha256: backup && typeof backup === 'object' ? backup.sha256 ?? '' : '', verified: integrity.ok && (backup && typeof backup === 'object' ? backup.verified !== false : true), mediaArchived: false } };
       } catch (error) {
         await this.options.db.run(`UPDATE local_backup_metadata SET state='failed',detail_json=? WHERE id=?`, [JSON.stringify({ error: error instanceof Error ? error.message : String(error) }), name]);
         throw error;
@@ -1154,7 +1260,7 @@ export class LocalCore implements LocalCoreApi {
       if (!this.options.db.deleteBackup) throw new AdminRouteUnsupportedError(method, route);
       const deletedFile = await this.options.db.deleteBackup(name);
       const deletedRow = (await this.options.db.run('DELETE FROM local_backup_metadata WHERE id=?', [name])).changes > 0;
-      return { deleted: deletedFile || deletedRow } as T;
+      return { deleted: deletedFile || deletedRow };
     }
     const backupName = route.match(/^\/api\/admin\/backups\/([^/]+)\/(verify|restore)$/u);
     if (backupName && method === 'POST') {
@@ -1166,24 +1272,37 @@ export class LocalCore implements LocalCoreApi {
         const verified = typeof backup.verified === 'boolean' ? backup.verified : true;
         const integrity = 'integrity' in backup && Array.isArray((backup as { integrity?: unknown }).integrity) ? (backup as { integrity: unknown[] }).integrity : [];
         await this.options.db.run(`UPDATE local_backup_metadata SET verified_at=?,detail_json=json_set(COALESCE(detail_json,'{}'),'$.verifyResult',json(?)) WHERE id=?`, [(this.options.now?.() ?? new Date()).toISOString(), JSON.stringify(backup), name]);
-        return { name, verified, sizeBytes: typeof backup.sizeBytes === 'number' ? backup.sizeBytes : null, sha256: typeof backup.sha256 === 'string' ? backup.sha256 : '', integrity, detail: backup } as T;
+        return { name, verified, sizeBytes: typeof backup.sizeBytes === 'number' ? backup.sizeBytes : null, sha256: typeof backup.sha256 === 'string' ? backup.sha256 : '', integrity, detail: backup };
       }
       if (!this.options.db.restore) throw new Error('database restore is unavailable on this platform');
       await this.options.db.restore(name);
       await this.options.db.run(`UPDATE local_backup_metadata SET state='restored',restored_at=? WHERE id=?`, [(this.options.now?.() ?? new Date()).toISOString(), name]);
       const integrity = await this.options.db.integrityCheck();
-      return { name, verified: integrity.ok, integrity } as T;
+      return { name, verified: integrity.ok, integrity };
     }
-    if (route === '/api/admin/notifications') return { notifications: await this.configRepo.notificationCapabilities() } as T;
-    if (route === '/api/admin/life/catch-up' && method === 'POST') return await this.lifeCatchUp.catchUp() as T;
-    if (route === '/api/admin/moments/compose' && method === 'POST') return await this.momentComposer.compose() as T;
-    if (route === '/api/admin/ota' && method === 'GET') return { manifestUrl: await this.configRepo.getPreference('ota.manifestUrl', ''), state: (await this.options.db.query('SELECT * FROM local_update_state WHERE id=1'))[0] ?? null } as T;
+    if (route === '/api/admin/notifications') return { notifications: await this.configRepo.notificationCapabilities() };
+    if (route === '/api/admin/ota' && method === 'GET') return { manifestUrl: await this.configRepo.getPreference('ota.manifestUrl', ''), state: (await this.options.db.query('SELECT * FROM local_update_state WHERE id=1'))[0] ?? null };
     if (route === '/api/admin/ota' && (method === 'PUT' || method === 'PATCH')) {
       const manifestUrl = typeof body.manifestUrl === 'string' ? body.manifestUrl.trim() : '';
       if (manifestUrl && !/^https:\/\//iu.test(manifestUrl)) throw new Error('OTA manifest URL must use HTTPS');
       await this.configRepo.setPreference('ota.manifestUrl', manifestUrl);
-      return { manifestUrl, state: (await this.options.db.query('SELECT * FROM local_update_state WHERE id=1'))[0] ?? null } as T;
+      return { manifestUrl, state: (await this.options.db.query('SELECT * FROM local_update_state WHERE id=1'))[0] ?? null };
     }
+    throw new AdminRouteUnsupportedError(method, route);
+  }
+
+  private async adminLifeEngineRoutes(context: NativeAdminRouteContext): Promise<unknown> {
+    const route = context.route;
+    const method = context.method;
+    if (route === '/api/admin/life/catch-up' && method === 'POST') return await this.lifeCatchUp.catchUp();
+    if (route === '/api/admin/moments/compose' && method === 'POST') return await this.momentComposer.compose();
+    throw new AdminRouteUnsupportedError(method, route);
+  }
+
+  private async adminMcpRoutes(context: NativeAdminRouteContext): Promise<unknown> {
+    const route = context.route;
+    const method = context.method;
+    const body = context.body;
     if (route === '/api/admin/mcp/servers' && method === 'GET') {
       const servers = await this.mcpRepo.listServers();
       const policies = await this.mcpRepo.listPolicies();
@@ -1192,19 +1311,19 @@ export class LocalCore implements LocalCoreApi {
       return { configSource: 'local-sqlite', globalPolicy: this.toolPolicy.policyState(), servers: servers.map((server) => {
         const { secretKey: _secretKey, ...safe } = server;
         return { ...safe, authConfigured: Boolean(_secretKey), toolCount: policies.filter((policy) => policy.serverId === server.id).length };
-      }), tools, memory, dashboardUrl: null } as T;
+      }), tools, memory, dashboardUrl: null };
     }
     const mcpTest = route.match(/^\/api\/admin\/mcp\/([^/]+)\/(test|refresh-tools)$/u);
     if (mcpTest && method === 'POST') {
       const server = await this.refreshMcpServer(decodeURIComponent(mcpTest[1]!));
-      return { ok: true, server: { ...server, authConfigured: Boolean(server?.secretKey) } } as T;
+      return { ok: true, server: { ...server, authConfigured: Boolean(server?.secretKey) } };
     }
     const mcpTool = route.match(/^\/api\/admin\/mcp\/tools\/([^/]+)$/u)?.[1];
     if (mcpTool) {
       const decodedTool = decodeURIComponent(mcpTool);
       const found = this.toolRegistry.listForAdmin().find((tool) => tool.name === decodedTool || tool.modelName === decodedTool);
       if (!found) throw new Error(`MCP 工具 ${decodedTool} 不存在`);
-      return { tool: found } as T;
+      return { tool: found };
     }
     const mcpServerId = route.match(/^\/api\/admin\/mcp\/servers\/([^/]+)$/u)?.[1];
     if (mcpServerId && method === 'DELETE') {
@@ -1216,7 +1335,7 @@ export class LocalCore implements LocalCoreApi {
         await this.options.secrets.remove(`mcp.${id}.token`);
         if (existing?.secretKey && existing.secretKey !== `mcp.${id}.token`) await this.options.secrets.remove(existing.secretKey);
       }
-      return { deleted: true } as T;
+      return { deleted: true };
     }
     if (route === '/api/admin/mcp/servers' && (method === 'POST' || method === 'PUT')) {
       const id = typeof body.id === 'string' && body.id ? body.id : `mcp_${Date.now().toString(36)}`;
@@ -1239,8 +1358,17 @@ export class LocalCore implements LocalCoreApi {
         secretKey = existing?.secretKey;
       }
       const server = await this.mcpRepo.upsertServer({ id, name: typeof body.name === 'string' ? body.name : id, url: sanitizeMcpUrl(typeof body.url === 'string' ? body.url : ''), transport: body.transport === 'sse' ? 'sse' : 'streamable-http', enabled: body.enabled !== false, required: body.required === true, secretKey });
-      return { server: { ...server, authConfigured: Boolean(server.secretKey) } } as T;
+      return { server: { ...server, authConfigured: Boolean(server.secretKey) } };
     }
+    throw new AdminRouteUnsupportedError(method, route);
+  }
+
+  private async adminStickerRoutes(context: NativeAdminRouteContext): Promise<unknown> {
+    const route = context.route;
+    const method = context.method;
+    const url = context.url;
+    const rawBody = context.rawBody;
+    const body = context.body;
     if (route === '/api/admin/stickers' && method === 'POST') {
       const form = rawBody as { get?: (name: string) => unknown };
       const file = typeof form?.get === 'function' ? form.get('file') : null;
@@ -1250,7 +1378,7 @@ export class LocalCore implements LocalCoreApi {
       const media = uploaded.media[0];
       if (!media) throw new Error('sticker media could not be stored');
       const sticker = await this.stickersRepo.create({ mediaId: media.id, name: stringValue(typeof form.get === 'function' ? form.get('name') : null, 'sticker'), emotion: stringValue(typeof form.get === 'function' ? form.get('emotion') : null, 'neutral'), tags: [typeof form.get === 'function' ? stringValue(form.get('tags'), 'neutral') : 'neutral'], nameSource: 'manual', analysisSource: 'manual' });
-      return { created: [toAdminSticker(sticker)], failed: [] } as T;
+      return { created: [toAdminSticker(sticker)], failed: [] };
     }
     if (route === '/api/admin/stickers' && method === 'GET') {
       const filters = { q: url.searchParams.get('q') ?? undefined, status: (url.searchParams.get('status') as never) || undefined, source: (url.searchParams.get('source') as never) || undefined, emotion: url.searchParams.get('emotion') ?? undefined, enabled: url.searchParams.has('enabled') ? url.searchParams.get('enabled') === 'true' : undefined, sort: (url.searchParams.get('sort') as never) || 'created', limit: Number(url.searchParams.get('limit') ?? 100), offset: Number(url.searchParams.get('offset') ?? 0) };
@@ -1259,20 +1387,20 @@ export class LocalCore implements LocalCoreApi {
         this.stickersRepo.countFiltered(filters),
         this.stickersRepo.facets(filters)
       ]);
-      return { stickers: stickers.map(toAdminSticker), total, offset: Number(url.searchParams.get('offset') ?? 0), facets, analysisVersion: 0 } as T;
+      return { stickers: stickers.map(toAdminSticker), total, offset: Number(url.searchParams.get('offset') ?? 0), facets, analysisVersion: 0 };
     }
     const stickerId = route.match(/^\/api\/admin\/stickers\/([^/]+)$/u)?.[1];
     if (stickerId && method === 'PATCH') {
       const sticker = await this.stickersRepo.update(decodeURIComponent(stickerId), { name: typeof body.name === 'string' ? body.name : undefined, tags: Array.isArray(body.tags) ? body.tags.filter((tag): tag is string => typeof tag === 'string') : undefined, emotion: typeof body.emotion === 'string' ? body.emotion : undefined, enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined, description: typeof body.description === 'string' ? body.description : undefined, imageText: typeof body.imageText === 'string' ? body.imageText : undefined, userMeaning: typeof body.userMeaning === 'string' ? body.userMeaning : undefined, favorite: typeof body.favorite === 'boolean' ? body.favorite : undefined });
       if (!sticker) throw new Error('sticker not found');
-      return { sticker: toAdminSticker(sticker) } as T;
+      return { sticker: toAdminSticker(sticker) };
     }
-    if (stickerId && method === 'DELETE') return { deleted: await this.stickersRepo.delete(decodeURIComponent(stickerId)) } as T;
+    if (stickerId && method === 'DELETE') return { deleted: await this.stickersRepo.delete(decodeURIComponent(stickerId)) };
     const stickerAction = route.match(/^\/api\/admin\/stickers\/([^/]+)\/analyze$/u)?.[1];
     if (stickerAction && method === 'POST') {
       const stickerId = decodeURIComponent(stickerAction);
       void this.analyzeSticker(stickerId, body.force === true).catch((error) => { void this.recordError('sticker.analyze', errorMessage(error)); });
-      return { queued: true, jobId: '', stickerId, force: body.force === true } as T;
+      return { queued: true, jobId: '', stickerId, force: body.force === true };
     }
     if (route === '/api/admin/stickers/analyze-batch' && method === 'POST') {
       const selectedIds = body.mode === 'selected' && Array.isArray(body.ids) ? body.ids.filter((id): id is string => typeof id === 'string') : [];
@@ -1280,11 +1408,17 @@ export class LocalCore implements LocalCoreApi {
         ? (await Promise.all(selectedIds.map(async (id) => await this.stickersRepo.get(id)))).filter((item): item is Sticker => Boolean(item))
         : await this.stickersRepo.list({ status: 'pending', limit: 500 });
       for (const sticker of pending) void this.analyzeSticker(sticker.id, true).catch((error) => { void this.recordError('sticker.analyze', errorMessage(error)); });
-      return { queued: pending.length, skipped: selectedIds.length ? Math.max(0, selectedIds.length - pending.length) : 0 } as T;
+      return { queued: pending.length, skipped: selectedIds.length ? Math.max(0, selectedIds.length - pending.length) : 0 };
     }
-    // ---- persona reference images (three framing slots, user uploads win) ----
+    throw new AdminRouteUnsupportedError(method, route);
+  }
+
+  private async adminReferenceRoutes(context: NativeAdminRouteContext): Promise<unknown> {
+    const route = context.route;
+    const method = context.method;
+    const rawBody = context.rawBody;
     if (route === '/api/admin/persona/references' && method === 'GET') {
-      return { dir: null, references: await this.personaReferences.list() } as T;
+      return { dir: null, references: await this.personaReferences.list() };
     }
     const referenceSlot = route.match(/^\/api\/admin\/persona\/references\/slot\/([^/]+)$/u)?.[1];
     if (referenceSlot && method === 'POST') {
@@ -1306,7 +1440,7 @@ export class LocalCore implements LocalCoreApi {
         await this.deleteMediaIfUnreferenced(uploaded.previousMediaId);
       }
       const referenceImages = (await this.personaReferences.list()).map((item) => item.name);
-      return { reference: uploaded.item, replaced, referenceImages } as T;
+      return { reference: uploaded.item, replaced, referenceImages };
     }
     const referenceData = route.match(/^\/api\/admin\/persona\/references\/([^/]+)\/data$/u)?.[1];
     if (referenceData && method === 'GET') {
@@ -1316,9 +1450,9 @@ export class LocalCore implements LocalCoreApi {
       if (item?.mediaId) {
         const read = this.media ? await this.media.read(item.mediaId) : null;
         if (!read) throw new Error('reference not found');
-        return { dataBase64: bytesToBase64(read.data), mime: read.record.mime } as T;
+        return { dataBase64: bytesToBase64(read.data), mime: read.record.mime };
       }
-      if (item) return { builtinPath: item.builtinPath } as T;
+      if (item) return { builtinPath: item.builtinPath };
       throw new Error('reference not found');
     }
     const referenceDelete = route.match(/^\/api\/admin\/persona\/references\/([^/]+)$/u)?.[1];
@@ -1330,14 +1464,22 @@ export class LocalCore implements LocalCoreApi {
       for (const [framing, mediaId] of Object.entries(before)) {
         if (mediaId && !(await this.personaReferences.activeSlots())[framing as ReferenceFraming]) removedFile = await this.deleteMediaIfUnreferenced(mediaId) || removedFile;
       }
-      return { deleted: result.framing !== null, removedFile, referenceImages: result.referenceImages.map((item) => item.name) } as T;
+      return { deleted: result.framing !== null, removedFile, referenceImages: result.referenceImages.map((item) => item.name) };
     }
+    throw new AdminRouteUnsupportedError(method, route);
+  }
+
+  private async adminMediaRoutes(context: NativeAdminRouteContext): Promise<unknown> {
+    const route = context.route;
+    const method = context.method;
+    const url = context.url;
+    const body = context.body;
     const localMediaData = route.match(/^\/api\/admin\/media\/([^/]+)\/data$/u)?.[1];
     if (localMediaData && method === 'GET') {
       if (!this.media) throw new Error('native media storage is unavailable');
       const value = await this.media.read(decodeURIComponent(localMediaData));
       if (!value) throw new Error('media not found');
-      return { id: value.record.id, mime: value.record.mime, bytes: value.record.bytes, dataBase64: bytesToBase64(value.data) } as T;
+      return { id: value.record.id, mime: value.record.mime, bytes: value.record.bytes, dataBase64: bytesToBase64(value.data) };
     }
     if (route === '/api/admin/gallery' && method === 'GET') {
       const query = Object.fromEntries(url.searchParams.entries());
@@ -1346,7 +1488,7 @@ export class LocalCore implements LocalCoreApi {
         from: query.from, to: query.to, limit: Number(query.limit ?? 60), offset: Number(query.offset ?? 0), avatar: false
       });
       const stats = await this.mediaRepo.galleryStats({ deleted: query.trash === 'true', origin: mediaOrigin(query.origin), favorite: query.favorite === 'true', search: query.search, from: query.from, to: query.to, avatar: false });
-      return { media: await Promise.all(rows.map((row) => this.toAdminMedia(row))), stats, total: stats.count } as T;
+      return { media: await Promise.all(rows.map((row) => this.toAdminMedia(row))), stats, total: stats.count };
     }
     const mediaId = route.match(/^\/api\/admin\/media\/([^/]+)$/u)?.[1];
     if (mediaId) {
@@ -1354,35 +1496,35 @@ export class LocalCore implements LocalCoreApi {
       if (method === 'GET') {
         const row = await this.mediaRepo.get(id);
         if (!row) throw new Error('media not found');
-        return { media: await this.toAdminMedia(row) } as T;
+        return { media: await this.toAdminMedia(row) };
       }
       if (method === 'PATCH') {
         if (typeof body.favorite === 'boolean') await this.mediaRepo.setFavorite(id, body.favorite);
         if (Array.isArray(body.tags)) await this.mediaRepo.setTags(id, body.tags.filter((tag): tag is string => typeof tag === 'string'));
         const row = await this.mediaRepo.get(id);
         if (!row) throw new Error('media not found');
-        return { media: await this.toAdminMedia(row) } as T;
+        return { media: await this.toAdminMedia(row) };
       }
       if (method === 'DELETE') {
         await this.assertMediaDeletable(id);
         await this.removeMediaFile(id);
-        return { deleted: await this.mediaRepo.delete(id) } as T;
+        return { deleted: await this.mediaRepo.delete(id) };
       }
     }
     const mediaAction = route.match(/^\/api\/admin\/media\/([^/]+)\/(trash|restore|permanent|usage)$/u);
     if (mediaAction) {
       const id = decodeURIComponent(mediaAction[1]!);
-      if (mediaAction[2] === 'trash' && method === 'POST') { await this.assertMediaDeletable(id); return { trashed: await this.mediaRepo.trash(id) } as T; }
-      if (mediaAction[2] === 'restore' && method === 'POST') return { restored: await this.mediaRepo.restore(id) } as T;
-      if (mediaAction[2] === 'permanent' && method === 'DELETE') { await this.assertMediaDeletable(id); await this.removeMediaFile(id); return { deleted: await this.mediaRepo.delete(id) } as T; }
-      if (mediaAction[2] === 'usage' && method === 'GET') { const references = await this.mediaRepo.references(id); return { mediaId: id, usageCount: references.total, references, avatar: await this.mediaRepo.isAvatar(id) } as T; }
+      if (mediaAction[2] === 'trash' && method === 'POST') { await this.assertMediaDeletable(id); return { trashed: await this.mediaRepo.trash(id) }; }
+      if (mediaAction[2] === 'restore' && method === 'POST') return { restored: await this.mediaRepo.restore(id) };
+      if (mediaAction[2] === 'permanent' && method === 'DELETE') { await this.assertMediaDeletable(id); await this.removeMediaFile(id); return { deleted: await this.mediaRepo.delete(id) }; }
+      if (mediaAction[2] === 'usage' && method === 'GET') { const references = await this.mediaRepo.references(id); return { mediaId: id, usageCount: references.total, references, avatar: await this.mediaRepo.isAvatar(id) }; }
     }
     if (route === '/api/admin/media' && method === 'GET') {
       const state = url.searchParams.get('state');
       const deleted = state === 'trashed' ? true : state === 'all' ? null : false;
       const filters = { deleted, kind: (url.searchParams.get('kind') as 'image' | 'audio' | 'sticker' | 'file' | null) ?? undefined, origin: (url.searchParams.get('origin') as 'upload' | 'generated' | 'builtin' | 'remote' | null) ?? undefined, search: url.searchParams.get('q') ?? undefined, limit: Number(url.searchParams.get('limit') ?? 200), offset: Number(url.searchParams.get('offset') ?? 0) };
       const [rows, stats] = await Promise.all([this.mediaRepo.listGallery(filters), this.mediaRepo.galleryStats(filters)]);
-      return { media: await Promise.all(rows.map((row) => this.toAdminMedia(row))), total: stats.count, offset: Number(url.searchParams.get('offset') ?? 0) } as T;
+      return { media: await Promise.all(rows.map((row) => this.toAdminMedia(row))), total: stats.count, offset: Number(url.searchParams.get('offset') ?? 0) };
     }
     if (route === '/api/admin/media/batch' && method === 'POST') {
       const ids = Array.isArray(body.ids) ? body.ids.filter((id): id is string => typeof id === 'string') : [];
@@ -1407,8 +1549,16 @@ export class LocalCore implements LocalCoreApi {
         else if (action === 'unfavorite') changed += Number(await this.mediaRepo.setFavorite(id, false));
         else if (action === 'permanent') { await this.removeMediaFile(id); changed += Number(await this.mediaRepo.delete(id)); }
       }
-      return { changed, blocked, missing } as T;
+      return { changed, blocked, missing };
     }
+    throw new AdminRouteUnsupportedError(method, route);
+  }
+
+  private async adminLifeRoutes(context: NativeAdminRouteContext): Promise<unknown> {
+    const route = context.route;
+    const method = context.method;
+    const url = context.url;
+    const body = context.body;
     if (route === '/api/admin/life' && method === 'GET') {
       const snapshot = await this.life();
       const settings = await this.localLifeSettings();
@@ -1436,34 +1586,34 @@ export class LocalCore implements LocalCoreApi {
           enabledByDeployment: true
         },
         settings
-      } as T;
+      };
     }
-    if (route === '/api/admin/life/plans' && method === 'GET') return { plans: await this.lifeRepo.listPlans() } as T;
+    if (route === '/api/admin/life/plans' && method === 'GET') return { plans: await this.lifeRepo.listPlans() };
     if (route === '/api/admin/life/plans' && method === 'POST') {
       const plan = await this.lifeRepo.createPlan({ title: stringValue(body.title, '未命名计划'), kind: stringValue(body.kind, 'other'), plannedStart: nullableString(body.plannedStart), plannedEnd: nullableString(body.plannedEnd), priority: numberValue(body.priority, 0) });
-      return { plan } as T;
+      return { plan };
     }
     const lifePlanId = route.match(/^\/api\/admin\/life\/plans\/([^/]+)$/u)?.[1];
     if (lifePlanId && method === 'PATCH') {
       const plan = await this.lifeRepo.updatePlan(decodeURIComponent(lifePlanId), { title: typeof body.title === 'string' ? body.title : undefined, kind: typeof body.kind === 'string' ? body.kind : undefined, status: typeof body.status === 'string' ? body.status as never : undefined, planned_start: body.plannedStart === null || typeof body.plannedStart === 'string' ? body.plannedStart : undefined, planned_end: body.plannedEnd === null || typeof body.plannedEnd === 'string' ? body.plannedEnd : undefined, priority: typeof body.priority === 'number' ? body.priority : undefined });
       if (!plan) throw new Error('life plan not found');
-      return { plan } as T;
+      return { plan };
     }
     if (route === '/api/admin/life/settings' && (method === 'PUT' || method === 'PATCH')) {
       const current = await this.localLifeSettings();
       const settings = normalizeLocalLifeSettings({ ...current, ...body });
       await this.settingsRepo.set('lifeSettings', settings);
       if (settings.reachOut) await this.composeMomentsIfEnabled().catch(() => undefined);
-      return { settings } as T;
+      return { settings };
     }
     if (route === '/api/admin/life/tick' && method === 'POST') {
       if (typeof body.activity === 'string' && body.activity.trim()) {
         const startedAt = new Date().toISOString();
         await this.lifeRepo.advance({ activity: body.activity.trim(), kind: stringValue(body.kind, 'other'), mood: stringValue(body.mood, '平静'), startedAt, endsAt: typeof body.endsAt === 'string' ? body.endsAt : new Date(Date.now() + 3_600_000).toISOString() });
-        return { changed: true, activity: body.activity.trim(), snapshot: await this.life() } as T;
+        return { changed: true, activity: body.activity.trim(), snapshot: await this.life() };
       }
       const snapshot = await this.life();
-      return { changed: false, activity: snapshot.activity, snapshot } as T;
+      return { changed: false, activity: snapshot.activity, snapshot };
     }
     if (route === '/api/admin/life/overview' && method === 'GET') {
       const current = await this.life();
@@ -1473,91 +1623,104 @@ export class LocalCore implements LocalCoreApi {
       const activePlan = (await this.lifeRepo.listPlans('active'))[0] ?? null;
       const events = await this.lifeRepo.events(10);
       const openThreads = (await this.lifeV2Repo.threads('open')).map((thread) => ({ id: thread.id, title: thread.title, category: thread.category, status: thread.status, progress: thread.progress }));
-      return { snapshot: current, location: location ? { id: location.id, name: location.name, kind: location.kind } : null, weather: weather ? `${weather.condition}${weather.temperature_c == null ? '' : ` · ${weather.temperature_c}°C`}` : null, vitals: (await this.options.db.query('SELECT * FROM life_vitals WHERE id=1'))[0] ?? null, activePlan: activePlan ? { id: activePlan.id, title: activePlan.title, kind: activePlan.kind, status: activePlan.status } : null, openThreads, recentEvents: events.map((event) => ({ id: event.id, eventType: event.event_type, description: event.description, happenedAt: event.happened_at })) } as T;
+      return { snapshot: current, location: location ? { id: location.id, name: location.name, kind: location.kind } : null, weather: weather ? `${weather.condition}${weather.temperature_c == null ? '' : ` · ${weather.temperature_c}°C`}` : null, vitals: (await this.options.db.query('SELECT * FROM life_vitals WHERE id=1'))[0] ?? null, activePlan: activePlan ? { id: activePlan.id, title: activePlan.title, kind: activePlan.kind, status: activePlan.status } : null, openThreads, recentEvents: events.map((event) => ({ id: event.id, eventType: event.event_type, description: event.description, happenedAt: event.happened_at })) };
     }
-    if (route === '/api/admin/life/vitals') return { vitals: (await this.options.db.query('SELECT * FROM life_vitals WHERE id=1'))[0] ?? null } as T;
-    if (route === '/api/admin/life/vitals/adjust' && method === 'POST') return { vitals: await this.adjustLifeVitals(body) } as T;
-    if (route === '/api/admin/life/vitals/reset' && method === 'POST') return { vitals: await this.resetLifeVitals() } as T;
-    if (route === '/api/admin/life/threads') return { threads: (await this.lifeV2Repo.threads()).map(toAdminLifeThread) } as T;
+    if (route === '/api/admin/life/vitals') return { vitals: (await this.options.db.query('SELECT * FROM life_vitals WHERE id=1'))[0] ?? null };
+    if (route === '/api/admin/life/vitals/adjust' && method === 'POST') return { vitals: await this.adjustLifeVitals(body) };
+    if (route === '/api/admin/life/vitals/reset' && method === 'POST') return { vitals: await this.resetLifeVitals() };
+    if (route === '/api/admin/life/threads') return { threads: (await this.lifeV2Repo.threads()).map(toAdminLifeThread) };
     const lifeThreadId = route.match(/^\/api\/admin\/life\/threads\/([^/]+)$/u)?.[1];
     if (lifeThreadId && method === 'PATCH') {
       const current = await this.lifeV2Repo.getThread(decodeURIComponent(lifeThreadId));
       if (!current) throw new Error('life thread not found');
       const status = body.status === 'paused' || body.status === 'resolved' || body.status === 'abandoned' || body.status === 'open' ? body.status : current.status;
       const thread = await this.lifeV2Repo.saveThread({ id: current.id, title: current.title, category: current.category, status, progress: typeof body.progress === 'number' ? Math.max(0, Math.min(1, body.progress)) : current.progress, importance: typeof body.importance === 'number' ? body.importance : current.importance, heat: typeof body.heat === 'number' ? body.heat : current.heat, nextActions: Array.isArray(body.nextActions) ? body.nextActions.filter((item): item is string => typeof item === 'string') : undefined, meta: isRecord(body.meta) ? body.meta : undefined });
-      return { thread: toAdminLifeThread(thread) } as T;
+      return { thread: toAdminLifeThread(thread) };
     }
-    if (route === '/api/admin/life/events') return { events: await this.lifeRepo.events(Number(url.searchParams.get('limit') ?? 50)) } as T;
-    if (route === '/api/admin/life/proactive') return { attempts: await this.proactiveAttempts() } as T;
+    if (route === '/api/admin/life/events') return { events: await this.lifeRepo.events(Number(url.searchParams.get('limit') ?? 50)) };
+    if (route === '/api/admin/life/proactive') return { attempts: await this.proactiveAttempts() };
     if (route === '/api/admin/life/locations' && method === 'GET') {
       const rows = await this.locationsRepo.list(false);
       const state = await this.locationsRepo.currentState();
-      return { locations: rows.map(toAdminLocation), current: state ? toAdminLocation(rows.find((row) => row.id === state.location_id)) : null } as T;
+      return { locations: rows.map(toAdminLocation), current: state ? toAdminLocation(rows.find((row) => row.id === state.location_id)) : null };
     }
     if (route === '/api/admin/life/locations' && method === 'POST') {
       const location = await this.locationsRepo.create({ name: stringValue(body.name, '未命名地点'), kind: stringValue(body.kind, 'other') as never, city: nullableString(body.city), region: nullableString(body.region), country: nullableString(body.country), timeZone: nullableString(body.timeZone), lat: numberOrNull(body.lat), lng: numberOrNull(body.lng) });
-      return { location: toAdminLocation(location) } as T;
+      return { location: toAdminLocation(location) };
     }
     if (route === '/api/admin/life/location/override' && method === 'POST') {
       const locationId = stringValue(body.locationId, '');
       const location = await this.locationsRepo.get(locationId);
       if (!location) throw new Error('location not found');
       await this.locationsRepo.setState({ locationId, arrivedAt: (this.options.now?.() ?? new Date()).toISOString(), sourceActivityId: 'admin' });
-      return { location: toAdminLocation(location), presence: await this.presence() } as T;
+      return { location: toAdminLocation(location), presence: await this.presence() };
     }
     const locationId = route.match(/^\/api\/admin\/life\/locations\/([^/]+)$/u)?.[1];
-    if (locationId && method === 'DELETE') return { ok: await this.locationsRepo.deactivate(decodeURIComponent(locationId)) } as T;
+    if (locationId && method === 'DELETE') return { ok: await this.locationsRepo.deactivate(decodeURIComponent(locationId)) };
     if (route === '/api/admin/life/travel' && method === 'GET') {
       const travel = await this.locationsRepo.currentTravel();
-      return { travel: travel ? { fromLocationId: travel.from_location_id, toLocationId: travel.to_location_id, mode: travel.mode, startedAt: travel.started_at, expectedArriveAt: travel.expected_arrive_at } : null } as T;
+      return { travel: travel ? { fromLocationId: travel.from_location_id, toLocationId: travel.to_location_id, mode: travel.mode, startedAt: travel.started_at, expectedArriveAt: travel.expected_arrive_at } : null };
     }
     if (route === '/api/admin/life/cities' && method === 'POST') {
       const city = await this.lifeCitiesRepo.create({ name: stringValue(body.name, '未命名城市'), region: nullableString(body.region), country: nullableString(body.country) ?? '中国', timeZone: nullableString(body.timeZone) ?? 'Asia/Shanghai' });
-      return { city: toAdminLifeCity(city) } as T;
+      return { city: toAdminLifeCity(city) };
     }
-    if (route === '/api/admin/life/cities' && method === 'GET') return { cities: (await this.lifeCitiesRepo.list()).map(toAdminLifeCity) } as T;
+    if (route === '/api/admin/life/cities' && method === 'GET') return { cities: (await this.lifeCitiesRepo.list()).map(toAdminLifeCity) };
     const lifeCityId = route.match(/^\/api\/admin\/life\/cities\/([^/]+)$/u)?.[1];
     if (lifeCityId && method === 'PATCH') {
       const city = await this.lifeCitiesRepo.update(decodeURIComponent(lifeCityId), { name: typeof body.name === 'string' ? body.name : undefined, region: typeof body.region === 'string' ? body.region : undefined, active: typeof body.active === 'boolean' ? body.active : undefined });
       if (!city) throw new Error('city not found');
-      return { city: toAdminLifeCity(city) } as T;
+      return { city: toAdminLifeCity(city) };
     }
+    throw new AdminRouteUnsupportedError(method, route);
+  }
+
+  private async adminWeatherRoutes(context: NativeAdminRouteContext): Promise<unknown> {
+    const route = context.route;
+    const method = context.method;
     if (route === '/api/admin/weather/status' && method === 'GET') {
       const snapshot = await this.weatherRepo.latest('active');
-      return { enabled: Boolean(snapshot), provider: { name: snapshot?.provider ?? null, configured: Boolean(snapshot), active: Boolean(snapshot) }, currentSource: snapshot?.provider ?? null, lastSnapshot: snapshot ? toAdminWeather(snapshot) : null, cacheAgeSec: snapshot ? Math.max(0, Math.floor((Date.now() - Date.parse(snapshot.observed_at)) / 1000)) : null, daylight: null, forecast: await this.forecastSummary() } as T;
+      return { enabled: Boolean(snapshot), provider: { name: snapshot?.provider ?? null, configured: Boolean(snapshot), active: Boolean(snapshot) }, currentSource: snapshot?.provider ?? null, lastSnapshot: snapshot ? toAdminWeather(snapshot) : null, cacheAgeSec: snapshot ? Math.max(0, Math.floor((Date.now() - Date.parse(snapshot.observed_at)) / 1000)) : null, daylight: null, forecast: await this.forecastSummary() };
     }
     if (route === '/api/admin/weather/forecast' && method === 'GET') {
-      return { forecast: await this.forecastSummary(), daylight: null } as T;
+      return { forecast: await this.forecastSummary(), daylight: null };
     }
     if (route === '/api/admin/weather/refresh' && method === 'POST') {
       const result = await this.refreshWeather();
       const forecast = await this.forecastSummary(true);
-      return { ok: result.ok, snapshot: result.snapshot, forecast, error: result.error, presence: await this.presence() } as T;
+      return { ok: result.ok, snapshot: result.snapshot, forecast, error: result.error, presence: await this.presence() };
     }
-    if (route === '/api/admin/native-capabilities' && method === 'GET') return await this.nativeAdminCapabilities() as T;
-    if (route === '/api/admin/storage' && method === 'GET') return await this.storageStatus() as T;
-    if (route === '/api/admin/storage/policy' && (method === 'PUT' || method === 'PATCH')) return await this.saveStoragePolicy(body) as T;
-    if (route === '/api/admin/storage/cleanup' && method === 'POST') return await this.previewOrApplyCleanup(body) as T;
+    throw new AdminRouteUnsupportedError(method, route);
+  }
+
+  private async adminStorageMetricsRoutes(context: NativeAdminRouteContext): Promise<unknown> {
+    const route = context.route;
+    const method = context.method;
+    const url = context.url;
+    const body = context.body;
+    if (route === '/api/admin/native-capabilities' && method === 'GET') return await this.nativeAdminCapabilities();
+    if (route === '/api/admin/storage' && method === 'GET') return await this.storageStatus();
+    if (route === '/api/admin/storage/policy' && (method === 'PUT' || method === 'PATCH')) return await this.saveStoragePolicy(body);
+    if (route === '/api/admin/storage/cleanup' && method === 'POST') return await this.previewOrApplyCleanup(body);
     if (route === '/api/admin/metrics' && method === 'GET') {
       const days = clampAdminDays(Number(url.searchParams.get('days') ?? 7));
       const [fromDate, toDate] = adminMetricRange(days, this.options.now?.() ?? new Date());
       const [aggregates, distributions] = await Promise.all([this.metricsRepo.aggregates(fromDate, toDate), this.metricsRepo.distributions(fromDate, toDate)]);
-      return { aggregates, distributions } as T;
+      return { aggregates, distributions };
     }
     if (route === '/api/admin/metrics/distributions' && method === 'GET') {
       const days = clampAdminDays(Number(url.searchParams.get('days') ?? 7));
       const [fromDate, toDate] = adminMetricRange(days, this.options.now?.() ?? new Date());
-      return { distributions: await this.metricsRepo.distributions(fromDate, toDate) } as T;
+      return { distributions: await this.metricsRepo.distributions(fromDate, toDate) };
     }
     if (route === '/api/admin/audit' && method === 'GET') {
       const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit') ?? 50)));
       const errors = await this.listErrors(limit);
       const jobs = await this.jobsRepo.list(limit);
-      return { audit: [...errors.map((error) => ({ kind: 'error', id: error.id, createdAt: error.createdAt, scope: error.scope, message: error.message, detail: error.detail })), ...jobs.map((job) => ({ kind: 'job', id: job.id, createdAt: job.created_at, type: job.type, status: job.status, detail: job.last_error }))].sort((a, b) => Date.parse(b.createdAt ?? '') - Date.parse(a.createdAt ?? '')).slice(0, limit) } as T;
+      return { audit: [...errors.map((error) => ({ kind: 'error', id: error.id, createdAt: error.createdAt, scope: error.scope, message: error.message, detail: error.detail })), ...jobs.map((job) => ({ kind: 'job', id: job.id, createdAt: job.created_at, type: job.type, status: job.status, detail: job.last_error }))].sort((a, b) => Date.parse(b.createdAt ?? '') - Date.parse(a.createdAt ?? '')).slice(0, limit) };
     }
     throw new AdminRouteUnsupportedError(method, route);
   }
-
 
   /** Public seam for platform adapters (OTA updater, native plugins) to feed
    * runtime failures into the same error_log surfaced by the admin page. */
