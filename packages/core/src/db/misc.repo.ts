@@ -52,8 +52,14 @@ export class JobRepo {
   }
   async complete(id: string): Promise<void> { await this.db.run("UPDATE jobs SET status='done',updated_at=?,last_error=NULL WHERE id=?", [nowIso(this.now), id]); }
   async fail(id: string, error: string): Promise<void> { const row = await this.get(id); if (!row) return; const status = row.attempts >= row.max_attempts ? 'failed' : 'pending'; const runAfter = status === 'pending' ? new Date(this.now().getTime() + 2000 * row.attempts).toISOString() : null; await this.db.run('UPDATE jobs SET status=?,last_error=?,updated_at=?,run_after=? WHERE id=?', [status, error.slice(0, 2000), nowIso(this.now), runAfter, id]); }
+  async failTerminal(id: string, error: string): Promise<void> { await this.db.run("UPDATE jobs SET status='failed',last_error=?,updated_at=? WHERE id=?", [error.slice(0, 2000), nowIso(this.now), id]); }
+
   async recoverStuck(): Promise<number> { return (await this.db.run("UPDATE jobs SET status='pending',updated_at=? WHERE status='running'", [nowIso(this.now)])).changes; }
   async pendingCount(): Promise<number> { return (await queryOne<{ c: number }>(this.db, "SELECT COUNT(*) c FROM jobs WHERE status IN ('pending','running')"))?.c ?? 0; }
+  async hasRecentDone(type: string, withinMs = 60 * 60_000): Promise<boolean> {
+    return !!(await queryOne(this.db, "SELECT 1 present FROM jobs WHERE type=? AND status='done' AND updated_at>=? LIMIT 1", [type, new Date(this.now().getTime() - withinMs).toISOString()]));
+  }
+
   async hasActive(type: string): Promise<boolean> { return !!(await queryOne(this.db, "SELECT 1 present FROM jobs WHERE type=? AND status IN ('pending','running') LIMIT 1", [type])); }
   async list(limit = 50): Promise<JobRow[]> { return await this.db.query('SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?', [limit]); }
   async purgeDone(keepMs = 86_400_000): Promise<number> { return (await this.db.run("DELETE FROM jobs WHERE status IN ('done','cancelled') AND updated_at<?", [new Date(this.now().getTime() - keepMs).toISOString()])).changes; }

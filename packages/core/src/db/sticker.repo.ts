@@ -302,6 +302,15 @@ export class StickerRepo {
   async setFavorite(id: string, favorite: boolean): Promise<Sticker | undefined> { return await this.update(id, { favorite }); }
   async setUserMeaning(id: string, meaning: string, source: StickerUserMeaningSource): Promise<Sticker | undefined> { return await this.update(id, { userMeaning: meaning, userMeaningSource: source }); }
 
+  /** Persists a provider embedding as a little-endian float32 blob. */
+  async setEmbedding(id: string, vector: number[], model: string, dimensions: number): Promise<Sticker | undefined> {
+    const bytes = new Uint8Array(vector.length * 4);
+    const view = new DataView(bytes.buffer);
+    vector.forEach((value, index) => view.setFloat32(index * 4, value, true));
+    await this.db.run('UPDATE stickers SET embedding=?,embedding_dim=?,embedding_model=?,analysis_version=analysis_version+1,updated_at=? WHERE id=?', [bytes, dimensions, model.slice(0, 120), nowIso(this.now), id]);
+    return await this.get(id);
+  }
+
   async markAssistantUsed(id: string): Promise<void> {
     const timestamp = nowIso(this.now);
     await this.db.run('UPDATE stickers SET use_count=use_count+1,last_used_at=?,updated_at=? WHERE id=?', [timestamp, timestamp, id]);
