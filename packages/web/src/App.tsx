@@ -67,6 +67,10 @@ export function ChatView({ chat, viewStateRef }: { chat: ChatController; viewSta
   // 引用气泡按 id 取目标消息；全数组 find 在每条可见气泡上都扫一遍，长会话滚动会退化。
   const byId = useMemo(() => new Map(chat.messages.map((message) => [message.id, message])), [chat.messages]);
   const failedAssistantBatchIds = useMemo(() => new Set(chat.messages.flatMap((message) => message.role === 'assistant' && message.status === 'failed' && typeof message.meta?.batchId === 'string' ? [message.meta.batchId] : [])), [chat.messages]);
+  const hasPendingAssistantImage = useMemo(() => chat.messages.some((message) =>
+    message.role === 'assistant'
+    && message.content.some((part) => part.type === 'image' && part.status === 'pending' && !part.media)
+  ), [chat.messages]);
   const timeZone = userTimeZone();
   const virtualizer = useVirtualizer({
     count: chat.messages.length,
@@ -247,6 +251,9 @@ export function ChatView({ chat, viewStateRef }: { chat: ChatController; viewSta
       status: 'pending'
     }]
   } : null, [chat.streamingDraft]);
+  const showTypingIndicator = chat.activity.thinking
+    && !streamingMessage
+    && !(chat.activity.label === '正在生成图片' && hasPendingAssistantImage);
 
   if (chat.connection === 'unauthorized') return <div className="gate"><div className="gate-card"><h1>SOOYA</h1><p>这台服务器需要访问令牌。</p><input type="password" value={tokenInput} placeholder="WEB_CHAT_TOKEN" onChange={(e) => setTokenInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && tokenInput.trim()) { setToken(tokenInput.trim()); location.reload(); } }} /><button type="button" onClick={() => { if (tokenInput.trim()) { setToken(tokenInput.trim()); location.reload(); } }}>进入</button></div></div>;
 
@@ -310,7 +317,7 @@ export function ChatView({ chat, viewStateRef }: { chat: ChatController; viewSta
             />
           </div>
         )}
-        {chat.activity.thinking && !streamingMessage && (
+        {showTypingIndicator && (
           <div className="msg-row theirs" data-testid="typing-indicator">
             <div className="avatar-slot"><img className="avatar" src={persona?.avatar ?? '/avatars/sooya.svg'} alt="" /></div>
             <div className="msg-body"><div className="bubble bubble-text theirs typing"><span className="typing-dots"><i /><i /><i /></span></div></div>
