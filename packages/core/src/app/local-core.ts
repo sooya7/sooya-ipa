@@ -259,12 +259,29 @@ export class LocalCore implements LocalCoreApi {
       locations: this.locationsRepo,
       weather: this.weatherRepo,
       stickers: this.stickersRepo,
+      media: this.media,
+      mediaRepo: this.mediaRepo,
+      visionConfigured: async () => {
+        const providers = await this.configuredProviders?.();
+        return Boolean(providers?.vision?.configured ?? options.chatProvider?.configured ?? false);
+      },
+      contextWindowTokens: async () => {
+        const config = await this.configRepo.getProvider('chat');
+        const value = config?.options.contextWindow;
+        return typeof value === 'number' && value > 0 ? value : undefined;
+      },
+      maxOutputTokens: async () => {
+        const config = await this.configRepo.getProvider('chat');
+        const value = config?.options.maxTokens;
+        return typeof value === 'number' && value > 0 ? value : undefined;
+      },
       now
     });
     this.summaryBuilder = new SummaryBuilder({
       messages: this.messagesRepo,
       summaries: this.summaryRepo,
-      provider: async () => options.chatProvider ?? await options.chatProviderFactory?.() ?? (await this.configuredProviders?.())?.chat ?? null
+      summaryProvider: async () => (await this.configuredProviders?.())?.summary ?? null,
+      chatProvider: async () => options.chatProvider ?? await options.chatProviderFactory?.() ?? (await this.configuredProviders?.())?.chat ?? null
     });
     this.events = new LocalEmitter(now);
     // Media Director: resolves the director slot (with chat fallback) lazily
