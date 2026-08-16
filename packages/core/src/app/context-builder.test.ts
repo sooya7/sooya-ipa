@@ -214,6 +214,14 @@ describe('ContextBuilder server parity', () => {
     const pendingMessage = await addMessage(ctx, { text: '帮我看看 PDF', parts: [{ type: 'file', mediaId: pending.id }] });
     const pendingBuilt = await ctx.builder.build({ recent: [pendingMessage], latestUser: pendingMessage, batchMessageIds: [pendingMessage.id] });
     expect(textOfBuilt(pendingBuilt)).toContain('仍在处理中');
+
+    const failed = await ctx.store.save({ kind: 'file', data: new TextEncoder().encode('paper'), mime: 'application/zip', name: 'corrupt.zip' });
+    await ctx.media.create({ id: failed.id, kind: 'file', relPath: failed.id, mime: 'application/zip', bytes: failed.bytes, sha256: 'sha-zip', origin: 'upload' });
+    await ctx.media.setExtractedText(failed.id, { status: 'failed', error: '文件已损坏' });
+    const failedMessage = await addMessage(ctx, { text: '这个压缩包呢', parts: [{ type: 'file', mediaId: failed.id }] });
+    const failedBuilt = await ctx.builder.build({ recent: [failedMessage], latestUser: failedMessage, batchMessageIds: [failedMessage.id] });
+    expect(textOfBuilt(failedBuilt)).toContain('文字提取失败');
+    expect(textOfBuilt(failedBuilt)).toContain('文件已损坏');
   });
 
   it('never embeds more than the bridge image budget', async () => {
