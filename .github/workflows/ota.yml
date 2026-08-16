@@ -111,7 +111,7 @@ jobs:
           bundle_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${BUNDLE_TAG}/bundle.zip"
 
           if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${BUNDLE_TAG}" > release.json 2>/dev/null; then
-            asset_id="$(jq -r '.assets[]? | select(.name == \"bundle.zip\") | .id' release.json | head -n1)"
+            asset_id="$(jq -r '.assets[]? | select(.name == "bundle.zip") | .id' release.json | head -n1)"
             if [ -z "${asset_id}" ]; then
               gh release upload "${BUNDLE_TAG}" build/bundle.zip --repo "${GITHUB_REPOSITORY}"
             fi
@@ -126,9 +126,9 @@ jobs:
           verified=""
           for attempt in $(seq 1 20); do
             gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${BUNDLE_TAG}" > release.json
-            asset_size="$(jq -r '.assets[]? | select(.name == \"bundle.zip\") | .size // empty' release.json | head -n1)"
-            asset_digest="$(jq -r '.assets[]? | select(.name == \"bundle.zip\") | .digest // empty' release.json | head -n1)"
-            asset_state="$(jq -r '.assets[]? | select(.name == \"bundle.zip\") | .state // empty' release.json | head -n1)"
+            asset_size="$(jq -r '.assets[]? | select(.name == "bundle.zip") | .size // empty' release.json | head -n1)"
+            asset_digest="$(jq -r '.assets[]? | select(.name == "bundle.zip") | .digest // empty' release.json | head -n1)"
+            asset_state="$(jq -r '.assets[]? | select(.name == "bundle.zip") | .state // empty' release.json | head -n1)"
             if [ "${asset_state}" = "uploaded" ] && [ "${asset_size}" = "${bytes}" ] && [ "${asset_digest}" = "${expected_digest}" ]; then
               verified=1
               break
