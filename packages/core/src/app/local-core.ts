@@ -1649,7 +1649,8 @@ export class LocalCore implements LocalCoreApi {
     if (capability === 'vision' && configured.options.supportsVision === false) {
       return { ok: false, slot: capability, provider: configured.provider, model: configured.model, latencyMs: 0, detail: '这个模型没有声明支持读图，先把“声明支持读图”改成“是”再测' };
     }
-    const { BuiltinChatProvider, BuiltinEmbeddingProvider, BuiltinImageProvider, BuiltinRerankProvider, BuiltinTtsProvider } = await import('../providers/builtin.js');
+    const { BuiltinChatProvider, BuiltinEmbeddingProvider, BuiltinRerankProvider } = await import('../providers/builtin.js');
+    const { BuiltinImageProvider, BuiltinTtsProvider } = await import('../providers/media-providers.js');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error('连接测试超过 30 秒还没有结果')), 30_000);
     const startedAt = Date.now();
@@ -1701,7 +1702,7 @@ export class LocalCore implements LocalCoreApi {
   /** Real TTS preview through the saved tts provider (base LocalCore path;
    * NativeLocalCore inherits it and therefore no longer falls into `{}`). */
   private async previewVoice(text?: string, emotion?: string): Promise<{ ok: true; audio: { data: Uint8Array; mime: string; format: string } } | { ok: false; detail: string }> {
-    const { BuiltinTtsProvider } = await import('../providers/builtin.js');
+    const { BuiltinTtsProvider } = await import('../providers/media-providers.js');
     const configured = await this.configRepo.getProvider('tts');
     if (!this.options.http) return { ok: false, detail: '本地 HTTP 传输不可用，无法执行语音试听' };
     if (!configured?.enabled || !configured.baseUrl || !configured.model || !configured.secretRef) {
