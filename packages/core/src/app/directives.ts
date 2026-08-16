@@ -1,4 +1,6 @@
 /** Two-way multimedia directive protocol shared by the local reply runtime. */
+import { parseVoiceIntent } from './voice/intent.js';
+
 export interface UserDirectives {
   wantSticker?: boolean;
   wantImage?: boolean;
@@ -6,6 +8,8 @@ export interface UserDirectives {
   selfieIntent?: boolean;
   wantVoice?: boolean;
   voiceOnly?: boolean;
+  /** The user explicitly asked to have existing text read aloud. */
+  readAloud?: boolean;
   stickerOnly?: boolean;
   noSticker?: boolean;
   noVoice?: boolean;
@@ -16,9 +20,6 @@ const STICKER_PATTERNS = [/发(?:个|一个|张|一张)?(?:.{0,12})?表情/u, /�
 const STICKER_ONLY_PATTERNS = [/只发表情/u, /光发表情/u, /只要表情/u, /sticker only/iu];
 const ANOTHER_STICKER_PATTERNS = [/换(?:一)?个表情/u, /再来(?:一)?个表情/u, /换个表情包/u, /another sticker/iu, /换一张/u];
 const NO_STICKER_PATTERNS = [/不要(?:发)?表情/u, /别发表情/u, /不用表情/u, /no sticker/iu, /别斗图/u];
-const VOICE_PATTERNS = [/用语音(?:说|讲|回|发)?/u, /语音(?:说|回复|回答|讲)/u, /发(?:个|条|段)?语音/u, /读出来/u, /念(?:出来|一下)/u, /voice message/iu, /say it (?:out loud|aloud)/iu];
-const VOICE_ONLY_PATTERNS = [/只发语音/u, /只要语音/u, /只用语音/u, /光发语音/u, /voice only/iu];
-const NO_VOICE_PATTERNS = [/不要(?:发)?语音/u, /别发语音/u, /不用语音/u, /no voice/iu];
 const IMAGE_PATTERNS = [
   /(?:生成|画|做|来|给我).{0,6}(?:一)?(?:张|幅|个)?(?:图片?|画|插画|海报)/u,
   /生成图/u, /画(?:一)?(?:张|幅)/u, /自拍/u, /拍(?:一)?(?:张|个)(?:照|相|自拍)?/u,
@@ -26,6 +27,7 @@ const IMAGE_PATTERNS = [
   /画(?:一)?(?:只|个|条|头|匹|朵|棵|座|艘|辆|位|张|幅|份|篇)(?:.{0,12})?/u,
   /(?:发|来|给|要|想)(?:一)?(?:张|个|幅)(?:照片|相片|照)/u,
   /(?:发|来|给|要|想)(?:一)?(?:张|个|幅)?(?:照片|相片)/u,
+  /(?:发|来|给我|给|要)(?:一)?(?:张|个|幅)?图(?:片)?/u,
   /(?:看看|看下|看一?下).{0,6}(?:照片|相片|自拍)/u,
   /(?:给我看|让我看).{0,6}(?:照片|相片|自拍)/u,
   /拍(?:一)?(?:张|个)你的(?:照片|相片|照)/u,
@@ -34,12 +36,23 @@ const IMAGE_PATTERNS = [
   /draw (?:me )?(?:a|an)?/iu, /generate (?:an? )?image/iu
 ];
 const SELFIE_PATTERNS = [/自拍/u, /拍.{0,4}你的(?:照片|相片|照)/u, /(?:发|来|给|要|想|看看|看下).{0,6}你的.{0,4}(?:照片|相片|样子)/u, /selfie/iu];
+const GENERIC_ASSISTANT_PHOTO_RE = /^(?:你)?(?:给我)?(?:发|来|给|要)(?:我)?(?:一)?(?:张|个|幅)?(?:照片|相片|照|图|图片)(?:给我)?(?:看看|看下|看一下)?[吧呀啊嘛吗呢。！？!?~～]*$/u;
 const IMAGE_PROMPT_EXTRACT = [
   /(?:生成|画|做)(?:一)?(?:张|幅|个)?(?:图片?|画|插画|海报)?[，,:：]?\s*(.+)$/u,
-  /(?:拍|发|来|给)(?:一)?(?:张|个|幅)?(?:自拍|照片|相片|照)[，,:：]?\s*(.+)$/u,
+  /(?:拍|发|来|给)(?:一)?(?:张|个|幅)?(?:自拍|图片?|照片|相片|照)[，,:：]?\s*(.+)$/u,
   /draw (?:me )?(?:an? )?(.+)$/iu, /generate (?:an? )?image of (.+)$/iu
 ];
 const ABILITY_QUESTION_RE = /(?:会不会|能不能|会|能|可以|可否|能否)(?:[^，。！!？?、\n]{0,12})(?:画画|画图|生成图|生成图片|图片|生图|插图|海报|表情包|表情|语音|音频|读出来|自拍|拍照|照片|视频|画|图)[吗么嘛呢？?~～。]*$/u;
+
+/**
+ * Safety net for models that narrate a successful image API call but forget
+ * the private [[image...]] marker. Without this guard the visible reply can say
+ * "真的走了生图接口" while the runtime never calls the image provider.
+ * Keep this deliberately narrow: ordinary mentions/questions about image APIs
+ * must never trigger a generation.
+ */
+const NARRATED_IMAGE_ACTION_RE = /(?:这次|现在|刚刚)(?:是)?真的.{0,12}(?:生图|生成图片)|(?:真的|已经)(?:走了|调用了|用了|打开了|接上了).{0,10}(?:生图接口|图片生成接口|生图通道)/u;
+const FIRST_PERSON_SCENE_RE = /(?:^|[（(。！？!?\s])我(?:坐|站|躺|靠|穿|拿|抱|在|正|把|手|头|看|低|抬|蹲|走|笑|望)/u;
 
 export function parseUserDirectives(text: string): UserDirectives {
   const value = (text ?? '').trim();
@@ -50,12 +63,17 @@ export function parseUserDirectives(text: string): UserDirectives {
   else if (has(ANOTHER_STICKER_PATTERNS)) { directives.wantSticker = true; directives.anotherSticker = true; }
   else if (has(STICKER_ONLY_PATTERNS)) { directives.wantSticker = true; directives.stickerOnly = true; }
   else if (has(STICKER_PATTERNS)) directives.wantSticker = true;
-  if (has(NO_VOICE_PATTERNS)) directives.noVoice = true;
-  else if (has(VOICE_ONLY_PATTERNS)) { directives.wantVoice = true; directives.voiceOnly = true; }
-  else if (has(VOICE_PATTERNS)) directives.wantVoice = true;
+  // Voice intent comes from the shared voice/intent rule set so "用语音回我"
+  // (voice_reply) and "把这段念出来" (read_aloud) stay separate decisions.
+  const voiceIntent = parseVoiceIntent(value);
+  if (voiceIntent === 'no_voice') directives.noVoice = true;
+  else if (voiceIntent === 'voice_only') { directives.wantVoice = true; directives.voiceOnly = true; }
+  else if (voiceIntent === 'voice_reply') directives.wantVoice = true;
+  else if (voiceIntent === 'read_aloud') { directives.wantVoice = true; directives.readAloud = true; }
   if (has(IMAGE_PATTERNS)) {
     directives.wantImage = true;
-    directives.selfieIntent = has(SELFIE_PATTERNS) || undefined;
+    const genericAssistantPhoto = GENERIC_ASSISTANT_PHOTO_RE.test(value);
+    directives.selfieIntent = has(SELFIE_PATTERNS) || genericAssistantPhoto || undefined;
     let extracted: string | undefined;
     for (const pattern of IMAGE_PROMPT_EXTRACT) {
       const match = pattern.exec(value);
@@ -65,14 +83,13 @@ export function parseUserDirectives(text: string): UserDirectives {
       }
     }
     if (extracted) directives.imagePrompt = extracted;
-    // A selfie request without a describable prompt ("拍一张你的自拍") still
-    // needs an actionable default so the image provider is not fed the whole
-    // user sentence.
-    else if (directives.selfieIntent) directives.imagePrompt = '自拍';
-    // Other image intent without an extractable prompt ("给我看看你的照片")
-    // keeps wantImage only: the reply model is expected to fill in a concrete
-    // [[image:...]] prompt. Do not degrade to the raw user sentence, which
-    // makes the generated image prompt unstable.
+    // A selfie/generic assistant-photo request without a describable prompt
+    // still needs an actionable default so the image provider is guaranteed
+    // to receive a real prompt when the model forgets its private marker.
+    else if (directives.selfieIntent) directives.imagePrompt = genericAssistantPhoto ? '自然生活自拍' : '自拍';
+    // Other image intent without an extractable prompt keeps wantImage only;
+    // ReplyCoordinator will resolve a bounded context fallback before calling
+    // the image provider.
   }
   return directives;
 }
@@ -160,6 +177,22 @@ function addSticker(directives: ModelDirectives, intent: string): void {
   directives.stickers = [...(directives.stickers ?? []), intent].slice(0, 8);
 }
 
+function inferNarratedImageDirective(text: string): { prompt: string; self: boolean } | null {
+  if (!NARRATED_IMAGE_ACTION_RE.test(text)) return null;
+  const scene = text
+    .split(/\n+/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !NARRATED_IMAGE_ACTION_RE.test(line))
+    .filter((line) => !/(?:生图接口|图片生成接口|打开通道|走接口|文字描述代替画面|就这一帧，?给你看)/u.test(line))
+    .join(' ')
+    .replace(/^[（(][^）)]{0,120}[）)]\s*/u, '')
+    .trim();
+  const prompt = (scene || text).slice(0, 1_500).trim();
+  if (!prompt) return null;
+  return { prompt, self: /自拍/u.test(text) || FIRST_PERSON_SCENE_RE.test(prompt) };
+}
+
 export function stripModelDirectives(raw: string): StripResult {
   const directives: ModelDirectives = {};
   const partial = TRAILING_PARTIAL_RE.exec(raw);
@@ -189,6 +222,13 @@ export function stripModelDirectives(raw: string): StripResult {
     .replace(/[ \t]{2,}/gu, ' ')
     .replace(/\n{3,}/gu, '\n\n')
     .trim();
+  if (!directives.imagePrompt && !directives.selfImagePrompt) {
+    const inferred = inferNarratedImageDirective(text);
+    if (inferred) {
+      if (inferred.self) directives.selfImagePrompt = inferred.prompt;
+      else directives.imagePrompt = inferred.prompt;
+    }
+  }
   return { text, directives };
 }
 

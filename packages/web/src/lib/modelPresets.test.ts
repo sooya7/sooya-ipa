@@ -45,6 +45,7 @@ describe('model preset validation', () => {
 
   it('refuses a provider the slot cannot use', () => {
     expect(validatePreset({ ...chatPreset, slot: 'tts', provider: 'openai-chat' }, [])).toBe('语音合成不支持该接口协议');
+    expect(validatePreset({ ...chatPreset, slot: 'tts', provider: 'volc-tts' }, [])).toBe('语音合成不支持该接口协议');
     expect(validatePreset({ ...chatPreset, slot: 'tts', provider: 'openai-tts' }, [])).toBeNull();
   });
 
@@ -98,8 +99,8 @@ describe('model preset editing', () => {
 });
 
 describe('interface options per capability', () => {
-  it('offers 语音合成 only the speech interfaces', () => {
-    expect(interfaceOptions('tts').map((o) => o.value)).toEqual(['none', 'openai-tts', 'volc-tts', 'fish', 'openai-compatible']);
+  it('offers 语音合成 only the active speech interfaces', () => {
+    expect(interfaceOptions('tts').map((o) => o.value)).toEqual(['none', 'openai-tts', 'fish', 'openai-compatible']);
   });
 
   it('never offers one capability the interface of another', () => {
@@ -138,6 +139,12 @@ describe('interface options per capability', () => {
     expect(offered.at(-1)?.label).toContain('此能力不适用');
   });
 
+  it('keeps an old Volc value readable without offering it for new configs', () => {
+    const offered = interfaceOptions('tts', 'volc-tts');
+    expect(offered.map((o) => o.value)).toContain('volc-tts');
+    expect(offered.at(-1)?.label).toContain('旧配置兼容');
+  });
+
   it('does not duplicate a saved value that is already legal', () => {
     const values = interfaceOptions('tts', 'openai-tts').map((o) => o.value);
     expect(values.filter((v) => v === 'openai-tts')).toHaveLength(1);
@@ -169,8 +176,8 @@ describe('presetFromConfig（把当前配置存进模型库）', () => {
     expect(third.id).toBe('chat-deepseek-v4-flash-3');
   });
 
-  it('produces a preset the server-side validator accepts', () => {
-    const preset = presetFromConfig('tts', { provider: 'volc-tts', model: 'seed-tts-2.0' }, []) as ModelPreset;
+  it('produces a preset the panel accepts', () => {
+    const preset = presetFromConfig('tts', { provider: 'fish', model: 's2.1-pro-free' }, []) as ModelPreset;
     expect(validatePreset(preset, [])).toBeNull();
   });
 
@@ -194,4 +201,3 @@ describe('presetFromConfig（把当前配置存进模型库）', () => {
     expect(presetFromConfig('chat', cfg, full)).toMatch(/最多/);
   });
 });
-

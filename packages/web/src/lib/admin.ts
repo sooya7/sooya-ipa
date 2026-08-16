@@ -364,8 +364,8 @@ export interface AdminError {
 
 /** Reply of a one-shot connectivity probe against the slot's saved config. */
 export type ModelTestResult =
-  | { ok: true; slot: ModelSlot; provider: string; model?: string; latencyMs: number; detail: string }
-  | { ok: false; slot: ModelSlot; provider: string; model?: string; latencyMs: number; detail: string };
+  | { ok: true; slot: ModelSlot; provider: string; model?: string; latencyMs: number; detail: string; mode?: 'text-to-image' | 'selfie'; framing?: string; stage?: string }
+  | { ok: false; slot: ModelSlot; provider: string; model?: string; latencyMs: number; detail: string; mode?: 'text-to-image' | 'selfie'; framing?: string; stage?: string };
 
 export interface AdminJob {
   id: string;
@@ -554,6 +554,8 @@ export const adminApi = {
     ),
   testModel: (slot: ModelSlot, forceImage = false) =>
     adminRequest<ModelTestResult>(`/api/admin/models/${encodeURIComponent(slot)}/test`, { method: 'POST', body: forceImage ? { force: true } : {} }),
+  testSelfieImage: () =>
+    adminRequest<ModelTestResult>('/api/admin/models/image/test', { method: 'POST', body: { force: true, mode: 'selfie' } }),
   testWebSearch: (provider: AdminWebSearchProvider, query: string) =>
     adminRequest<WebSearchTestResult>('/api/admin/models/web-search/test', { method: 'POST', body: { provider, query } }),
   saveModelPresets: (presets: ModelPreset[]) =>

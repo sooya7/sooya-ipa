@@ -5,6 +5,7 @@ import { useAutoNotice } from '../lib/autoNotice.js';
 import { navigate, APP_NAVIGATION_EVENT } from '../lib/navigation.js';
 import { AppLink } from './AppLink.js';
 import { currentSooyaClient, type SooyaClient } from '../lib/sooyaClient.js';
+import { isNativeSooya } from '../local/nativeRuntime.js';
 import { formatAdminDateTime } from '../lib/adminDisplay.js';
 import { featureApi } from '../lib/features.js';
 import { AvatarEditor, ReferencesEditor, StorageEditor } from './FeatureAdminPage.js';
@@ -392,6 +393,7 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
   const [keyDraft, setKeyDraft] = useState('');
   const [pulling, setPulling] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [testingSelfie, setTestingSelfie] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [libraryKey, setLibraryKey] = useState(0);
   const [previewText, setPreviewText] = useState('你好呀，我刚刚想到你了。');
@@ -422,7 +424,13 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
     if (!models || selected === 'webSearch') return;
     try {
       const typed = keyDraft.trim();
-      const r = await adminApi.updateModels({ [selected]: { ...config, ...(typed ? { apiKey: typed } : {}) } });
+      const nextConfig: Record<string, unknown> = { ...config, ...(typed ? { apiKey: typed } : {}) };
+      if (selected === 'tts' && nextConfig.provider !== 'volc-tts') {
+        delete nextConfig.resourceId;
+        delete nextConfig.emotionMode;
+        delete nextConfig.emotionScale;
+      }
+      const r = await adminApi.updateModels({ [selected]: nextConfig });
       setModels(r.models);
       setKeyDraft('');
       // The old verdict was about the config that was just replaced.
@@ -434,7 +442,7 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
     }
   };
 
-  /** 语音试听：走 /api/admin/voice/preview，Fish 与 OpenAI/Volc 同样可用。 */
+  /** 语音试听：走 /api/admin/voice/preview，Fish 与 OpenAI 协议均可用。 */
   const previewVoice = async () => {
     setPreviewing(true);
     try {
@@ -501,6 +509,29 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
     }
   };
 
+  /**
+   * Native-only end-to-end selfie probe: same framing selection, same single
+   * reference upload and same generation request as the chat runtime.
+   */
+  const runSelfieTest = async () => {
+    if (selected !== 'image') return;
+    if (!confirmAction('测试自拍链路会真实上传一张参考图并消耗一次生成额度，确定继续吗？')) return;
+    setTestingSelfie(true);
+    setTestResult(null);
+    try {
+      const r = await adminApi.testSelfieImage();
+      const text = `自拍链路正常：${r.provider}${r.model ? ` / ${r.model}` : ''}，参考图 ${r.framing ?? '无'}，${r.detail}，耗时 ${r.latencyMs} ms`;
+      setTestResult({ ok: true, text });
+      onNotice(text);
+    } catch (e) {
+      const text = errorText(e);
+      setTestResult({ ok: false, text });
+      onNotice(text);
+    } finally {
+      setTestingSelfie(false);
+    }
+  };
+
   /** Saves what is on screen into the library as a new entry. */
   const addToLibrary = async () => {
     if (selected === 'webSearch') return;
@@ -530,7 +561,7 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
       <aside>
         <h2>模型能力</h2>
         {CAPABILITIES.map(([key, label]) => (
-          <button key={key} type="button" className={selected === key ? 'admin-model-item active' : 'admin-model-item'} onClick={() => { setSelected(key); setAvailable(null); setKeyDraft(''); setTestResult(null); }}>
+          <button key={key} type="button" className={selected === key ? 'admin-model-item active' : 'admin-model-item'} onClick={() => { setSelected(key); setAvailable(null); setKeyDraft(''); setTestResult(null); setTestingSelfie(false); }}>
             <span>{label}</span>
             <small>{key === 'webSearch'
               ? ((models.webSearch as AdminWebSearchConfig | undefined)?.enabled ? (models.webSearch as AdminWebSearchConfig).providers.join(' → ') : '已关闭')
@@ -636,22 +667,6 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
             </select>
           </label>
           <label>最大重试次数<input type="number" min="0" max="5" value={String(config.maxRetries ?? '')} onChange={(e) => update('maxRetries', Number(e.target.value))} /></label>
-          <label className="admin-form-wide">
-            情绪投递方式
-            <select value={String(config.emotionMode ?? 'auto')} onChange={(e) => update('emotionMode', e.target.value)}>
-              <option value="auto">自动（按音色 ID 判断，推荐）</option>
-              <option value="instruction">自然语言指令（豆包 2.0「指令遵循」音色）</option>
-              <option value="enum">emotion 枚举（仅「多情感」音色，ID 带 _emo_）</option>
-              <option value="off">不传情绪</option>
-            </select>
-            <small>两种音色家族收情绪的方式不一样。自动模式看音色 ID 里有没有 <code>_emo_</code>，换音色就自动跟着切。</small>
-          </label>
-          <label className="admin-form-wide">
-            Resource-Id（仅火山官方协议）
-            <input value={String(config.resourceId ?? '')} placeholder="seed-tts-2.0" onChange={(e) => update('resourceId', e.target.value)} />
-            <small>它同时决定模型版本和计费商品。官方说明：语音模型不支持通过 Auto 或控制台切换，必须在这里指定。</small>
-          </label>
-          <label>情绪强度（仅枚举方式，1~5）<input type="number" step="1" min="1" max="5" value={String(config.emotionScale ?? 4)} onChange={(e) => update('emotionScale', Number(e.target.value))} /></label>
         </>}
         {selected === 'tts' && config.provider === 'fish' && <>
           <label className="admin-form-wide">
@@ -704,7 +719,10 @@ function ModelsPanel({ onNotice }: { onNotice: (v: string) => void }) {
         <div className="admin-actions">
           {selected === 'image' && <small className="admin-muted">测试出图会真实调用图片服务并消耗一次额度。</small>}
           <button type="button" onClick={() => void save()}>保存模型配置</button>
-          <button type="button" data-testid="admin-model-test" disabled={testing} onClick={() => void runTest()}>{testing ? '测试中…' : '测试连接'}</button>
+          <button type="button" data-testid="admin-model-test" disabled={testing || testingSelfie} onClick={() => void runTest()}>{testing ? '测试中…' : selected === 'image' ? '测试文生图' : '测试连接'}</button>
+          {selected === 'image' && isNativeSooya() && (
+            <button type="button" data-testid="admin-model-selfie-test" disabled={testing || testingSelfie} onClick={() => void runSelfieTest()}>{testingSelfie ? '测试中…' : '测试自拍链路'}</button>
+          )}
           <button type="button" data-testid="admin-model-add-preset" onClick={() => void addToLibrary()}>存入模型库</button>
         </div>
         {testResult ? (
@@ -1250,4 +1268,3 @@ export default function AdminPanel({ initialTab = 'overview' }: { initialTab?: T
     </main>
   );
 }
-

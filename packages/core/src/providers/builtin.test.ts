@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { HttpPlatform, HttpRequest, HttpResponse, HttpResponseHead } from '../platform/http.js';
 import type { ProviderConfig } from '../db/config.repo.js';
-import { BuiltinChatProvider, BuiltinTtsProvider } from './builtin.js';
+import { BuiltinChatProvider } from './builtin.js';
+import { BuiltinTtsProvider } from './media-providers.js';
 
 class FakeHttp implements HttpPlatform {
   readonly requests: HttpRequest[] = [];
@@ -128,5 +129,52 @@ describe('built-in provider adapters', () => {
     expect(result).toMatchObject({ text: '在的', finishReason: 'end_turn', model: 'claude-stream', usage: { promptTokens: 5, completionTokens: 2 } });
     expect(result.toolCalls).toEqual([{ id: 'tool-1', name: 'life.today', arguments: { day: 'today' } }]);
     expect(http.requests[0]).toMatchObject({ secretHeader: 'x-api-key', secretPrefix: '' });
+  });
+});
+
+describe('json mode downgrade (server parity)', () => {
+  const jsonModeConfig = (baseUrl: string): ProviderConfig =>
+    config('chat', { baseUrl, model: 'json-model', secretRef: 'provider.chat.key' });
+
+  it('retries once without response_format when the endpoint 4xx rejects it', async () => {
+    const http = new FakeHttp([
+      { status: 400, headers: { 'content-type': 'application/json' }, body: new TextEncoder().encode(JSON.stringify({ error: { message: 'response_format is not supported' } })) },
+      jsonResponse({ choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }], model: 'json-model' })
+    ]);
+    const provider = new BuiltinChatProvider(http, jsonModeConfig('https://json-downgrade-1.test'));
+
+    const result = await provider.complete({ system: '整理', messages: [{ role: 'user', content: [{ type: 'text', text: 'x' }] }], jsonMode: true });
+
+    expect(result.jsonModeDegraded).toBe(true);
+    expect(result.text).toBe('{"ok":true}');
+    expect(http.requests).toHaveLength(2);
+    expect(JSON.parse(String(http.requests[0]!.body))).toHaveProperty('response_format');
+    expect(JSON.parse(String(http.requests[1]!.body))).not.toHaveProperty('response_format');
+  });
+
+  it('remembers the lesson per endpoint and skips the doomed request next time', async () => {
+    const http = new FakeHttp([jsonResponse({ choices: [{ message: { content: '{"ok":1}' } }] })]);
+    const baseUrl = 'https://json-downgrade-2.test';
+    // Learn the rejection on a first provider instance.
+    const rejecting = new FakeHttp([{ status: 400, headers: { 'content-type': 'application/json' }, body: new TextEncoder().encode(JSON.stringify({ error: { message: 'json_object not allowed' } })) }, jsonResponse({ choices: [{ message: { content: '{"ok":0}' } }] })]);
+    await new BuiltinChatProvider(rejecting, jsonModeConfig(baseUrl)).complete({ messages: [{ role: 'user', content: [{ type: 'text', text: 'x' }] }], jsonMode: true });
+
+    // A fresh instance for the same endpoint must not resend response_format.
+    const result = await new BuiltinChatProvider(http, jsonModeConfig(baseUrl)).complete({ system: 'S', messages: [{ role: 'user', content: [{ type: 'text', text: 'x' }] }], jsonMode: true });
+
+    expect(http.requests).toHaveLength(1);
+    expect(JSON.parse(String(http.requests[0]!.body))).not.toHaveProperty('response_format');
+    // The prompt constraint is applied instead of the wire field.
+    const body = JSON.parse(String(http.requests[0]!.body)) as { messages: Array<{ role: string; content: string }> };
+    expect(body.messages[0]!.content).toContain('只输出一个 JSON 对象本身');
+    expect(result.jsonModeDegraded).toBe(true);
+  });
+
+  it('propagates non-json-mode failures untouched', async () => {
+    const http = new FakeHttp([jsonResponse({ error: { message: 'rate limited' } }) && { status: 429, headers: {}, body: new TextEncoder().encode(JSON.stringify({ error: { message: 'rate limited' } })) }]);
+    const provider = new BuiltinChatProvider(http, jsonModeConfig('https://json-downgrade-3.test'));
+
+    await expect(provider.complete({ messages: [{ role: 'user', content: [{ type: 'text', text: 'x' }] }], jsonMode: true })).rejects.toThrow('rate limited');
+    expect(http.requests).toHaveLength(1);
   });
 });

@@ -1,36 +1,16 @@
-import type { ConfigRepository, ProviderConfig } from '../db/config.repo.js';
+// The single createConfiguredProviders factory lives in provider-factory.ts.
+// It was previously duplicated here (without the anuma protocol normalization
+// and the summary/director slots), which silently left LocalCore's own runtime
+// on the stale copy.
+import type { ProviderConfig } from '../db/config.repo.js';
 import type { HttpPlatform } from '../platform/http.js';
 import type {
-  BinaryData, ChatContentPart, ChatChunk, ChatProvider, ChatRequest, ChatResult, ChatToolCall, EmbeddingProvider, EmbeddingResult,
-  GeneratedImage, HealthStatus, ImageProvider, RerankProvider, RerankMatch, SynthesizedAudio, TTSOptions, TTSProvider
+  ChatContentPart, ChatChunk, ChatProvider, ChatRequest, ChatResult, ChatToolCall, EmbeddingProvider, EmbeddingResult,
+  HealthStatus, RerankProvider, RerankMatch
 } from './types.js';
-import { ImageEditUnsupportedError, ProviderNotConfiguredError, ProviderRequestError } from './types.js';
-import { binaryBytes, endpoint, healthStatus, isRecord, requestBytes, requestJson, requestSse, type SecretHeader, toBase64 } from './http-json.js';
-
-export interface ConfiguredProviders {
-  chat: ChatProvider | null;
-  /** Independent vision slot; falls back to the chat model when unconfigured. */
-  vision: ChatProvider | null;
-  embedding: EmbeddingProvider | null;
-  rerank: RerankProvider | null;
-  image: ImageProvider | null;
-  tts: TTSProvider | null;
-}
-
-export async function createConfiguredProviders(http: HttpPlatform, config: ConfigRepository): Promise<ConfiguredProviders> {
-  const [chat, vision, embedding, rerank, image, tts] = await Promise.all([
-    config.getProvider('chat'), config.getProvider('vision'), config.getProvider('embedding'), config.getProvider('rerank'), config.getProvider('image'), config.getProvider('tts')
-  ]);
-  const chatProvider = chat && chat.enabled ? new BuiltinChatProvider(http, chat) : null;
-  return {
-    chat: chatProvider,
-    vision: vision && vision.enabled ? new BuiltinChatProvider(http, vision) : chatProvider,
-    embedding: embedding && embedding.enabled ? new BuiltinEmbeddingProvider(http, embedding) : null,
-    rerank: rerank && rerank.enabled ? new BuiltinRerankProvider(http, rerank) : null,
-    image: image && image.enabled ? new BuiltinImageProvider(http, image) : null,
-    tts: tts && tts.enabled ? new BuiltinTtsProvider(http, tts) : null
-  };
-}
+import { ProviderNotConfiguredError, ProviderRequestError } from './types.js';
+import { endpoint, healthStatus, isRecord, requestJson, requestSse, type SecretHeader, toBase64 } from './http-json.js';
+import { isJsonModeRejection, withJsonInstruction } from '../util/json-extract.js';
 
 abstract class BuiltinProvider {
   protected readonly secret: SecretHeader;
@@ -53,14 +33,50 @@ abstract class BuiltinProvider {
   }
 }
 
+/**
+ * Observed, not configured: flipped off the first time an endpoint refuses
+ * `response_format` (server parity). Keyed by provider identity because IPA
+ * factory calls construct fresh provider instances per resolve, so an
+ * instance field would forget the lesson immediately.
+ */
+const jsonModeSupportByEndpoint = new Map<string, boolean>();
+
 export class BuiltinChatProvider extends BuiltinProvider implements ChatProvider {
   readonly name = this.config.provider;
   readonly configured = Boolean(this.config.baseUrl && this.config.model && this.config.secretRef);
   readonly supportsTools = this.config.options.tools !== false;
 
+  private endpointKey(): string {
+    return `${this.config.provider}|${this.config.baseUrl}|${this.config.model}`;
+  }
+
+  private get jsonModeSupported(): boolean {
+    return jsonModeSupportByEndpoint.get(this.endpointKey()) ?? true;
+  }
+
+  private set jsonModeSupported(value: boolean) {
+    jsonModeSupportByEndpoint.set(this.endpointKey(), value);
+  }
+
   async complete(request: ChatRequest): Promise<ChatResult> {
     if (!this.configured) throw new ProviderNotConfiguredError('chat');
-    return this.config.provider === 'anthropic' ? await this.anthropic(request) : await this.openAiCompatible(request);
+    const run = (): Promise<ChatResult> => this.config.provider === 'anthropic' ? this.anthropic(request) : this.openAiCompatible(request);
+    if (request.jsonMode !== true) return await run();
+    // Config declares JSON mode the same way config declares vision: statically.
+    // An endpoint that 4xx's on `response_format` used to fail the whole call,
+    // which callers then swallowed as a fallback/skip -- a silent downgrade
+    // with no visible symptom. Retry once under a prompt constraint and
+    // remember the answer, so later calls skip the doomed request entirely.
+    const degradedAlready = !this.jsonModeSupported;
+    try {
+      const result = await run();
+      return degradedAlready ? { ...result, jsonModeDegraded: true } : result;
+    } catch (error) {
+      if (degradedAlready || !isJsonModeRejection(error)) throw error;
+      this.jsonModeSupported = false;
+      const result = await run();
+      return { ...result, jsonModeDegraded: true };
+    }
   }
 
   async stream(request: ChatRequest, onChunk: (chunk: ChatChunk) => void): Promise<ChatResult> {
@@ -73,16 +89,23 @@ export class BuiltinChatProvider extends BuiltinProvider implements ChatProvider
   async inspectHealth(): Promise<HealthStatus> { return this.health('chat'); }
 
   private async openAiCompatible(request: ChatRequest): Promise<ChatResult> {
+    // `jsonMode` is what the caller needs, `response_format` is only one way
+    // to get it. When the endpoint has rejected that field once, the
+    // constraint moves into the prompt instead of being dropped on the floor.
+    const nativeJson = request.jsonMode === true && this.jsonModeSupported;
+    const effective = request.jsonMode === true && !nativeJson
+      ? { ...request, system: withJsonInstruction(request.system) }
+      : request;
     const response = await requestJson<Record<string, unknown>>(this.http, {
-      url: endpoint(this.config.baseUrl, '/v1/chat/completions'), method: 'POST', signal: request.signal,
+      url: endpoint(this.config.baseUrl, '/v1/chat/completions'), method: 'POST', signal: effective.signal,
       body: {
         model: this.model,
-        messages: toOpenAiMessages(request),
-        ...(request.maxTokens ? { max_tokens: request.maxTokens } : {}),
-        ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
-        ...(request.jsonMode ? { response_format: { type: 'json_object' } } : {}),
-        ...(request.tools?.length ? { tools: request.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })) } : {}),
-        ...(request.toolChoice ? { tool_choice: request.toolChoice === 'none' ? 'none' : request.toolChoice === 'auto' ? 'auto' : { type: 'function', function: { name: request.toolChoice.name } } } : {})
+        messages: toOpenAiMessages(effective),
+        ...(effective.maxTokens ? { max_tokens: effective.maxTokens } : {}),
+        ...(effective.temperature !== undefined ? { temperature: effective.temperature } : {}),
+        ...(nativeJson ? { response_format: { type: 'json_object' } } : {}),
+        ...(effective.tools?.length ? { tools: effective.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })) } : {}),
+        ...(effective.toolChoice ? { tool_choice: effective.toolChoice === 'none' ? 'none' : effective.toolChoice === 'auto' ? 'auto' : { type: 'function', function: { name: effective.toolChoice.name } } } : {})
       }
     }, this.secret);
     const choice = Array.isArray(response.choices) ? response.choices[0] : undefined;
@@ -238,37 +261,6 @@ export class BuiltinRerankProvider extends BuiltinProvider implements RerankProv
     return rows.flatMap((row) => isRecord(row) && typeof row.index === 'number' && Number.isInteger(row.index) && typeof row.relevance_score === 'number' ? [{ index: row.index, score: row.relevance_score }] : []);
   }
   async inspectHealth(): Promise<HealthStatus> { return this.health('rerank'); }
-}
-
-export class BuiltinImageProvider extends BuiltinProvider implements ImageProvider {
-  readonly name = this.config.provider;
-  readonly configured = Boolean(this.config.baseUrl && this.config.model && this.config.secretRef);
-  async generate(prompt: string, options: { size?: string; signal?: AbortSignal; referenceImages?: Array<{ data: BinaryData; mime: string }> } = {}): Promise<GeneratedImage> {
-    if (!this.configured) throw new ProviderNotConfiguredError('image');
-    const response = await requestJson<Record<string, unknown>>(this.http, { url: endpoint(this.config.baseUrl, '/v1/images/generations'), method: 'POST', signal: options.signal, body: { model: this.model, prompt, ...(options.size ? { size: options.size } : {}), n: 1 } }, this.secret);
-    const item = Array.isArray(response.data) ? response.data[0] : undefined;
-    if (!isRecord(item)) throw new ProviderRequestError('image provider returned no image');
-    if (typeof item.url === 'string') {
-      const downloaded = await this.http.request({ url: item.url, method: 'GET', signal: options.signal });
-      return { data: downloaded.body, mime: downloaded.headers['content-type'] ?? 'image/png' };
-    }
-    return { ...binaryBytes(item.b64_json, 'image/png'), mime: 'image/png' };
-  }
-  async edit(_prompt: string, _image: BinaryData, _options: { mime?: string; signal?: AbortSignal } = {}): Promise<GeneratedImage> {
-    throw new ImageEditUnsupportedError('configured image provider does not expose a safe edit endpoint');
-  }
-  async inspectHealth(): Promise<HealthStatus> { return this.health('image'); }
-}
-
-export class BuiltinTtsProvider extends BuiltinProvider implements TTSProvider {
-  readonly name = this.config.provider;
-  readonly configured = Boolean(this.config.baseUrl && this.config.model && this.config.secretRef);
-  async synthesize(text: string, options: TTSOptions = {}): Promise<SynthesizedAudio> {
-    if (!this.configured) throw new ProviderNotConfiguredError('tts');
-    const response = await requestBytes(this.http, { url: endpoint(this.config.baseUrl, '/v1/audio/speech'), method: 'POST', signal: options.signal, body: { model: this.model, input: text, voice: options.voice ?? 'alloy', ...(options.instructions ? { instructions: options.instructions } : {}), ...(options.speed ? { speed: options.speed } : {}), response_format: 'mp3' } }, this.secret);
-    return { data: response.body, mime: response.mime || 'audio/mpeg', format: 'mp3' };
-  }
-  async inspectHealth(): Promise<HealthStatus> { return this.health('tts'); }
 }
 
 function numberValue(value: unknown): number | undefined { return typeof value === 'number' ? value : undefined; }

@@ -4,7 +4,11 @@ import type { MediaPlatform } from '../platform/media.js';
 import type { HttpPlatform } from '../platform/http.js';
 import { ConfigRepository, JobRepo, LifeCityRepo, LifeClockRepo, LifeRepo, LifeV2Repo, LocationRepo, MediaRepo, MemoryRepo, MessageRepo, MetricsRepo, MomentRepo, ReplyBatchRepo, SettingsRepo, StickerRepo, SummaryRepo, ThoughtRepo, VoiceRepo, WeatherRepo, type MediaRow, type ProviderConfig, type Sticker } from '../db/index.js';
 import type { ChatProvider } from '../providers/types.js';
-import type { ConfiguredProviders } from '../providers/builtin.js';
+import type { ConfiguredProviders } from '../providers/provider-factory.js';
+import { DirectorClient } from './director/client.js';
+import { MediaDirector } from './media-director.js';
+import { LocalVoiceService } from './voice/service.js';
+import { mergeServerPersonaSeed } from './server-persona.js';
 import { createWebSearch, DOUBAO_SEARCH_DEFAULT_URL, TAVILY_SEARCH_DEFAULT_URL } from '../providers/web-search.js';
 import { OpenMeteoWeatherProvider, summarizeForecast, type WeatherForecastSummary } from '../providers/weather-provider.js';
 import type { MemoryProvider } from '../memory/types.js';
@@ -154,6 +158,11 @@ export class LocalCore implements LocalCoreApi {
    * UUID via rel_path); undefined only when no platform store was injected. */
   readonly media: MediaPlatform | undefined;
   readonly events: LocalEmitter;
+  /** Structured media-decision layer (voice/image directors) over the
+   * director provider slot; degrades through deterministic fallbacks. */
+  readonly mediaDirector: MediaDirector;
+  /** Voice V2 pipeline: intent → mode → independent script → guards → TTS. */
+  readonly voiceService: LocalVoiceService;
   readonly replies: ReplyCoordinator;
   readonly contextBuilder: ContextBuilder;
   readonly summaryBuilder: SummaryBuilder;
@@ -199,7 +208,7 @@ export class LocalCore implements LocalCoreApi {
     this.media = options.mediaStore ? new LocalMediaResolver(this.mediaRepo, options.mediaStore) : undefined;
     this.personaReferences = new PersonaReferenceService(this.settingsRepo, this.mediaRepo);
     this.configuredProviders = options.http
-      ? async () => (await import('../providers/builtin.js')).createConfiguredProviders(options.http!, this.configRepo)
+      ? async () => (await import('../providers/provider-factory.js')).createConfiguredProviders(options.http!, this.configRepo)
       : undefined;
     const localMemoryProvider = new LocalMemoryProvider({
       store: new SqliteLocalMemoryStore(this.memoryRepo),
@@ -258,15 +267,33 @@ export class LocalCore implements LocalCoreApi {
       provider: async () => options.chatProvider ?? await options.chatProviderFactory?.() ?? (await this.configuredProviders?.())?.chat ?? null
     });
     this.events = new LocalEmitter(now);
+    // Media Director: resolves the director slot (with chat fallback) lazily
+    // per call, so admin config changes take effect without rebuilding. Events
+    // carry only privacy-safe fields (task/latency/sizes/failure class).
+    this.mediaDirector = new MediaDirector(new DirectorClient(
+      async () => (await this.configuredProviders?.())?.director ?? null,
+      { onEvent: (event) => this.events.emit(`director.${event.task}.${event.event}`, { ...event }) }
+    ));
+    this.voiceService = new LocalVoiceService({
+      voices: this.voicesRepo,
+      settings: this.settingsRepo,
+      messages: this.messagesRepo,
+      mediaDirector: this.mediaDirector,
+      persona: () => this.personaVoicePolicy(),
+      emit: (type, data) => this.events.emit(type, data),
+      isCurrentRevision: async (batchId, revision) => await this.batchesRepo.currentRevision(batchId) === revision
+    });
     this.replies = new ReplyCoordinator({
       messages: this.messagesRepo,
       batches: this.batchesRepo,
       memory: this.memoryProvider,
       provider: options.chatProvider,
-      providerFactory: options.chatProviderFactory ?? (options.http ? async () => (await import('../providers/builtin.js')).createConfiguredProviders(options.http!, this.configRepo).then((providers) => providers.chat) : undefined),
+      providerFactory: options.chatProviderFactory ?? (options.http ? async () => (await import('../providers/provider-factory.js')).createConfiguredProviders(options.http!, this.configRepo).then((providers) => providers.chat) : undefined),
       webSearch: options.http ? () => createWebSearch(options.http!, this.configRepo) : null,
       toolRuntime: options.toolRuntime,
       contextBuilder: this.contextBuilder,
+      mediaDirector: this.mediaDirector,
+      voiceService: this.voiceService,
       now,
       debounceMs: options.replyDebounceMs,
       emit: (type, data) => this.events.emit(type, data)
@@ -278,9 +305,23 @@ export class LocalCore implements LocalCoreApi {
     return this.events.subscribe(listener);
   }
 
+  /** Persona voice policy with server defaults applied (enabled, 300 chars). */
+  private async personaVoicePolicy(): Promise<{ name: string; voicePolicy: { enabled: boolean; maxCharsPerClip: number } }> {
+    const saved = await this.settingsRepo.get<Record<string, unknown>>('persona', {});
+    const persona = mergeServerPersonaSeed(saved) as { name?: string; voicePolicy?: { enabled?: boolean; maxCharsPerClip?: number } };
+    return {
+      name: typeof persona.name === 'string' && persona.name ? persona.name : 'SOOYA',
+      voicePolicy: {
+        enabled: persona.voicePolicy?.enabled !== false,
+        maxCharsPerClip: persona.voicePolicy?.maxCharsPerClip || 300
+      }
+    };
+  }
+
   /** Foreground: recover interrupted jobs before the scheduler drains them. */
   async onAppActive(): Promise<void> {
     await this.jobsRepo.recoverStuck();
+    await this.voicesRepo.recoverInFlight().catch(() => undefined);
     const caught = await this.lifeCatchUp.catchUp().catch(() => null);
     if (caught) this.events.emit('life.updated', { activity: caught.state.current.activity });
     const cachedWeather = await this.weatherRepo.latest('active').catch((error) => { void this.recordError('weather.read', errorMessage(error)); return undefined; });
@@ -921,7 +962,10 @@ export class LocalCore implements LocalCoreApi {
       return { persona: await this.settingsRepo.get('persona', fallback) } as T;
     }
     if (route === '/api/admin/voice-behavior') {
-      const fallback = { enabled: false, maxVoiceSeconds: 30 };
+      // Default mirrors the server's DEFAULT_VOICE_PREFERENCES so voice stays
+      // usable out of the box (the old enabled:false default was never
+      // enforced by the runtime and only misled the panel).
+      const fallback = { enabled: true, maxVoiceSeconds: 30 };
       if (method === 'PUT' || method === 'PATCH') await this.settingsRepo.set('voiceBehavior', body);
       return await this.settingsRepo.get('voiceBehavior', fallback) as T;
     }
