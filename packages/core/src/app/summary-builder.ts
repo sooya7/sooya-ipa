@@ -2,11 +2,19 @@ import type { MessageRepo } from '../db/message.repo.js';
 import type { SummaryRepo, SummaryRow } from '../db/misc.repo.js';
 import type { ChatProvider } from '../providers/types.js';
 import type { ChatMessage } from './types.js';
+import { messageText } from './context/multimodal.js';
+
+type ProviderResolver = ChatProvider | null | undefined | (() => Promise<ChatProvider | null>);
 
 export interface SummaryBuilderOptions {
   messages: MessageRepo;
   summaries: SummaryRepo;
-  provider?: ChatProvider | null | (() => Promise<ChatProvider | null>);
+  /** Independent summary provider slot; the production wiring is `summary ?? chat`. */
+  summaryProvider?: ProviderResolver;
+  /** Compatibility chat slot. Used only when no independent summary is configured. */
+  chatProvider?: ProviderResolver;
+  /** @deprecated Compatibility alias for `chatProvider`. */
+  provider?: ProviderResolver;
   maxMessages?: number;
 }
 
@@ -19,7 +27,14 @@ export interface SummaryBuildResult {
   createdCount?: number;
 }
 
-/** Incremental, failure-isolated conversation summarization for local context. */
+/**
+ * Incremental, failure-isolated conversation summarization for local context.
+ *
+ * Production uses the independent `summary` model slot first, then the chat
+ * model as a compatibility fallback. If neither slot is configured this
+ * returns `noop` instead of fabricating a local "summary" and pretending the
+ * model path succeeded.
+ */
 export class SummaryBuilder {
   private readonly maxMessages: number;
 
@@ -45,35 +60,38 @@ export class SummaryBuilder {
       chunks.push(messages.slice(index, index + this.maxMessages));
     }
 
-    const provider = typeof this.options.provider === 'function' ? await this.options.provider() : this.options.provider;
+    const provider = await this.resolveProvider();
+    if (!provider?.configured) return { state: 'noop' };
+
     let last: SummaryRow | undefined;
+    let createdCount = 0;
     for (const chunk of chunks) {
       if (signal?.aborted) throw signal.reason ?? new Error('summary build aborted');
       const fromSeq = chunk[0]!.seq;
       const toSeq = chunk.at(-1)!.seq;
-      let content: string;
-      let model: string | null = null;
-      if (provider?.configured) {
-        try {
-          const result = await provider.complete({
-            system: '你是 SOOYA 的本地对话摘要器。保留事实、偏好、未完成事项、情绪和上下文关系；不要编造。只输出简洁中文摘要。',
-            messages: [{ role: 'user', content: [{ type: 'text', text: formatMessages(chunk) }] }],
-            maxTokens: 900,
-            temperature: 0,
-            signal
-          });
-          content = result.text.trim();
-          model = result.model;
-        } catch {
-          content = fallbackSummary(chunk);
-        }
-      } else content = fallbackSummary(chunk);
+      const result = await provider.complete({
+        system: '你是 SOOYA 的本地对话摘要器。保留事实、偏好、未完成事项、情绪和上下文关系；不要编造。只输出简洁中文摘要。',
+        messages: [{ role: 'user', content: [{ type: 'text', text: formatMessages(chunk) }] }],
+        maxTokens: 900,
+        temperature: 0,
+        signal
+      });
+      const content = result.text.trim();
       if (!content) continue;
-      last = await this.options.summaries.create({ fromSeq, toSeq, content: content.slice(0, 8000), model });
+      last = await this.options.summaries.create({ fromSeq, toSeq, content: content.slice(0, 8000), model: result.model });
+      createdCount += 1;
     }
 
     if (!last) return { state: 'noop' };
-    return { state: 'created', summary: last, fromSeq: last.from_seq, toSeq: last.to_seq, createdCount: chunks.length };
+    return { state: 'created', summary: last, fromSeq: last.from_seq, toSeq: last.to_seq, createdCount };
+  }
+
+  /** Returns the first usable summary slot: independent summary, then chat. */
+  async resolveProvider(): Promise<ChatProvider | null> {
+    const summary = await resolveProvider(this.options.summaryProvider);
+    if (summary?.configured) return summary;
+    const chat = await resolveProvider(this.options.chatProvider ?? this.options.provider);
+    return chat?.configured ? chat : null;
   }
 }
 
@@ -81,10 +99,7 @@ function formatMessages(messages: ChatMessage[]): string {
   return messages.map((message) => `${message.role === 'user' ? '用户' : message.role === 'assistant' ? 'SOOYA' : '系统'}：${messageText(message).slice(0, 1200)}`).join('\n');
 }
 
-function fallbackSummary(messages: ChatMessage[]): string {
-  return formatMessages(messages).slice(0, 4000);
-}
-
-function messageText(message: ChatMessage): string {
-  return message.content.map((part) => part.text ?? part.transcript ?? '').filter(Boolean).join('\n').trim();
+async function resolveProvider(value: ProviderResolver): Promise<ChatProvider | null> {
+  if (typeof value === 'function') return await value();
+  return value ?? null;
 }
