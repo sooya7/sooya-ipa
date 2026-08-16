@@ -29,8 +29,11 @@ function dateText(value: string | null | undefined): string {
   return Number.isFinite(time) ? new Date(time).toLocaleString('zh-CN', { hour12: false }) : value;
 }
 
-function versionText(value: string | null | undefined): string {
-  return value || '暂无';
+export function versionText(value: string | null | undefined): string {
+  if (!value) return '暂无';
+  const sequence = /^ota-(\d+)$/iu.exec(value)?.[1];
+  if (sequence) return `OTA #${sequence}`;
+  return value;
 }
 
 function updateResultText(reason: string | undefined): string {
@@ -124,6 +127,10 @@ export function OtaDiagnosticsCard({ onNotice }: { onNotice: (message: string) =
     }
   };
 
+  const versionValue = (value: string | null | undefined) => (
+    <strong className="admin-breakable" style={{ display: 'block' }} title={value || undefined}>{versionText(value)}</strong>
+  );
+
   return (
     <>
       <FullBackupCard onNotice={onNotice} />
@@ -140,10 +147,10 @@ export function OtaDiagnosticsCard({ onNotice }: { onNotice: (message: string) =
         {error && <p className="admin-inline-error" role="status">{error}</p>}
 
         <div style={{ display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', margin: '14px 0' }}>
-          <div><small>当前 Web 版本</small><strong className="admin-breakable" style={{ display: 'block' }}>{versionText(state.current_web_version)}</strong></div>
-          <div><small>待应用版本</small><strong className="admin-breakable" style={{ display: 'block' }}>{versionText(state.pending_web_version)}</strong></div>
-          <div><small>最后良好版本</small><strong className="admin-breakable" style={{ display: 'block' }}>{versionText(state.last_good_web_version)}</strong></div>
-          <div><small>已阻止版本</small><strong className="admin-breakable" style={{ display: 'block' }}>{versionText(state.blocked_web_version)}</strong></div>
+          <div><small>当前 Web 版本</small>{versionValue(state.current_web_version)}</div>
+          <div><small>待应用版本</small>{versionValue(state.pending_web_version)}</div>
+          <div><small>最后良好版本</small>{versionValue(state.last_good_web_version)}</div>
+          <div><small>已阻止版本</small>{versionValue(state.blocked_web_version)}</div>
           <div><small>最后检查</small><strong style={{ display: 'block' }}>{dateText(state.last_checked_at)}</strong></div>
           <div><small>最后下载</small><strong style={{ display: 'block' }}>{dateText(state.last_downloaded_at)}</strong></div>
           <div><small>最后应用</small><strong style={{ display: 'block' }}>{dateText(state.last_applied_at)}</strong></div>
