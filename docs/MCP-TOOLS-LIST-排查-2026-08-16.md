@@ -103,3 +103,36 @@
 说明请求本身失败（401/400/超时），继续按错误文案定位；若仍显示 ready + 0，
 则说明 native/web bundle 版本与仓库不一致（检查 OTA native gate：
 `--native-min/max` 必须 ≥ 12）。
+
+## 七、第二轮：ensureReady 并发竞态（2026-08-16）
+
+> 现象：工具发现正常（14 个）后，进入「内容管理 → 她的记忆」出现
+> "MCP server is already connecting"，随后 Ombre Brain degraded / sync
+> unavailable。根因：`connectedConfigKey` 只在 connect + listTools **完成后**
+> 才赋值，并发 health/sync/recall 会在此窗口各自调用 Native
+> `SOOYAMcp.connect()`（旧 native 上直接 duplicateServer 失败；新 native 上
+> 反复重建会话）。未改 tools/list、未改 Ombre 服务端。
+
+修复（`OmbreMcpMemoryProvider`）：
+- **per-config singleflight**：`readyInflight: Map<configKey, Promise<void>>`，
+  同 server/config 的并发调用共享**一次** connect + listTools；等待者
+  `await` 共享 promise，完成后直接复用会话（不再重复 connect）。
+- **执行者无父 signal**：共享连接不被单个调用者的取消拆掉；超时仍由
+  `callWithTimeout` 预算兜底；aborted 调用者在进入/等待后自行离开。
+- **失败清锁**：`performReady` 失败 → `invalidateConnection` 清空
+  `readyInflight` → 下一次调用重试；等待者不重试（错误直接传播）。
+- **配置改变失效**：configKey 含 url/transport/secretKey，变化即 invalidate
+  旧会话（disconnect）并按新 key 重连；旧会话清理不触碰当前 inflight。
+- **disconnect 失效**：`invalidateConnection`（传输失败/外部断开路径）同时
+  清 inflight + 状态，保证下一个并发 burst 恰好重连一次。
+- 会话采纳保护：`connectedConfigKey` 只在「自己的 attempt 仍是当前
+  inflight」时写入，失效窗口内完成的连接不污染状态。
+
+回归（`src/memory/ombre-mcp-memory-provider.test.ts`，+6 用例）：
+- 并发 health + pullChanges + recall（connect/listTools 带延迟制造重叠窗口）
+  → `mcp.connect`/`listTools` 各恰好 1 次，无 duplicate/already connecting；
+- 连接完成后 health/pullChanges/recall 继续复用会话（connect 仍 1 次）；
+- 首次 connect 失败 → 并发全部失败、锁清除 → 下次调用重试成功（2 次）；
+- 配置 url 改变 → 按新 key 重连 1 次 + 旧会话 disconnect 恰好 1 次；
+- 传输失败 invalidate 后，下一个并发 burst 恰好重连 1 次；
+- aborted 调用者不参与共享 connect。

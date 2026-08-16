@@ -25,6 +25,12 @@ export class OmbreMcpMemoryProvider implements MemoryProvider, OmbreMemorySyncPo
   private readonly configuredNames: OmbreMemoryToolNames;
   private availableTools = new Set<string>();
   private connectedConfigKey: string | null = null;
+  /** Per-config singleflight: concurrent health/sync/recall share one
+   * connect + discovery pass. `connectedConfigKey` is only assigned after
+   * that pass completes, so without this in-flight lock every concurrent
+   * caller would re-enter native connect (rebuilding the session, or on
+   * older natives failing with "MCP server is already connecting"). */
+  private readonly readyInflight = new Map<string, Promise<void>>();
 
   constructor(private readonly options: OmbreMcpMemoryProviderOptions) {
     this.serverId = options.serverId ?? 'ombre';
@@ -181,6 +187,10 @@ export class OmbreMcpMemoryProvider implements MemoryProvider, OmbreMemorySyncPo
   }
 
   private async invalidateConnection(forceDisconnect = false): Promise<void> {
+    // A real invalidation (transport failure, failed connect, external
+    // disconnect) must clear the in-flight lock so the next caller starts a
+    // fresh connect instead of waiting on a stale shared promise.
+    this.readyInflight.clear();
     const shouldDisconnect = forceDisconnect || this.connectedConfigKey !== null || this.availableTools.size > 0;
     this.availableTools = new Set<string>();
     this.connectedConfigKey = null;
@@ -189,17 +199,56 @@ export class OmbreMcpMemoryProvider implements MemoryProvider, OmbreMemorySyncPo
 
   private async ensureReady(signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) throw signal.reason ?? new Error('Ombre MCP request aborted');
+    const config = await this.options.getConfig();
+    if (!config || config.enabled === false || !config.url) throw new Error('Ombre MCP is not configured');
+    const key = `${config.url}|${config.transport}|${config.secretKey ?? ''}`;
+    if (this.connectedConfigKey === key) return;
+
+    // Singleflight: another caller is already connecting + discovering for
+    // this exact config key. Share that one native connect+listTools pass
+    // instead of re-entering it (which would rebuild the session or fail
+    // with "already connecting" on older natives).
+    const shared = this.readyInflight.get(key);
+    if (shared) {
+      try {
+        await shared;
+      } finally {
+        if (signal?.aborted) throw signal.reason ?? new Error('Ombre MCP request aborted');
+      }
+      return;
+    }
+
+    const attempt = this.performReady(config);
+    this.readyInflight.set(key, attempt);
+    try {
+      await attempt;
+      // Only adopt the session when our own pass is still the current one:
+      // if it was invalidated meanwhile (failure, external disconnect), leave
+      // the state untouched so the next caller reconnects cleanly.
+      if (this.readyInflight.get(key) === attempt) this.connectedConfigKey = key;
+    } finally {
+      if (this.readyInflight.get(key) === attempt) this.readyInflight.delete(key);
+    }
+  }
+
+  /** One shared connect + discovery pass for a config key. */
+  private async performReady(config: McpServerConfig): Promise<void> {
     let connected = false;
     try {
-      const config = await this.options.getConfig();
-      if (!config || config.enabled === false || !config.url) throw new Error('Ombre MCP is not configured');
-      const key = `${config.url}|${config.transport}|${config.secretKey ?? ''}`;
-      if (this.connectedConfigKey === key) return;
-      await this.invalidateConnection();
+      // Replace a previous session for a changed config; this must not touch
+      // readyInflight (the current pass is registered under this key).
+      if (this.connectedConfigKey !== null || this.availableTools.size > 0) {
+        this.availableTools = new Set<string>();
+        this.connectedConfigKey = null;
+        await this.options.mcp.disconnect(this.serverId).catch(() => undefined);
+      }
+      const budget = Math.max(this.timeoutMs, config.connectTimeoutMs ?? this.timeoutMs);
+      // No parent signal here: the session is shared by every concurrent
+      // caller, so one caller's cancellation must not tear it down.
       const state = await callWithTimeout(
         (callSignal) => { void callSignal; return this.options.mcp.connect({ ...config, id: this.serverId }); },
-        signal,
-        Math.max(this.timeoutMs, config.connectTimeoutMs ?? this.timeoutMs)
+        undefined,
+        budget
       );
       if (state.state !== 'ready') throw new Error(state.detail ?? `Ombre MCP connection is ${state.state}`);
       connected = true;
@@ -208,17 +257,15 @@ export class OmbreMcpMemoryProvider implements MemoryProvider, OmbreMemorySyncPo
       // header) is routinely slower than per-tool-call latency, and the
       // default 1.8s timeout made healthy servers look permanently
       // unavailable on real devices.
-      const listTimeout = Math.max(this.timeoutMs, config.connectTimeoutMs ?? this.timeoutMs);
       let tools: McpTool[] = [];
       try {
-        tools = await callWithTimeout((callSignal) => this.options.mcp.listTools(this.serverId, callSignal), signal, listTimeout);
+        tools = await callWithTimeout((callSignal) => this.options.mcp.listTools(this.serverId, callSignal), undefined, budget);
       } catch (error) {
         // "no tools discovered" is a diagnosable state, not a transport
         // failure: keep the healthy session, report degraded via health().
         if (!(error instanceof Error && /no tools discovered/iu.test(error.message))) throw error;
       }
       this.availableTools = new Set(tools.map((tool) => tool.name));
-      this.connectedConfigKey = key;
     } catch (error) {
       await this.invalidateConnection(connected);
       throw error;

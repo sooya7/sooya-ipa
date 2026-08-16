@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { McpPlatform } from '../platform/mcp.js';
+import type { McpPlatform, McpServerConfig, McpTool } from '../platform/mcp.js';
 import type { MemoryEntry, MemoryProvider } from './types.js';
 import { HybridMemoryProvider } from './memory-router.js';
 import { OmbreMcpMemoryProvider } from './ombre-mcp-memory-provider.js';
@@ -79,6 +79,134 @@ describe('OmbreMcpMemoryProvider', () => {
     expect(remote.connect).toHaveBeenCalledTimes(2);
     expect(remote.listTools).toHaveBeenCalledTimes(2);
     expect(remote.disconnect).toHaveBeenCalledOnce();
+  });
+
+  describe('ensureReady singleflight: concurrent callers share one connect+discovery', () => {
+    const CONFIG: McpServerConfig = { id: 'ombre', url: 'https://memory.invalid/mcp', transport: 'streamable-http' };
+    const TOOLS: McpTool[] = [
+      { name: 'memory.search', inputSchema: { type: 'object' } },
+      { name: 'memory.commit', inputSchema: { type: 'object' } },
+      { name: 'memory.upsert', inputSchema: { type: 'object' } },
+      { name: 'memory.sync', inputSchema: { type: 'object' } }
+    ];
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    function delayedMcp(options: { connectError?: Error; connectDelayMs?: number; listDelayMs?: number } = {}) {
+      let connectAttempts = 0;
+      const connect = vi.fn(async (config: McpServerConfig) => {
+        connectAttempts += 1;
+        if (options.connectError && connectAttempts === 1) throw options.connectError;
+        if (options.connectDelayMs) await sleep(options.connectDelayMs);
+        return { serverId: config.id, state: 'ready' as const, toolCount: TOOLS.length };
+      });
+      const listTools = vi.fn(async () => {
+        if (options.listDelayMs) await sleep(options.listDelayMs);
+        return TOOLS;
+      });
+      const callTool = vi.fn(async (_serverId: string, name: string) => name === 'memory.search'
+        ? { structuredContent: { entries: [{ id: 'r1', kind: 'event', content: '并发共享连接' }] } }
+        : { structuredContent: { entries: [], nextCursor: null } });
+      const disconnect = vi.fn(async () => undefined);
+      const mcp: McpPlatform = { connect, disconnect, listTools, callTool, close: vi.fn(async () => undefined) };
+      return { mcp, connect, disconnect, listTools, callTool };
+    }
+
+    it('runs connect+listTools exactly once for concurrent health, pullChanges and recall', async () => {
+      const { mcp, connect, listTools } = delayedMcp({ connectDelayMs: 30, listDelayMs: 20 });
+      const provider = new OmbreMcpMemoryProvider({ mcp, getConfig: async () => CONFIG });
+
+      const [health, pulled, recalled] = await Promise.all([
+        provider.health(),
+        provider.pullChanges('cursor-1', 10),
+        provider.recall({ query: '猫', limit: 5 })
+      ]);
+
+      expect(connect).toHaveBeenCalledTimes(1);
+      expect(listTools).toHaveBeenCalledTimes(1);
+      expect(connect).toHaveBeenCalledWith(expect.objectContaining({ id: 'ombre', url: CONFIG.url, transport: CONFIG.transport }));
+      expect(health).toMatchObject({ state: 'ready', detail: '4 tools' });
+      expect(pulled).toMatchObject({ entries: [], nextCursor: null });
+      expect(recalled).toMatchObject({ strategy: 'remote', entries: [{ id: 'r1' }] });
+    });
+
+    it('reuses the established session for later operations without reconnecting', async () => {
+      const { mcp, connect, listTools } = delayedMcp();
+      const provider = new OmbreMcpMemoryProvider({ mcp, getConfig: async () => CONFIG });
+
+      await Promise.all([provider.health(), provider.recall({ query: '第一次' })]);
+      await provider.health();
+      await provider.pullChanges('c2', 5);
+      await provider.recall({ query: '第二次' });
+
+      expect(connect).toHaveBeenCalledTimes(1);
+      expect(listTools).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears the in-flight lock on failure and retries on the next call', async () => {
+      const { mcp, connect, disconnect } = delayedMcp({ connectError: new Error('connect refused'), connectDelayMs: 10 });
+      const provider = new OmbreMcpMemoryProvider({ mcp, getConfig: async () => CONFIG });
+
+      const first = await Promise.allSettled([provider.health(), provider.pullChanges('c1', 5)]);
+      expect(first[0]).toMatchObject({ status: 'fulfilled', value: { state: 'unavailable', detail: 'connect refused' } });
+      expect(first[1].status).toBe('rejected');
+      expect(connect).toHaveBeenCalledTimes(1);
+      expect(disconnect).not.toHaveBeenCalled();
+
+      // Lock cleared: the next call starts a fresh connect and succeeds.
+      await expect(provider.health()).resolves.toMatchObject({ state: 'ready' });
+      expect(connect).toHaveBeenCalledTimes(2);
+      expect(disconnect).not.toHaveBeenCalled();
+    });
+
+    it('reconnects with one shared pass when the config changes, discarding the old session', async () => {
+      const { mcp, connect, disconnect } = delayedMcp({ connectDelayMs: 10 });
+      let url = 'https://a.invalid/mcp';
+      const provider = new OmbreMcpMemoryProvider({
+        mcp,
+        getConfig: async () => ({ ...CONFIG, url })
+      });
+
+      await expect(provider.health()).resolves.toMatchObject({ state: 'ready' });
+      url = 'https://b.invalid/mcp';
+      const settled = await Promise.allSettled([provider.health(), provider.pullChanges('c1', 5)]);
+      expect(settled[0]).toMatchObject({ status: 'fulfilled', value: { state: 'ready' } });
+      expect(settled[1].status).toBe('fulfilled');
+
+      expect(connect).toHaveBeenCalledTimes(2);
+      expect(disconnect).toHaveBeenCalledTimes(1); // old session discarded once
+    });
+
+    it('invalidates the shared lock after a transport failure so the next burst reconnects once', async () => {
+      let callCount = 0;
+      const { mcp, connect, listTools, disconnect } = delayedMcp();
+      mcp.callTool = vi.fn(async () => {
+        callCount += 1;
+        if (callCount === 2) throw new Error('session closed');
+        return { structuredContent: { entries: [], nextCursor: null } };
+      });
+      const provider = new OmbreMcpMemoryProvider({ mcp, getConfig: async () => CONFIG });
+
+      await provider.pullChanges('c0', 5);
+      await expect(provider.pullChanges('c1', 5)).rejects.toThrow('session closed');
+      expect(connect).toHaveBeenCalledTimes(1);
+      expect(disconnect).toHaveBeenCalledTimes(1); // invalidate disconnected the dead session
+
+      // The next concurrent burst shares exactly one reconnect.
+      await Promise.all([provider.health(), provider.pullChanges('c2', 5), provider.recall({ query: '恢复' })]);
+      expect(connect).toHaveBeenCalledTimes(2);
+      expect(listTools).toHaveBeenCalledTimes(2);
+      expect(disconnect).toHaveBeenCalledTimes(1);
+    });
+
+    it('lets an aborted caller leave without joining the shared connect', async () => {
+      const { mcp, connect } = delayedMcp();
+      const provider = new OmbreMcpMemoryProvider({ mcp, getConfig: async () => CONFIG });
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(provider.recall({ query: 'x', signal: controller.signal })).rejects.toThrow(/aborted/);
+      expect(connect).not.toHaveBeenCalled();
+    });
   });
 });
 
