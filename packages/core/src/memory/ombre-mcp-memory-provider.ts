@@ -3,6 +3,10 @@ import type { McpToolCallResult } from '../tools/mcp-result.js';
 import type { MemoryCommitInput, MemoryCommitResult, MemoryEntry, MemoryKind, MemoryProvider, MemoryRecall, MemoryRecallInput } from './types.js';
 import type { OmbreMemorySyncPort } from './sync-types.js';
 
+const SOOYA_SYNC_SCHEMA = 'sooya.memory.sync.v1';
+const SOOYA_SYNC_SENTINEL = '__sooya_sync_v1__';
+const STRUCTURED_ENTRY_KEYS = ['entries', 'memories', 'items', 'results', 'data'] as const;
+
 export type OmbreMemoryOperation = 'recall' | 'list' | 'commit' | 'upsert' | 'update' | 'forget' | 'maintain' | 'sync';
 export type OmbreMemoryToolNames = Partial<Record<OmbreMemoryOperation, string>>;
 
@@ -148,19 +152,38 @@ export class OmbreMcpMemoryProvider implements MemoryProvider, OmbreMemorySyncPo
   }
 
   async pullChanges(cursor: string | null, limit = 100, signal?: AbortSignal): Promise<{ entries: MemoryEntry[]; nextCursor: string | null }> {
-    let result: McpToolCallResult;
-    try {
-      result = await this.invoke('sync', { cursor, updatedSince: cursor, limit: Math.max(1, Math.min(500, Math.trunc(limit))) }, signal);
-    } catch (error) {
-      // Older Ombre schemas have no delta cursor. Catalog is a safe fallback;
-      // the local sourceId/sourceHash mapping still prevents duplicate rows.
-      if (!isMissingToolError(error)) throw error;
-      result = await this.invoke('list', { limit: Math.max(1, Math.min(500, Math.trunc(limit))), ...(cursor ? { cursor } : {}) }, signal);
+    const pageLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
+    await this.ensureReady(signal);
+
+    const syncTool = this.resolveTool('sync');
+    if (syncTool) {
+      const result = await this.invoke('sync', { cursor, updatedSince: cursor, limit: pageLimit }, signal);
+      return parseSyncPage(result, syncTool);
     }
-    const value = payloadValue(result);
-    const entries = extractEntries(result);
-    const nextCursor = stringValue(value, 'nextCursor') ?? stringValue(value, 'next_cursor') ?? (typeof value === 'object' && value !== null && 'cursor' in value ? stringValue(value, 'cursor') : null);
-    return { entries, nextCursor };
+
+    // Newer structured catalog tools can safely stand in for a delta endpoint.
+    // The local sourceId/sourceHash mapping prevents duplicate rows on repeat pulls.
+    const listTool = this.resolveTool('list');
+    if (!listTool) {
+      throw new Error('structured memory sync unavailable: Ombre MCP exposes neither memory.sync nor a memory listing tool');
+    }
+
+    if (listTool === 'breath_advanced') {
+      // Ombre 2.7.6 exposes only a human-readable breath_advanced catalog. Do
+      // not scrape that prose. Send a reserved compatibility probe instead so
+      // a server-side adapter can return a versioned JSON page without adding
+      // a new public MCP tool or changing the advertised schema.
+      const compatibilityCursor = cursor ?? '0';
+      const result = await this.invoke('list', {
+        query: '',
+        catalog: true,
+        domain: `${SOOYA_SYNC_SENTINEL}:${compatibilityCursor}:${pageLimit}`
+      }, signal);
+      return parseSyncPage(result, listTool, SOOYA_SYNC_SCHEMA);
+    }
+
+    const result = await this.invoke('list', { limit: pageLimit, ...(cursor ? { cursor } : {}) }, signal);
+    return parseSyncPage(result, listTool);
   }
 
   /** Exposed for diagnostics and tests; no credentials are returned. */
@@ -283,10 +306,39 @@ export class OmbreMcpMemoryProvider implements MemoryProvider, OmbreMemorySyncPo
       update: ['memory.update', 'update'],
       forget: ['memory.forget', 'breath_release', 'forget', 'release'],
       maintain: ['memory.maintain', 'maintain'],
-      sync: ['memory.sync', 'memory.sync.pull', 'memory.delta', 'delta', 'sync']
+      sync: ['memory.sync', 'memory.sync.pull', 'memory.delta', 'memory_sync', 'delta', 'sync']
     };
     return aliases[operation].find((name) => this.availableTools.has(name)) ?? null;
   }
+}
+
+function parseSyncPage(
+  result: McpToolCallResult,
+  toolName: string,
+  requiredSchema?: string
+): { entries: MemoryEntry[]; nextCursor: string | null } {
+  const value = payloadValue(result);
+  const hasStructuredEntries = Array.isArray(value)
+    || (isRecord(value) && STRUCTURED_ENTRY_KEYS.some((key) => Array.isArray(value[key])));
+
+  if (!hasStructuredEntries) {
+    throw new Error(
+      `structured memory sync unavailable: Ombre MCP ${toolName} returned a human-readable or unsupported payload instead of an entries array`
+    );
+  }
+  if (requiredSchema && (!isRecord(value) || stringValue(value, 'schema') !== requiredSchema)) {
+    throw new Error(
+      `structured memory sync unavailable: Ombre MCP ${toolName} does not support ${requiredSchema}`
+    );
+  }
+
+  const entries = extractEntries(result);
+  const nextCursor = isRecord(value)
+    ? stringValue(value, 'nextCursor')
+      ?? stringValue(value, 'next_cursor')
+      ?? stringValue(value, 'cursor')
+    : null;
+  return { entries, nextCursor };
 }
 
 function extractEntries(result: McpToolCallResult): MemoryEntry[] {
@@ -294,7 +346,7 @@ function extractEntries(result: McpToolCallResult): MemoryEntry[] {
   const candidates = Array.isArray(value)
     ? value
     : isRecord(value)
-      ? firstArray(value, ['entries', 'memories', 'items', 'results', 'data'])
+      ? firstArray(value, STRUCTURED_ENTRY_KEYS)
       : [];
   return candidates.flatMap((item) => toEntry(item));
 }
@@ -335,7 +387,7 @@ function payloadValue(result: McpToolCallResult): unknown {
   try { return JSON.parse(text) as unknown; } catch { return text; }
 }
 
-function firstArray(value: Record<string, unknown>, keys: string[]): unknown[] {
+function firstArray(value: Record<string, unknown>, keys: readonly string[]): unknown[] {
   for (const key of keys) if (Array.isArray(value[key])) return value[key] as unknown[];
   return [];
 }
