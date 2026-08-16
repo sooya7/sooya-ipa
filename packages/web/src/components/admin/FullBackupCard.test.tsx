@@ -8,6 +8,15 @@ const fullBackupAvailable = vi.hoisted(() => vi.fn(() => true));
 const pickFullBackup = vi.hoisted(() => vi.fn());
 const importFullBackup = vi.hoisted(() => vi.fn());
 const exportFullBackup = vi.hoisted(() => vi.fn());
+const releaseCall = vi.hoisted(() => vi.fn());
+
+vi.mock('@capacitor/core', () => ({
+  Capacitor: {
+    Plugins: {
+      SOOYARelease: { call: releaseCall }
+    }
+  }
+}));
 
 vi.mock('../../local/fullBackup.js', () => ({
   fullBackupAvailable,
@@ -27,6 +36,8 @@ beforeEach(() => {
   pickFullBackup.mockReset();
   importFullBackup.mockReset();
   exportFullBackup.mockReset();
+  releaseCall.mockReset();
+  releaseCall.mockResolvedValue({ nativeBaseVersion: 12 });
 });
 
 afterEach(async () => {
@@ -34,9 +45,21 @@ afterEach(async () => {
   container?.remove();
   root = null;
   container = null;
+  vi.restoreAllMocks();
 });
 
 describe('FullBackupCard server migration', () => {
+  it('reads the real native base from SOOYARelease instead of rendering a hard-coded version', async () => {
+    await act(async () => {
+      root!.render(<FullBackupCard onNotice={vi.fn()} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(releaseCall).toHaveBeenCalledWith('getReleaseInfo', {});
+    expect(container!.textContent).toContain('Native Base 12');
+  });
+
   it('recognizes a server migration package and does not ask for a backup password', async () => {
     pickFullBackup.mockResolvedValue({
       archiveName: 'imports/incoming.zip',
@@ -56,6 +79,44 @@ describe('FullBackupCard server migration', () => {
     expect(container!.textContent).toContain('不迁服务器记忆和表情包');
     expect(container!.textContent).toContain('迁入服务器数据');
     expect(container!.querySelector('input[placeholder="未包含密钥可留空"]')).toBeNull();
+  });
+
+  it('re-picks the same archive and immediately retries when the staged iOS copy disappeared', async () => {
+    const picked = {
+      archiveName: 'imports/incoming-first.zip',
+      displayName: 'SOOYA-backup-20260817-024000-abcd1234.zip',
+      bytes: 114 * 1024 * 1024
+    };
+    const repicked = { ...picked, archiveName: 'imports/incoming-second.zip' };
+    const notice = vi.fn();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    pickFullBackup.mockResolvedValueOnce(picked).mockResolvedValueOnce(repicked);
+    importFullBackup
+      .mockRejectedValueOnce(Object.assign(new Error('Backup archive was not found'), { code: 'ARCHIVE_MISSING' }))
+      .mockResolvedValueOnce({ schemaVersion: 12 });
+
+    await act(async () => root!.render(<FullBackupCard onNotice={notice} />));
+    const choose = Array.from(container!.querySelectorAll('button')).find((item) => item.textContent === '选择备份文件') as HTMLButtonElement;
+    await act(async () => {
+      choose.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const restore = Array.from(container!.querySelectorAll('button')).find((item) => item.textContent === '导入并恢复全部内容') as HTMLButtonElement;
+    await act(async () => {
+      restore.click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(pickFullBackup).toHaveBeenCalledTimes(2);
+    expect(importFullBackup).toHaveBeenNthCalledWith(1, picked, '');
+    expect(importFullBackup).toHaveBeenNthCalledWith(2, repicked, '');
+    expect(notice).toHaveBeenCalledWith(expect.stringContaining('iOS 暂存的备份副本已失效'));
+    expect(notice).toHaveBeenCalledWith(expect.stringContaining('完整备份已恢复'));
   });
 
   it('distinguishes the full archive from ordinary database rollback points', async () => {
