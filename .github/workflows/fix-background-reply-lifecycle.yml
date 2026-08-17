@@ -1,0 +1,32 @@
+name: One-shot background reply lifecycle fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/fix-background-reply-lifecycle.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Keep in-flight replies alive when app backgrounds
+        shell: bash
+        run: |
+          python -c "from pathlib import Path; p=Path('packages/core/src/app/local-core.ts'); s=p.read_text(); old=\"  /** Background: stop optional jobs, interrupt replies, checkpoint WAL. */\\n  async onAppInactive(): Promise<void> {\\n    this.appActive = false;\\n    await this.scheduler.deactivate();\\n    this.replies.interruptAll('app_inactive');\\n    try {\"; new=\"  /** Background: pause optional jobs and checkpoint WAL without cancelling user-requested replies. */\\n  async onAppInactive(): Promise<void> {\\n    this.appActive = false;\\n    await this.scheduler.deactivate();\\n    try {\"; assert s.count(old)==1, f'expected one lifecycle block, got {s.count(old)}'; p.write_text(s.replace(old,new,1))"
+          git rm .github/workflows/fix-background-reply-lifecycle.yml
+      - name: Commit fix
+        shell: bash
+        run: |
+          git config user.name sooya7
+          git config user.email 779083953@qq.com
+          git add packages/core/src/app/local-core.ts
+          git diff --cached --check
+          git commit -m "fix(core): keep replies alive when app backgrounds"
+          git push origin HEAD:main
