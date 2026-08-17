@@ -22,11 +22,11 @@ export function messageText(message: ChatMessage): string {
 /**
  * Converts one persisted message into provider model parts.
  *
- * text/audio/sticker/file content stays in the textual lane; only binary
- * images (user images and, when vision is configured, sticker pixels) cross
- * the bridge. Sticker and extracted-file text are explicitly marked as
- * message data so a prompt-injection attempt inside those bytes cannot be
- * mistaken for system policy.
+ * User sticker semantics may cross into model context so the assistant can
+ * understand what the user expressed. Assistant-authored stickers are already
+ * part of the assistant turn, so their private analysis/OCR is never replayed;
+ * history keeps only a compact marker instead of creating a second hidden
+ * assistant message from sticker metadata.
  */
 export async function messageToModelParts(
   message: ChatMessage,
@@ -84,6 +84,14 @@ export async function messageToModelParts(
     }
 
     if (part.type === 'sticker') {
+      if (message.role === 'assistant') {
+        // The model already authored this turn. Replaying sticker OCR, semantic
+        // analysis or the sticker pixels turns private execution metadata into
+        // apparent assistant prose on the next turn, which can then be echoed.
+        pushText('[发送了一个表情包]');
+        continue;
+      }
+
       const sticker = await options.stickerByMediaId?.(part.mediaId).catch(() => undefined);
       if (sticker) {
         const semantic = [
