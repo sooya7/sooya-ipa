@@ -242,7 +242,7 @@ describe('image intents through the media director', () => {
     await run();
 
     expect(imageProvider.generateCalls).toHaveLength(1);
-    expect(imageProvider.generateCalls[0]!.prompt).toContain('identity reference for Sooya');
+    expect(imageProvider.generateCalls[0]!.prompt).not.toContain('reference image');
     expect(imageProvider.generateCalls[0]!.prompt).toContain('雨夜咖啡店');
     const assistant = await messages.get('assistant-1');
     expect(assistant!.status).toBe('sent');
@@ -251,9 +251,6 @@ describe('image intents through the media director', () => {
 
   it('propagates an interrupted director call instead of generating a fallback image', async () => {
     const user = message('u1', 'user', [text('u1-p', '画一张雨夜咖啡店')]);
-    // The DirectorClient-level abort rethrow is covered by client.test.ts;
-    // here we pin the coordinator contract: an interruption-class error from
-    // the director must propagate, never degrade into a fallback generation.
     const interrupted: MediaDirector = {
       image: () => Promise.reject(new StaleGenerationError('director lost its revision'))
     } as unknown as MediaDirector;
@@ -286,7 +283,7 @@ describe('user-image edit path', () => {
 
     await run();
 
-    expect(directorModel.inputs).toHaveLength(0); // director never consulted
+    expect(directorModel.inputs).toHaveLength(0);
     expect(imageProvider.editCalls).toHaveLength(1);
     expect(imageProvider.editCalls[0]!.prompt).toBe('把背景换成海边');
     expect(imageProvider.generateCalls).toHaveLength(0);
@@ -317,12 +314,12 @@ describe('user-image edit path', () => {
     const { imageProvider, directorModel, run } = harness({
       rawText: '[[image:合成两张图]]',
       initialMessages: [older, userA, userB],
-      batchUserIds: ['u1', 'u2'] // only the current batch; the older message must not leak in
+      batchUserIds: ['u1', 'u2']
     });
 
     await run();
 
-    expect(directorModel.inputs).toHaveLength(1); // normal director route, no edit guess
+    expect(directorModel.inputs).toHaveLength(1);
     expect(imageProvider.editCalls).toHaveLength(0);
     expect(imageProvider.generateCalls[0]!.references).toBeUndefined();
   });
@@ -335,12 +332,11 @@ describe('revision fence and orphan cleanup', () => {
   it('destroys the just-saved image and reports superseded when the revision moves on', async () => {
     const user = message('u1', 'user', [text('u1-p', '画一张雨夜咖啡店')]);
     const { messages, batches, media, events, run } = harness({ rawText: '[[image:雨夜咖啡店]]', initialMessages: [user], batchUserIds: ['u1'] });
-    // Move the revision forward as soon as the image is saved.
     const originalSave = media.save.bind(media);
     await (async () => {
       media.save = async (request) => {
         const record = await originalSave(request);
-        batches.revision = 2; // a newer user message landed while generating
+        batches.revision = 2;
         return record;
       };
     })();
