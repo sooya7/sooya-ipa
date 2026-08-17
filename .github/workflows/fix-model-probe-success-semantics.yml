@@ -1,0 +1,43 @@
+name: Fix model probe success semantics
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Patch model probe success semantics
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('packages/core/src/app/local-core.ts')
+          source = path.read_text()
+          probe = source.index('      const probeMaxTokens = 1024;')
+          start = source.index('      const chars = [...result.text.trim()].length;', probe)
+          end_marker = "      return { ok: true, slot: capability, provider: provider.name, model: result.model || configured.model, latencyMs: Date.now() - startedAt, detail: chars ? `模型回了 ${chars} 个字` : emptyDetail };"
+          end = source.index(end_marker, start) + len(end_marker)
+          replacement = """      const chars = [...result.text.trim()].length;
+          const detail = chars
+            ? `模型回了 ${chars} 个字`
+            : `模型端到端请求成功${result.finishReason ? `（finish_reason: ${result.finishReason}）` : ''}`;
+          return { ok: true, slot: capability, provider: provider.name, model: result.model || configured.model, latencyMs: Date.now() - startedAt, detail };"""
+          path.write_text(source[:start] + replacement + source[end:])
+          PY
+
+          rm .github/workflows/fix-model-probe-success-semantics.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/core/src/app/local-core.ts .github/workflows/fix-model-probe-success-semantics.yml
+          git commit -m "fix(admin): treat valid empty probe as connection success"
+          git push origin HEAD:main
