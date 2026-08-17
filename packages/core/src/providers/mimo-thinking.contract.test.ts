@@ -9,5 +9,6 @@ describe('MiMo chat thinking compatibility', () => {
     expect(source).toContain("thinking: { type: 'disabled' }");
     expect(source).toContain("config.options.thinking");
     expect(source).toContain("thinking.type === 'enabled' || thinking.type === 'disabled'");
+    expect(source).toContain("/^mimo[-_/.:]?v?2(?:\\.5)?(?:[-_/.:]|$)/u");
   });
 });
