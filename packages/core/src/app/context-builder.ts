@@ -69,12 +69,15 @@ interface BudgetItem {
   kind: 'batch' | 'persona' | 'recent' | 'world' | 'memory' | 'summary';
   priority: number;
   tokens: number;
+  required?: boolean;
   memoryIndex?: number;
   summaryIndex?: number;
 }
 
 const MAX_DEFAULT_MESSAGES = 28;
 const RECENT_DIRECT_MESSAGES = 8;
+/** The latest two user/assistant exchanges are conversation continuity, not optional recall. */
+const RECENT_CONTINUITY_MESSAGES = 4;
 const PERSONA_PRIORITY = 1000;
 const RECENT_PRIORITY = 600;
 const WORLD_PRIORITY = 550;
@@ -119,6 +122,7 @@ export class ContextBuilder {
       personaPrompt ?? `你是${assistantName}，运行在用户的 iPhone 本地。`,
       '## 本地运行环境',
       '你当前运行在用户的 iPhone 本地。不要声称访问了不存在的服务器服务；只有真实可用的本地能力、Provider 或工具才能被当作已执行。',
+      '本次请求中提供的最近消息就是当前连续对话。只要这些消息里已有前文，就应直接承接它；不要声称“看不到之前的对话”或“记忆从现在开始”。长期记忆与当前对话上下文是两回事。',
       '除非用户明确要求，不要主动发送消息、推送通知或制造任务。',
       `当前本地时间：${this.now().toISOString()}`,
       relationship ? `你们的关系设定：${relationship}` : '',
@@ -167,6 +171,9 @@ export class ContextBuilder {
     recentCandidates.forEach((candidate, index) => {
       candidate.direct = index >= recentCandidates.length - directCount;
     });
+    const continuityIds = new Set(
+      recentCandidates.slice(-RECENT_CONTINUITY_MESSAGES).map((candidate) => candidate.message.id)
+    );
 
     // 4. Cross-source lexical dedupe. Batch content never participates and
     // persona core always wins; recent > memory > summary for the rest.
@@ -190,22 +197,25 @@ export class ContextBuilder {
       if (item.value.kind === 'summary') includedSummaryIndices.add(item.value.index);
     }
     for (const item of deduped.dropped) {
-      if (item.kind === 'recent') dedupeDropCounts.recent += 1;
+      if (item.kind === 'recent') {
+        const candidate = item.value?.kind === 'recent' ? recentCandidates[item.value.index] : undefined;
+        if (!candidate || !continuityIds.has(candidate.message.id)) dedupeDropCounts.recent += 1;
+      }
       if (item.kind === 'memory') dedupeDropCounts.memory += 1;
       if (item.kind === 'summary') dedupeDropCounts.summary += 1;
     }
 
-    // Candidates without searchable text (image-only turns) are not lexically
-    // deduped and always survive to budget allocation.
+    // Candidates without searchable text and immediate continuity turns are
+    // never discarded by cross-source lexical dedupe.
     const dedupedRecentIndices = new Set<number>([
-      ...recentCandidates.map((candidate, index) => candidate.text.trim() ? [] : [index]).flat(),
+      ...recentCandidates.map((candidate, index) => (!candidate.text.trim() || continuityIds.has(candidate.message.id)) ? [index] : []).flat(),
       ...includedRecentTextIndices
     ]);
     const dedupedRecent = recentCandidates.filter((_candidate, index) => dedupedRecentIndices.has(index));
 
-    // 5. Token-budget allocation in server priority order. Mandatory batch and
-    // persona core are never dropped; everything else is admitted until the
-    // remaining provider context budget is exhausted.
+    // 5. Token-budget allocation. Current batch, persona core and immediate
+    // conversation continuity are mandatory. World, memory, summaries and
+    // older turns yield first when the configured budget is tight.
     const worldSection = formatWorldSnapshot(world);
     const summaryDisplay = [...summaries].reverse();
     const direct = dedupedRecent.filter((candidate) => candidate.direct);
@@ -221,7 +231,8 @@ export class ContextBuilder {
         id: `recent:${candidate.message.id}`,
         kind: 'recent' as const,
         priority: RECENT_PRIORITY,
-        tokens: estimateChatTurnTokens(candidate.turn)
+        tokens: estimateChatTurnTokens(candidate.turn),
+        required: continuityIds.has(candidate.message.id)
       })),
       ...(worldSection ? [{ id: 'world', kind: 'world' as const, priority: WORLD_PRIORITY, tokens: estimateSectionTokens('', [worldSection]) }] : []),
       ...dedupedMemory.map((entry) => ({
@@ -251,7 +262,7 @@ export class ContextBuilder {
     const includedSummary = new Set<number>();
     let usedTokens = 0;
     for (const item of budgetItems) {
-      if (item.kind === 'batch' || item.kind === 'persona') {
+      if (item.kind === 'batch' || item.kind === 'persona' || item.required) {
         included.add(item.id);
         usedTokens += item.tokens;
         continue;
