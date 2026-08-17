@@ -59,8 +59,8 @@ export class LocalSooyaClient implements SooyaClient {
   life: SooyaClient['life'] = () => this.core.life();
   presence: SooyaClient['presence'] = () => this.core.presence();
   capabilities: SooyaClient['capabilities'] = () => this.core.capabilities();
-  adminRequest: NonNullable<SooyaClient['adminRequest']> = async (path, options) => {
-    const work = this.core.adminRequest(path, options);
+  adminRequest: NonNullable<SooyaClient['adminRequest']> = async <T = unknown>(path, options): Promise<T> => {
+    const work = this.core.adminRequest<T>(path, options);
     const timeoutMs = localAdminRequestTimeoutMs(path);
     return timeoutMs === null ? await work : await withLocalAdminDeadline(work, timeoutMs);
   };
