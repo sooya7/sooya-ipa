@@ -8,7 +8,9 @@ describe('server parity for reply activity UI', () => {
     expect(source).toContain("chat.connection === 'online' ? chat.activity.thinking ? chat.activity.label ?? '正在输入' : '在线'");
     expect(source).toContain("const hasPendingAssistantImage = useMemo");
     expect(source).toContain("part.type === 'image' && part.status === 'pending' && !part.media");
-    expect(source).toContain("chat.activity.label === '正在生成图片' && hasPendingAssistantImage");
+    expect(source).toContain('const showTypingIndicator = chat.activity.thinking');
+    expect(source).toContain('&& !hasPendingAssistantImage;');
+    expect(source).not.toContain("chat.activity.label === '正在生成图片' && hasPendingAssistantImage");
     expect(source).toContain('data-testid="typing-indicator"');
   });
 
