@@ -16,18 +16,13 @@ function snapChatToLatest(): void {
 
 export default function AppShell() {
   const route = useAppRoute();
-  const [chatStarted, setChatStarted] = useState(route === 'chat');
   const [personaRevision, setPersonaRevision] = useState(0);
-  const shouldMountChat = chatStarted || route === 'chat';
 
-  useEffect(() => {
-    if (route === 'chat') setChatStarted(true);
-  }, [route]);
-
-  // Returning to chat should reopen at the latest message, not revive a stale
-  // history anchor from the previous visit. Keep the session host alive, but
-  // take over the visible scroller after ChatView's layout restore and release
-  // its anchor lock by dispatching the same scroll event a real gesture emits.
+  // Chat is deliberately mounted only while the Messages route is visible.
+  // A fresh ChatSessionHost starts with INITIAL_CHAT_VIEW_STATE
+  // (stickToBottom=true), so a stale history anchor can never survive leaving
+  // Messages and pull the next visit back into the middle of the transcript.
+  // Search/date jumps still work normally during the current chat visit.
   useLayoutEffect(() => {
     if (route !== 'chat') return;
     snapChatToLatest();
@@ -57,7 +52,7 @@ export default function AppShell() {
   }, []);
 
   return <>
-    {shouldMountChat && <ChatSessionHost key={personaRevision} active={route === 'chat'} />}
+    {route === 'chat' && <ChatSessionHost key={personaRevision} active />}
     {(route === 'chat' || route === 'moments') && <ImageViewerHost />}
     {route === 'moments' && <MomentsPage />}
     {route === 'gallery' && <GalleryPage />}
