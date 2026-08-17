@@ -2110,9 +2110,17 @@ export class LocalCore implements LocalCoreApi {
         if (!isRecord(parsed) || parsed.ok !== true) throw new Error('媒体导演连接成功，但没有返回有效 JSON 探针');
         return { ok: true, slot: capability, provider: provider.name, model: result.model || configured.model, latencyMs: Date.now() - startedAt, detail: '媒体导演 JSON 探针通过' };
       }
-      const result = await provider.complete({ messages: [{ role: 'user', content: [{ type: 'text', text: '你好' }] }], maxTokens: 16, signal: controller.signal });
+      const probeMaxTokens = 1024;
+      const result = await provider.complete({
+        messages: [{ role: 'user', content: [{ type: 'text', text: '只回复 OK，不要解释。' }] }],
+        maxTokens: probeMaxTokens,
+        signal: controller.signal
+      });
       const chars = [...result.text.trim()].length;
-      return { ok: true, slot: capability, provider: provider.name, model: result.model || configured.model, latencyMs: Date.now() - startedAt, detail: chars ? `模型回了 ${chars} 个字` : '接口通了，但这次没有返回文本（可能被最大输出 token 截断）' };
+      const emptyDetail = result.finishReason === 'length'
+        ? `接口通了，但 ${probeMaxTokens} token 的探针输出预算已耗尽，仍未返回可见文本`
+        : `接口通了，但没有返回可见文本${result.finishReason ? `（finish_reason: ${result.finishReason}）` : ''}`;
+      return { ok: true, slot: capability, provider: provider.name, model: result.model || configured.model, latencyMs: Date.now() - startedAt, detail: chars ? `模型回了 ${chars} 个字` : emptyDetail };
     } catch (error) {
       return { ok: false, slot: capability, provider: configured.provider, model: configured.model, latencyMs: Date.now() - startedAt, detail: error instanceof Error ? error.message : String(error) };
     } finally {
