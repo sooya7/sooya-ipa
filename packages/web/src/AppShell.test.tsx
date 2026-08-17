@@ -22,16 +22,7 @@ vi.mock('./App.js', () => ({
       lifecycle.chatMounts += 1;
       return () => { lifecycle.chatUnmounts += 1; };
     }, []);
-    return active ? <div data-testid="chat">chat<div
-      data-testid="scroller"
-      ref={(node) => {
-        if (!node || node.dataset.mockScrollReady === 'true') return;
-        node.dataset.mockScrollReady = 'true';
-        Object.defineProperty(node, 'scrollHeight', { configurable: true, value: 1200 });
-        Object.defineProperty(node, 'clientHeight', { configurable: true, value: 300 });
-        node.scrollTop = 111;
-      }}
-    /></div> : null;
+    return active ? <div data-testid="chat">chat</div> : null;
   }
 }));
 
@@ -102,7 +93,7 @@ afterEach(async () => {
 });
 
 describe('AppShell route lifecycle', () => {
-  it('starts chat lazily, preserves its host, and reopens at the latest message', async () => {
+  it('starts chat lazily and recreates it after leaving Messages', async () => {
     const host = await mount('/admin/features');
 
     expect(host.querySelector('[data-testid="admin"]')).not.toBeNull();
@@ -111,15 +102,15 @@ describe('AppShell route lifecycle', () => {
     await act(async () => { navigate('/'); });
 
     expect(lifecycle.chatMounts).toBe(1);
+    expect(lifecycle.chatUnmounts).toBe(0);
     expect(host.querySelector('[data-testid="chat"]')).not.toBeNull();
     expect(host.querySelector('[data-testid="viewer"]')).not.toBeNull();
-    expect(host.querySelector<HTMLElement>('[data-testid="scroller"]')?.scrollTop).toBe(1200);
     expect(lifecycle.adminUnmounts).toBe(1);
 
     await act(async () => { navigate('/moments'); });
 
     expect(lifecycle.chatMounts).toBe(1);
-    expect(lifecycle.chatUnmounts).toBe(0);
+    expect(lifecycle.chatUnmounts).toBe(1);
     expect(host.querySelector('[data-testid="chat"]')).toBeNull();
     expect(host.querySelector('[data-testid="moments"]')).not.toBeNull();
     expect(host.querySelector('[data-testid="viewer"]')).not.toBeNull();
@@ -128,20 +119,21 @@ describe('AppShell route lifecycle', () => {
 
     expect(lifecycle.momentsUnmounts).toBe(1);
     expect(lifecycle.chatMounts).toBe(1);
-    expect(lifecycle.chatUnmounts).toBe(0);
+    expect(lifecycle.chatUnmounts).toBe(1);
     expect(host.querySelector('[data-testid="chat"]')).toBeNull();
     expect(host.querySelector('[data-testid="gallery"]')).not.toBeNull();
 
     await act(async () => { navigate('/'); });
 
-    expect(lifecycle.chatMounts).toBe(1);
+    expect(lifecycle.chatMounts).toBe(2);
+    expect(lifecycle.chatUnmounts).toBe(1);
     expect(lifecycle.galleryUnmounts).toBe(1);
     expect(host.querySelector('[data-testid="chat"]')).not.toBeNull();
-    expect(host.querySelector<HTMLElement>('[data-testid="scroller"]')?.scrollTop).toBe(1200);
 
     window.history.pushState(null, '', '/admin/models');
     await act(async () => { window.dispatchEvent(new PopStateEvent('popstate')); });
 
+    expect(lifecycle.chatUnmounts).toBe(2);
     expect(host.querySelector('[data-testid="admin"]')).not.toBeNull();
     expect(host.querySelector('[data-testid="chat"]')).toBeNull();
   });
