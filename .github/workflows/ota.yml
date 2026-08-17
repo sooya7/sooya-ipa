@@ -41,15 +41,16 @@ jobs:
       - run: npm run build
       - name: Build integrity-gated OTA package
         env:
-          # Keep the user-visible OTA version short and monotonic while also
-          # satisfying the shared identifier validator's minimum length.
-          # The admin UI renders `ota-run-84` as `OTA #84`.
-          RELEASE_ID: ota-run-${{ github.run_number }}
           BUNDLE_TAG: ota-bundle-${{ github.sha }}
           OTA_PRIVATE_KEY: ${{ secrets.OTA_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           test -n "${OTA_PRIVATE_KEY:-}" || { echo 'OTA_PRIVATE_KEY is required'; exit 1; }
+          # The deployed OTA control plane accepts the historical ota-<40 hex>
+          # shape. Encode the monotonic Actions run number into the low 8 hex
+          # digits, keeping the ID server-compatible while the admin UI decodes
+          # it back to a human-readable `OTA #N`.
+          release_id="ota-$(printf '%040x' "${GITHUB_RUN_NUMBER}")"
           bundle_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${BUNDLE_TAG}/bundle.zip"
           # Compatibility gates come from the source of truth (Swift
           # SOOYAReleaseConfig + core migrations) so a native/schema/capability
@@ -61,7 +62,7 @@ jobs:
           node scripts/build-ota.mjs \
             --bundle packages/web/dist \
             --out build/ota \
-            --release-id "$RELEASE_ID" \
+            --release-id "$release_id" \
             --bundle-url "$bundle_url" \
             --native-min "$NATIVE_MIN" --native-max "$NATIVE_MAX" \
             --schema-min "$SCHEMA_MIN" --schema-max "$SCHEMA_MAX" \
@@ -89,7 +90,6 @@ jobs:
       OTA_PUBLISH_URL: ${{ secrets.OTA_PUBLISH_URL }}
       OTA_PUBLISH_TOKEN: ${{ secrets.OTA_PUBLISH_TOKEN }}
       OTA_PRIVATE_KEY: ${{ secrets.OTA_PRIVATE_KEY }}
-      RELEASE_ID: ota-run-${{ github.run_number }}
       BUNDLE_TAG: ota-bundle-${{ github.sha }}
     steps:
       - uses: actions/download-artifact@v4
@@ -103,6 +103,7 @@ jobs:
           test -n "${OTA_PUBLISH_URL:-}" || { echo 'OTA_PUBLISH_URL is required'; exit 1; }
           test -n "${OTA_PUBLISH_TOKEN:-}" || { echo 'OTA_PUBLISH_TOKEN is required'; exit 1; }
 
+          release_id="ota-$(printf '%040x' "${GITHUB_RUN_NUMBER}")"
           base="${OTA_PUBLISH_URL%/}"
           auth=(-H "Authorization: Bearer ${OTA_PUBLISH_TOKEN}")
           bytes="$(stat -c %s build/bundle.zip)"
@@ -144,9 +145,11 @@ jobs:
           curl --fail --show-error --silent --location --head "${bundle_url}" >/dev/null
           manifest_bundle_url="$(node --input-type=module -e "import { readFile } from 'node:fs/promises'; const m=JSON.parse(await readFile('build/ota/ota-manifest.json','utf8')); process.stdout.write(m.bundleUrl ?? '');")"
           manifest_zip_sha="$(node --input-type=module -e "import { readFile } from 'node:fs/promises'; const m=JSON.parse(await readFile('build/ota/ota-manifest.json','utf8')); process.stdout.write(m.bundle?.zipSha256 ?? '');")"
+          manifest_release_id="$(node --input-type=module -e "import { readFile } from 'node:fs/promises'; const m=JSON.parse(await readFile('build/ota/ota-manifest.json','utf8')); process.stdout.write(m.releaseId ?? '');")"
           test "${manifest_bundle_url}" = "${bundle_url}" || { echo 'OTA manifest bundle URL mismatch' >&2; exit 1; }
           test "${manifest_zip_sha}" = "${sha256}" || { echo 'OTA manifest zip checksum mismatch' >&2; exit 1; }
+          test "${manifest_release_id}" = "${release_id}" || { echo 'OTA manifest release ID mismatch' >&2; exit 1; }
 
-          curl --http1.1 --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/manifests/${RELEASE_ID}/ota-manifest.json"
+          curl --http1.1 --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/manifests/${release_id}/ota-manifest.json"
           curl --http1.1 --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/stable.json.tmp"
           curl --http1.1 --fail --retry 3 --retry-all-errors "${auth[@]}" -T build/ota/ota-manifest.json "${base}/stable.json"
