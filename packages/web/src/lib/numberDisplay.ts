@@ -10,7 +10,8 @@ export function formatVital(key: string, value: number | null | undefined): stri
     const rounded = Math.round(value * 10) / 10;
     return `${Number.isInteger(rounded) ? rounded : rounded.toFixed(1)} 小时`;
   }
-  return String(Math.round(value));
+  const displayValue = value >= 0 && value <= 1 ? value * 100 : value;
+  return String(Math.round(displayValue));
 }
 
 export function formatPercent(value: number | null | undefined): string {

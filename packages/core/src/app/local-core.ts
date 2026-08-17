@@ -343,6 +343,15 @@ export class LocalCore implements LocalCoreApi {
       memory: this.memoryProvider,
       provider: options.chatProvider,
       providerFactory: options.chatProviderFactory ?? (options.http ? async () => (await import('../providers/provider-factory.js')).createConfiguredProviders(options.http!, this.configRepo).then((providers) => providers.chat) : undefined),
+      requestConfig: async () => {
+        const config = await this.configRepo.getProvider('chat');
+        const maxTokens = config?.options.maxTokens;
+        const temperature = config?.options.temperature;
+        return {
+          ...(typeof maxTokens === 'number' && maxTokens > 0 ? { maxTokens } : {}),
+          ...(typeof temperature === 'number' && Number.isFinite(temperature) ? { temperature } : {})
+        };
+      },
       webSearch: options.http ? () => createWebSearch(options.http!, this.configRepo) : null,
       toolRuntime: options.toolRuntime,
       contextBuilder: this.contextBuilder,
@@ -570,7 +579,10 @@ export class LocalCore implements LocalCoreApi {
 
   private async localLifeSettings(): Promise<LocalLifeSettings> {
     const stored = await this.settingsRepo.get<Record<string, unknown>>('lifeSettings', defaultLifeSettings());
-    return normalizeLocalLifeSettings(stored);
+    const settings = normalizeLocalLifeSettings(stored);
+    const current = await this.locationRuntime.currentLocation().catch(() => undefined);
+    const offset = current?.time_zone ? offsetMinutesForTimeZone(current.time_zone, this.options.now?.() ?? new Date()) : undefined;
+    return offset === undefined ? settings : { ...settings, tzOffsetMinutes: offset };
   }
 
   /** Native IPA has no deployment env gate. The saved admin switch is the source of truth. */
@@ -2545,7 +2557,20 @@ interface LocalLifeSettings {
 }
 
 function defaultLifeSettings(): LocalLifeSettings {
-  return { reachOut: false, quietGapMinutes: 240, maxReachOutsPerDay: 2, silentFrom: 23, silentTo: 8, tzOffsetMinutes: 480, proactiveMode: 'auto' };
+  return { reachOut: false, quietGapMinutes: 240, maxReachOutsPerDay: 2, silentFrom: 23, silentTo: 8, tzOffsetMinutes: 0, proactiveMode: 'auto' };
+}
+
+function offsetMinutesForTimeZone(timeZone: string, at: Date): number | undefined {
+  try {
+    const name = new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'longOffset' })
+      .formatToParts(at).find((part) => part.type === 'timeZoneName')?.value;
+    const match = /^GMT([+-])(\d{1,2})(?::(\d{2}))?$/u.exec(name ?? '');
+    if (!match) return name === 'GMT' ? 0 : undefined;
+    const minutes = Number(match[2]) * 60 + Number(match[3] ?? 0);
+    return match[1] === '-' ? -minutes : minutes;
+  } catch {
+    return undefined;
+  }
 }
 
 function normalizeLocalLifeSettings(value: Record<string, unknown>): LocalLifeSettings {

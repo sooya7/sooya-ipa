@@ -124,7 +124,7 @@ export class ContextBuilder {
       '你当前运行在用户的 iPhone 本地。不要声称访问了不存在的服务器服务；只有真实可用的本地能力、Provider 或工具才能被当作已执行。',
       '本次请求中提供的最近消息就是当前连续对话。只要这些消息里已有前文，就应直接承接它；不要声称“看不到之前的对话”或“记忆从现在开始”。长期记忆与当前对话上下文是两回事。',
       '除非用户明确要求，不要主动发送消息、推送通知或制造任务。',
-      `当前本地时间：${this.now().toISOString()}`,
+      `当前本地时间：${formatWorldLocalTime(this.now(), world.timeZone)}`,
       relationship ? `你们的关系设定：${relationship}` : '',
       tone ? `表达偏好：${tone}` : '',
       userName ? `用户称呼：${userName}` : ''
@@ -493,6 +493,20 @@ function stringValue(value: unknown): string | undefined {
 
 function longStringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim().slice(0, 64_000) : undefined;
+}
+
+function formatWorldLocalTime(value: Date, timeZone: string | null): string {
+  if (!timeZone) return value.toISOString();
+  try {
+    const formatted = new Intl.DateTimeFormat('zh-CN', {
+      timeZone,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+    }).format(value);
+    return `${formatted} (${timeZone})`;
+  } catch {
+    return value.toISOString();
+  }
 }
 
 async function resolveLimit(

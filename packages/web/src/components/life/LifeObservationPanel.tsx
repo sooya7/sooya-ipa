@@ -68,6 +68,7 @@ function genericLevel(value: number): string {
 }
 
 function vitalDisplay(key: keyof AdminLifeVitals, value: number): VitalDisplay {
+  if (key !== 'sleep_debt' && value >= 0 && value <= 1) value *= 100;
   if (key === 'sleep_debt') {
     if (value <= 0.05) return { label: '无欠债', tone: 'good' };
     if (value <= 1) return { label: '很少', tone: 'muted' };

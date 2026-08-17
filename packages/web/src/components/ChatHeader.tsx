@@ -1,4 +1,4 @@
-import type { ConnectionState, LifeState, PersonaInfo, WorldPresence } from '../lib/types.js';
+import type { ConnectionState, PersonaInfo, WorldPresence } from '../lib/types.js';
 import { AppLink } from './AppLink.js';
 import { HeaderWorldPresence } from './HeaderWorldPresence.js';
 import { NotificationBridge } from './NotificationBridge.js';
@@ -8,7 +8,6 @@ export interface ChatHeaderProps {
   persona: PersonaInfo | null;
   connection: ConnectionState;
   statusLabel: string;
-  life: LifeState | null;
   presence: WorldPresence | null;
   onSearch: () => void;
 }
@@ -20,7 +19,7 @@ function jumpToLatestMessage(): void {
   scroller.dispatchEvent(new Event('scroll'));
 }
 
-export function ChatHeader({ persona, connection, statusLabel, life, presence, onSearch }: ChatHeaderProps) {
+export function ChatHeader({ persona, connection, statusLabel, presence, onSearch }: ChatHeaderProps) {
   return (
     <header className="topbar chat-topbar">
       <div className="topbar-identity">
@@ -28,7 +27,6 @@ export function ChatHeader({ persona, connection, statusLabel, life, presence, o
         <div className="topbar-text">
           <span className="topbar-name">{persona?.name ?? 'SOOYA'}</span>
           <span className={`topbar-status ${connection}`} data-testid="connection-status"><span className="status-dot" /><span className="topbar-status-label">{statusLabel}</span></span>
-          {connection === 'online' && life && <span className="topbar-life" data-testid="life-activity" title={`心情${life.mood}`}>{life.activity}</span>}
         </div>
       </div>
       <HeaderWorldPresence presence={presence} />

@@ -3,7 +3,7 @@ import type { LifePanelData, LifeSnapshot } from './features.js';
 /*
  * 她不开口时，界面上唯一能看到的现象就是「没消息」——被上限挡住、在静默时段、还是
  * 根本没有值得说的事，看起来完全一样。这里把服务端给的 reason 翻成一句能照着改设置
- * 的话，并把时间换算到她所在的时区（她是 UTC+8，浏览器不一定是）。
+ * 的话，并把时间换算到她当前生活地点的时区；浏览器所在时区不一定相同。
  */
 
 export const REACH_REASON_LABELS: Record<string, string> = {

@@ -276,7 +276,7 @@ export class LifeV2Source implements LifeTransitionSource {
   private async timeZone(): Promise<string> {
     if (this.options.timeZone) return this.options.timeZone;
     const location = await this.currentLocation();
-    return location?.timeZone ?? 'Asia/Shanghai';
+    return location?.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? 'UTC';
   }
 
   private async openThreads(): Promise<LifeThread[]> {

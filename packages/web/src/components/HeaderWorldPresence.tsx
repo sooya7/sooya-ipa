@@ -40,8 +40,11 @@ export function HeaderWorldPresence({ presence }: { presence: WorldPresence | nu
   const stale = Boolean(presence?.weather?.stale);
   return (
     <div className={`topbar-world${stale ? ' is-stale stale' : ''}`} data-testid="world-presence" title={stale ? '天气数据较旧，正在尝试更新' : undefined}>
-      {place && <div className="topbar-world-line" data-testid="world-presence-place"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s6-5.2 6-11a6 6 0 1 0-12 0c0 5.8 6 11 6 11Z" /><circle cx="12" cy="10" r="2" /></svg><span>{place}</span></div>}
-      {weather && <div className={`topbar-world-line topbar-world-weather${stale ? ' is-stale' : ''}`} data-testid="world-presence-weather" title={stale ? '天气数据较旧，正在尝试更新' : undefined}><WeatherIcon condition={presence?.weather?.condition ?? 'cloudy'} /><span>{weather}</span></div>}
+      <div className="topbar-world-line" data-testid="world-presence-summary">
+        {place && <><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s6-5.2 6-11a6 6 0 1 0-12 0c0 5.8 6 11 6 11Z" /><circle cx="12" cy="10" r="2" /></svg><span>{place}</span></>}
+        {place && weather && <span className="topbar-world-separator">·</span>}
+        {weather && <><WeatherIcon condition={presence?.weather?.condition ?? 'cloudy'} /><span>{weather}</span></>}
+      </div>
     </div>
   );
 }

@@ -15,14 +15,12 @@
     column-gap: 8px; row-gap: 3px; align-items: center; max-width: 100%;
   }
   .chat-topbar .topbar-identity { grid-area: identity; min-width: 0; gap: 8px; }
-  .chat-topbar .topbar-text { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-areas: 'name name' 'status life'; column-gap: 6px; row-gap: 1px; align-items: center; }
+  .chat-topbar .topbar-text { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-areas: 'name' 'status'; row-gap: 1px; align-items: center; }
   .chat-topbar .topbar-name { grid-area: name; }
   .chat-topbar .topbar-status { grid-area: status; min-width: 0; overflow: hidden; white-space: nowrap; }
   .chat-topbar .topbar-status-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .chat-topbar .topbar-life { grid-area: life; max-width: none; min-width: 0; white-space: nowrap; overflow: hidden; overflow-wrap: normal; text-overflow: ellipsis; line-height: 1.25; }
-  .chat-topbar .topbar-life::before { content: '· '; }
   .chat-topbar .topbar-world { grid-area: world; width: 100%; max-width: none; min-width: 0; padding-left: 42px; padding-right: 2px; font-size: 11px; line-height: 1.25; }
-  .chat-topbar .topbar-world-line { white-space: nowrap; overflow: hidden; min-width: 0; }
+  .chat-topbar .topbar-world-line { display: flex; align-items: center; gap: 4px; white-space: nowrap; overflow: hidden; min-width: 0; }
   .chat-topbar .topbar-world-line span { min-width: 0; overflow: hidden; overflow-wrap: normal; text-overflow: ellipsis; white-space: nowrap; }
   .chat-topbar .topbar-actions { grid-area: actions; justify-self: end; align-self: center; margin-left: 0; margin-right: 8px; min-width: 0; width: max-content; max-width: 100%; gap: 5px; transform: none; }
   .chat-topbar .topbar-actions > * { min-width: 0; }

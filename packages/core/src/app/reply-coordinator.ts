@@ -37,6 +37,8 @@ export interface ReplyCoordinatorOptions {
   memory: MemoryProvider;
   provider?: ChatProvider | null;
   providerFactory?: () => Promise<ChatProvider | null>;
+  /** Saved chat request limits. Resolved per reply so Admin changes take effect immediately. */
+  requestConfig?: () => Promise<{ maxTokens?: number; temperature?: number }>;
   /** Resolves the on-device web-search runtime; searched (and injected into
    * the system prompt) only when decideWebSearch() offers it. */
   webSearch?: (() => Promise<ConfiguredWebSearch | null>) | null;
@@ -110,7 +112,8 @@ export class ReplyCoordinator {
       ).intent;
       const recent = await this.options.messages.recent(32);
       const context = this.options.contextBuilder ? await this.options.contextBuilder.build({ recent, latestUser, batchMessageIds: ids }) : { system: await this.systemPrompt(latestUser), turns: await this.buildTurns(recent, latestUser) };
-      const request: ChatRequest = { system: appendDirectiveProtocol(context.system), messages: context.turns, maxTokens: 2048, temperature: 0.7, signal: controller.signal };
+      const savedRequestConfig = await this.options.requestConfig?.().catch(() => undefined);
+      const request: ChatRequest = { system: appendDirectiveProtocol(context.system), messages: context.turns, maxTokens: savedRequestConfig?.maxTokens ?? 2048, temperature: savedRequestConfig?.temperature ?? 0.7, signal: controller.signal };
       // Web search decision + injection: only when the user asks for current
       // information. Failures degrade the prompt honestly instead of failing
       // the reply (same contract as the server's replier).
