@@ -5,6 +5,8 @@ import { toUploadInput } from '../lib/sooyaClient.js';
 const MODEL_TEST_UI_TIMEOUT_MS = 35_000;
 const IMAGE_TEST_UI_TIMEOUT_MS = 15 * 60_000;
 
+type LocalAdminRequestOptions = { method?: string; body?: unknown; signal?: AbortSignal };
+
 /**
  * Native/local admin requests run in-process, so a bridge promise that never
  * settles would otherwise leave the model-test button stuck forever. Provider
@@ -59,7 +61,10 @@ export class LocalSooyaClient implements SooyaClient {
   life: SooyaClient['life'] = () => this.core.life();
   presence: SooyaClient['presence'] = () => this.core.presence();
   capabilities: SooyaClient['capabilities'] = () => this.core.capabilities();
-  adminRequest: NonNullable<SooyaClient['adminRequest']> = async <T = unknown>(path, options): Promise<T> => {
+  adminRequest: NonNullable<SooyaClient['adminRequest']> = async <T = unknown>(
+    path: string,
+    options?: LocalAdminRequestOptions
+  ): Promise<T> => {
     const work = this.core.adminRequest<T>(path, options);
     const timeoutMs = localAdminRequestTimeoutMs(path);
     return timeoutMs === null ? await work : await withLocalAdminDeadline(work, timeoutMs);
