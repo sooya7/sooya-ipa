@@ -19,7 +19,7 @@ describe('runtime convergence contracts', () => {
   });
 
   it('does not hardcode the character to China time', async () => {
-    const lifeSource = await source('../../life/v2/source.ts');
+    const lifeSource = await source('../life/v2/source.ts');
     const core = await source('./local-core.ts');
     const context = await source('./context-builder.ts');
 
