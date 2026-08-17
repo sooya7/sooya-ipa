@@ -34,6 +34,7 @@ afterEach(async () => {
 
 describe('OtaDiagnosticsCard', () => {
   it('renders monotonic OTA release IDs as a short sequence number', () => {
+    expect(versionText('ota-0000000000000000000000000000000000000058')).toBe('OTA #88');
     expect(versionText('ota-run-84')).toBe('OTA #84');
     expect(versionText('ota-81')).toBe('OTA #81');
     expect(versionText('ota-00e9bfd2ba045835bca08b15891962581a3d6d68')).toBe('ota-00e9bfd2ba045835bca08b15891962581a3d6d68');
@@ -56,8 +57,8 @@ describe('OtaDiagnosticsCard', () => {
     adminRequest.mockResolvedValueOnce({
       manifestUrl: DEFAULT_OTA_MANIFEST_URL,
       state: {
-        current_web_version: 'ota-run-84',
-        last_good_web_version: 'ota-run-83',
+        current_web_version: 'ota-0000000000000000000000000000000000000058',
+        last_good_web_version: 'ota-0000000000000000000000000000000000000057',
         pending_web_version: null
       }
     });
@@ -66,8 +67,8 @@ describe('OtaDiagnosticsCard', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    await vi.waitFor(() => expect(container!.textContent).toContain('OTA #84'));
-    expect(container!.textContent).toContain('OTA #83');
+    await vi.waitFor(() => expect(container!.textContent).toContain('OTA #88'));
+    expect(container!.textContent).toContain('OTA #87');
   });
 
   it('persists the default manifest URL from the diagnostics card', async () => {
@@ -93,8 +94,8 @@ describe('OtaDiagnosticsCard', () => {
   it('checks, downloads and applies an OTA from the manual button without a user cold restart', async () => {
     const notice = vi.fn();
     adminRequest.mockResolvedValue({ manifestUrl: DEFAULT_OTA_MANIFEST_URL, state: {} });
-    checkAndDownload.mockResolvedValue({ checked: true, downloaded: true, releaseId: 'ota-run-84' });
-    applyPendingNow.mockResolvedValue({ applied: true, releaseId: 'ota-run-84' });
+    checkAndDownload.mockResolvedValue({ checked: true, downloaded: true, releaseId: 'ota-0000000000000000000000000000000000000058' });
+    applyPendingNow.mockResolvedValue({ applied: true, releaseId: 'ota-0000000000000000000000000000000000000058' });
 
     await act(async () => {
       root!.render(<OtaDiagnosticsCard onNotice={notice} />);
