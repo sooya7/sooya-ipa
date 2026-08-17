@@ -7,6 +7,7 @@ describe('admin chat model probe', () => {
 
     expect(source).toContain('const probeMaxTokens = 1024;');
     expect(source).toContain("text: '只回复 OK，不要解释。'");
+    expect(source).toContain('maxTokens: probeMaxTokens');
     expect(source).toContain("result.finishReason === 'length'");
     expect(source).toContain('finish_reason: ${result.finishReason}');
     expect(source).not.toContain('maxTokens: 16');
