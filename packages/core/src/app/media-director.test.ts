@@ -24,7 +24,6 @@ describe('MediaDirector.voice', () => {
     const result = await director.voice({ content: '整段正文' }, { mode: '补充', userText: '累了' });
 
     expect(result).toEqual({ text: '早点休息哦', speed: 1.02 });
-    // The voice prompt carries mode/user-text context and the data framing.
     const turn = provider.lastRequest!.messages[0] as { role: 'user'; content: Array<{ type: 'text'; text: string }> };
     const input = turn.content[0]!;
     expect(input.text).toContain('语音模式】补充');
@@ -51,28 +50,41 @@ describe('MediaDirector.voice', () => {
 });
 
 describe('MediaDirector.image', () => {
-  it('returns the expanded prompt with an optional aspect ratio', async () => {
-    const provider = new FakeProvider(async () => ({ text: '{"prompt":"雨夜街角暖黄灯光的小咖啡店，橱窗上有雾气","aspectRatio":"3:4"}', model: 'd' }));
+  it('returns the expanded prompt without targeting a legacy provider', async () => {
+    const provider = new FakeProvider(async () => ({ text: '{"prompt":"A small cafe on a rainy street at night.","aspectRatio":"3:4"}', model: 'd' }));
     const director = new MediaDirector(new DirectorClient(() => provider));
 
     const result = await director.image({ scene: '雨夜咖啡店', intent: 'private snapshot' });
 
-    expect(result.prompt).toContain('雨夜');
+    expect(result.prompt).toContain('cafe');
     expect(result.aspectRatio).toBe('3:4');
     const turn = provider.lastRequest!.messages[0] as { role: 'user'; content: Array<{ type: 'text'; text: string }> };
     const input = turn.content[0]!;
-    expect(input.text).toContain('Image2 Prompt');
+    expect(input.text).toContain('当前图片生成模型');
+    expect(input.text).not.toContain('Nano Banana 2');
+    expect(provider.lastRequest!.maxTokens).toBe(300);
   });
 
-  it('uses the deterministic fallback prompt when the director fails', async () => {
+  it('keeps one identity instruction for selfie fallback', async () => {
     const director = new MediaDirector(new DirectorClient(() => null));
 
     const result = await director.image({ scene: '窗边', action: '站着看雨', intent: 'selfie' });
 
     expect(result.prompt).toBe(fallbackImagePrompt({ scene: '窗边', action: '站着看雨', intent: 'selfie' }));
-    expect(result.prompt).toContain('identity reference for Sooya');
-    expect(result.prompt).toContain('natural smartphone photography');
+    expect(result.prompt).toContain('same person shown in the provided reference image');
+    expect(result.prompt).toContain('casual smartphone selfie');
+    expect(result.prompt.match(/reference image/gu)).toHaveLength(1);
     expect(result.aspectRatio).toBeUndefined();
+  });
+
+  it('never invents a reference image for an ordinary snapshot fallback', async () => {
+    const director = new MediaDirector(new DirectorClient(() => null));
+
+    const result = await director.image({ scene: '雨夜咖啡店', intent: 'private snapshot' });
+
+    expect(result.prompt).toContain('雨夜咖啡店');
+    expect(result.prompt).toContain('casual everyday smartphone snapshot');
+    expect(result.prompt).not.toContain('reference image');
   });
 });
 
