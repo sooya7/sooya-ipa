@@ -31,13 +31,14 @@ function dateText(value: string | null | undefined): string {
 
 export function versionText(value: string | null | undefined): string {
   if (!value) return '暂无';
-  const legacySequence = /^ota-(?:run-)?(\d+)$/iu.exec(value)?.[1];
-  if (legacySequence) return `OTA #${Number(legacySequence)}`;
   // New releases keep the OTA server's historical ota-<40 hex> contract, but
   // reserve 32 leading zeroes and encode the monotonic workflow run number in
-  // the final 8 hex digits. Real historical SHA release IDs remain untouched.
+  // the final 8 hex digits. Check this before the decimal compatibility form,
+  // because an encoded value containing only 0-9 would otherwise match it too.
   const encodedSequence = /^ota-0{32}([0-9a-f]{8})$/iu.exec(value)?.[1];
   if (encodedSequence) return `OTA #${Number.parseInt(encodedSequence, 16)}`;
+  const legacySequence = /^ota-(?:run-)?(\d+)$/iu.exec(value)?.[1];
+  if (legacySequence) return `OTA #${Number(legacySequence)}`;
   return value;
 }
 
