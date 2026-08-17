@@ -409,7 +409,7 @@ describe('voice V2 through the reply pipeline', () => {
     h.director.complete = async (request: ChatRequest) => {
       const result = await originalComplete(request);
       const input = request.messages.map((t) => (t as { content: Array<{ text?: string }> }).content.map((p) => p.text ?? '').join('')).join('');
-      if (input.includes('Image2')) { imageExpanded = true; return { text: '{"prompt":"一只蜷着打盹的橘猫，暖黄台灯，真实手机摄影质感","aspectRatio":"3:4"}', model: 'director-model' }; }
+      if (input.includes('当前图片生成模型')) { imageExpanded = true; return { text: '{"prompt":"一只蜷着打盹的橘猫，暖黄台灯，真实手机摄影质感","aspectRatio":"3:4"}', model: 'director-model' }; }
       return result;
     };
 
