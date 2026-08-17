@@ -118,6 +118,18 @@ export function installReplyImageJobs(): void {
     if (imagePrompt && runtime && provider?.configured && isJobCapableImageProvider(provider)) {
       try {
         const prepared = await prepareImageJob(this, runtime, imagePrompt, selfImage, context, signal);
+        // Persist the prepared request before POST /image-jobs. If iOS suspends
+        // the app after the server accepts the POST but before its response is
+        // stored locally, recovery can safely resubmit the same clientRequestId.
+        pendingMeta = {
+          ...pendingMeta,
+          imageState: 'creating',
+          preparedPrompt: prepared.prompt,
+          ...(prepared.aspectRatio ? { aspectRatio: prepared.aspectRatio } : {}),
+          ...(prepared.referenceMediaId ? { referenceMediaId: prepared.referenceMediaId, editedUserImage: true } : {})
+        };
+        await this.options.messages.updatePart(pendingPartId, { status: 'pending', meta: pendingMeta });
+        await emitMessageUpdated(this.options, messageId);
         const lifecycle = {
           clientRequestId,
           onState: async (state: ImageJobLifecycleState) => {
@@ -211,13 +223,57 @@ export function installReplyImageJobs(): void {
     for (const message of recent) {
       for (const part of message.content) {
         if (part.type !== 'image' || part.status !== 'pending' || activeRecoveredParts.has(part.id)) continue;
-        const remoteJobId = cleanString(part.meta.remoteJobId);
+        let remoteJobId = cleanString(part.meta.remoteJobId);
         const clientRequestId = cleanString(part.meta.clientRequestId);
         if (!remoteJobId && !clientRequestId) continue;
         if (part.meta.imageState === 'legacy') {
           await failPendingPart(this.options, message.id, part.id, part.meta, new Error('上次图片生成在旧同步通道中断，请重新生成'));
           continue;
         }
+
+        let recoveredMeta = { ...part.meta };
+        const recoverPrompt = cleanString(part.meta.preparedPrompt) ?? cleanString(part.meta.prompt) ?? '';
+        if (!remoteJobId && clientRequestId) {
+          if (!recoverPrompt) {
+            await failPendingPart(this.options, message.id, part.id, recoveredMeta, new Error('图片任务缺少可恢复的生成参数，请重新生成'));
+            continue;
+          }
+          try {
+            const references = await recoverImageReferences(runtime, recoveredMeta, recoverPrompt);
+            const lifecycle = {
+              clientRequestId,
+              onState: async (state: ImageJobLifecycleState) => {
+                recoveredMeta = {
+                  ...recoveredMeta,
+                  imageState: state.state,
+                  ...(state.remoteJobId ? { remoteJobId: state.remoteJobId } : {}),
+                  ...(state.error ? { jobError: state.error } : {})
+                };
+                await this.options.messages.updatePart(part.id, { status: 'pending', meta: recoveredMeta });
+                await emitMessageUpdated(this.options, message.id);
+              }
+            };
+            // startJob is intentionally idempotent by clientRequestId. A lost
+            // POST response therefore becomes "return the existing job or create
+            // it once" instead of a permanent recovery failure.
+            const restarted = await provider.startJob(recoverPrompt, {
+              ...(references.length ? { referenceImages: references } : {})
+            }, lifecycle);
+            remoteJobId = restarted.jobId;
+            recoveredMeta = {
+              ...recoveredMeta,
+              imageState: 'queued',
+              preparedPrompt: recoverPrompt,
+              remoteJobId
+            };
+            await this.options.messages.updatePart(part.id, { status: 'pending', meta: recoveredMeta });
+            await emitMessageUpdated(this.options, message.id);
+          } catch (error) {
+            await failPendingPart(this.options, message.id, part.id, recoveredMeta, error);
+            continue;
+          }
+        }
+
         activeRecoveredParts.add(part.id);
         void finishDetachedJob({
           options: this.options,
@@ -225,11 +281,11 @@ export function installReplyImageJobs(): void {
           provider,
           messageId: message.id,
           partId: part.id,
-          prompt: cleanString(part.meta.prompt) ?? '',
+          prompt: cleanString(part.meta.prompt) ?? recoverPrompt,
           selfImage: part.meta.selfImage === true,
           clientRequestId: clientRequestId ?? imageRequestId(),
           jobId: remoteJobId,
-          initialMeta: part.meta,
+          initialMeta: recoveredMeta,
           signal: undefined
         }).finally(() => activeRecoveredParts.delete(part.id));
       }
@@ -280,6 +336,20 @@ async function prepareImageJob(
 
   const references = selfImage ? await runtime.referenceImages?.(finalPrompt) ?? [] : [];
   return { prompt: finalPrompt, references, aspectRatio };
+}
+
+async function recoverImageReferences(
+  runtime: ReplyFeatureRuntime,
+  meta: Record<string, unknown>,
+  prompt: string
+): Promise<Array<{ data: Uint8Array; mime: string }>> {
+  const referenceMediaId = cleanString(meta.referenceMediaId);
+  if (referenceMediaId) {
+    const read = await runtime.media.read(referenceMediaId);
+    if (read) return [{ data: read.data instanceof Uint8Array ? read.data : new Uint8Array(read.data), mime: read.record.mime }];
+  }
+  if (meta.selfImage === true) return await runtime.referenceImages?.(prompt) ?? [];
+  return [];
 }
 
 async function finishDetachedJob(input: {
