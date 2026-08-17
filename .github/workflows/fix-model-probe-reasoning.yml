@@ -23,41 +23,46 @@ jobs:
 
           source_path = Path('packages/core/src/app/local-core.ts')
           source = source_path.read_text()
-          old = """      const result = await provider.complete({ messages: [{ role: 'user', content: [{ type: 'text', text: '你好' }] }], maxTokens: 16, signal: controller.signal });
-          const chars = [...result.text.trim()].length;
-          return { ok: true, slot: capability, provider: provider.name, model: result.model || configured.model, latencyMs: Date.now() - startedAt, detail: chars ? `模型回了 ${chars} 个字` : '接口通了，但这次没有返回文本（可能被最大输出 token 截断）' };"""
-          new = """      const probeMaxTokens = 1024;
-          const result = await provider.complete({
-            messages: [{ role: 'user', content: [{ type: 'text', text: '只回复 OK，不要解释。' }] }],
-            maxTokens: probeMaxTokens,
-            signal: controller.signal
-          });
-          const chars = [...result.text.trim()].length;
-          const emptyDetail = result.finishReason === 'length'
-            ? `接口通了，但 ${probeMaxTokens} token 的探针输出预算已耗尽，仍未返回可见文本`
-            : `接口通了，但没有返回可见文本${result.finishReason ? `（finish_reason: ${result.finishReason}）` : ''}`;
-          return { ok: true, slot: capability, provider: provider.name, model: result.model || configured.model, latencyMs: Date.now() - startedAt, detail: chars ? `模型回了 ${chars} 个字` : emptyDetail };"""
-          if source.count(old) != 1:
-              raise SystemExit(f'expected exactly one legacy probe block, found {source.count(old)}')
-          source_path.write_text(source.replace(old, new, 1))
+
+          old_call = "const result = await provider.complete({ messages: [{ role: 'user', content: [{ type: 'text', text: '你好' }] }], maxTokens: 16, signal: controller.signal });"
+          new_call = """const probeMaxTokens = 1024;
+                const result = await provider.complete({
+                  messages: [{ role: 'user', content: [{ type: 'text', text: '只回复 OK，不要解释。' }] }],
+                  maxTokens: probeMaxTokens,
+                  signal: controller.signal
+                });"""
+          if source.count(old_call) != 1:
+              raise SystemExit(f'expected exactly one legacy probe call, found {source.count(old_call)}')
+          source = source.replace(old_call, new_call, 1)
+
+          old_return = "return { ok: true, slot: capability, provider: provider.name, model: result.model || configured.model, latencyMs: Date.now() - startedAt, detail: chars ? `模型回了 ${chars} 个字` : '接口通了，但这次没有返回文本（可能被最大输出 token 截断）' };"
+          new_return = """const emptyDetail = result.finishReason === 'length'
+                  ? `接口通了，但 ${probeMaxTokens} token 的探针输出预算已耗尽，仍未返回可见文本`
+                  : `接口通了，但没有返回可见文本${result.finishReason ? `（finish_reason: ${result.finishReason}）` : ''}`;
+                return { ok: true, slot: capability, provider: provider.name, model: result.model || configured.model, latencyMs: Date.now() - startedAt, detail: chars ? `模型回了 ${chars} 个字` : emptyDetail };"""
+          if source.count(old_return) != 1:
+              raise SystemExit(f'expected exactly one legacy probe result, found {source.count(old_return)}')
+          source_path.write_text(source.replace(old_return, new_return, 1))
 
           test_path = Path('packages/core/src/app/model-probe-reasoning.contract.test.ts')
-          test_path.write_text("""import { readFile } from 'node:fs/promises';
-          import { describe, expect, it } from 'vitest';
-
-          describe('admin chat model probe', () => {
-            it('gives reasoning models room to produce visible text and reports empty output accurately', async () => {
-              const source = await readFile(new URL('./local-core.ts', import.meta.url), 'utf8');
-
-              expect(source).toContain('const probeMaxTokens = 1024;');
-              expect(source).toContain("text: '只回复 OK，不要解释。'");
-              expect(source).toContain("result.finishReason === 'length'");
-              expect(source).toContain('finish_reason: ${result.finishReason}');
-              expect(source).not.toContain('maxTokens: 16');
-              expect(source).not.toContain('可能被最大输出 token 截断');
-            });
-          });
-          """)
+          test_path.write_text("\n".join([
+              "import { readFile } from 'node:fs/promises';",
+              "import { describe, expect, it } from 'vitest';",
+              "",
+              "describe('admin chat model probe', () => {",
+              "  it('gives reasoning models room to produce visible text and reports empty output accurately', async () => {",
+              "    const source = await readFile(new URL('./local-core.ts', import.meta.url), 'utf8');",
+              "",
+              "    expect(source).toContain('const probeMaxTokens = 1024;');",
+              "    expect(source).toContain(\"text: '只回复 OK，不要解释。'\");",
+              "    expect(source).toContain(\"result.finishReason === 'length'\");",
+              "    expect(source).toContain('finish_reason: ${result.finishReason}');",
+              "    expect(source).not.toContain('maxTokens: 16');",
+              "    expect(source).not.toContain('可能被最大输出 token 截断');",
+              "  });",
+              "});",
+              ""
+          ]))
           PY
 
           rm .github/workflows/fix-model-probe-reasoning.yml
