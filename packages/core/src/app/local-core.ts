@@ -587,11 +587,10 @@ export class LocalCore implements LocalCoreApi {
     }
   }
 
-  /** Background: stop optional jobs, interrupt replies, checkpoint WAL. */
+  /** Background: pause optional jobs and checkpoint WAL without cancelling user-requested replies. */
   async onAppInactive(): Promise<void> {
     this.appActive = false;
     await this.scheduler.deactivate();
-    this.replies.interruptAll('app_inactive');
     try {
       await this.options.db.execute('PRAGMA wal_checkpoint(TRUNCATE)');
     } catch { /* checkpoint is best-effort */ }
