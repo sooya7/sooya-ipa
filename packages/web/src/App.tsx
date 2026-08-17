@@ -65,14 +65,19 @@ export function ChatView({ chat }: { chat: ChatController }) {
   useLayoutEffect(() => {
     const el = scrollerRef.current; if (!el) return; const messages = chat.messages; const count = messages.length; const lastId = messages[count - 1]?.id ?? null;
     if (!didInitialScrollRef.current && count > 0) {
-    didInitialScrollRef.current = true; prevLastIdRef.current = lastId;
-    virtualizer.scrollToIndex(count - 1, { align: 'end' });
-    window.requestAnimationFrame(() => {
-      if (scrollerRef.current) virtualizer.scrollToIndex(count - 1, { align: 'end' });
-    });
-    return;
-  }
-  const appended = countAppended(messages, prevLastIdRef.current);
+      didInitialScrollRef.current = true; prevLastIdRef.current = lastId;
+      // Reopen has one owner: the live scroller bottom. Never cache a message index here.
+      // Older messages may be prepended before the next frame; an index captured now would
+      // then point into the middle of history instead of at the latest message.
+      const scrollToLatest = () => {
+        const current = scrollerRef.current;
+        if (current) current.scrollTop = current.scrollHeight;
+      };
+      scrollToLatest();
+      window.requestAnimationFrame(scrollToLatest);
+      return;
+    }
+    const appended = countAppended(messages, prevLastIdRef.current);
     if (loadingOlderRef.current) {
       // 向前翻页补偿：滚动量 = 首个渲染条目的 start 增量（= 前置消息的总高度）。
       // 不能用 getTotalSize() 差值——它混入其他条目的测高校正，会让补偿过头。
