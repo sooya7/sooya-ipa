@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "sideEffects": false,
+  "sideEffects": [
+    "./src/app/reply-image-job-install.ts"
+  ],
   "exports": {
     ".": {
       "types": "./src/tools/index.ts",
