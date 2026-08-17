@@ -253,7 +253,7 @@ export function ChatView({ chat, viewStateRef }: { chat: ChatController; viewSta
   } : null, [chat.streamingDraft]);
   const showTypingIndicator = chat.activity.thinking
     && !streamingMessage
-    && !(chat.activity.label === '正在生成图片' && hasPendingAssistantImage);
+    && !hasPendingAssistantImage;
 
   if (chat.connection === 'unauthorized') return <div className="gate"><div className="gate-card"><h1>SOOYA</h1><p>这台服务器需要访问令牌。</p><input type="password" value={tokenInput} placeholder="WEB_CHAT_TOKEN" onChange={(e) => setTokenInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && tokenInput.trim()) { setToken(tokenInput.trim()); location.reload(); } }} /><button type="button" onClick={() => { if (tokenInput.trim()) { setToken(tokenInput.trim()); location.reload(); } }}>进入</button></div></div>;
 
