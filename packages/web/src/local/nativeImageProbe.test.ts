@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { HttpPlatform, HttpRequest, HttpResponse, HttpResponseHead } from '@sooya/core/platform';
-import { probeNativeModel, type NativeProbeReferenceImage } from './NativeLocalCore.js';
+import { probeNativeSelfieImage, type NativeProbeReferenceImage } from './NativeLocalCore.js';
 
 const REFERENCE_PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -42,28 +42,20 @@ function routingHttp(mode: 'ok' | 'generation-error'): { http: HttpPlatform; req
   return { http, requests };
 }
 
-describe('native image probe server parity', () => {
-  it('text-to-image probe sends no hardcoded size and follows the Anuma protocol', async () => {
-    const { http, requests } = routingHttp('ok');
-    const result = await probeNativeModel(http, imageConfig(), 'image', { forceImage: true });
+function referenceImages(): Promise<NativeProbeReferenceImage[]> {
+  return Promise.resolve([{ data: REFERENCE_PNG, mime: 'image/png', framing: 'front' }]);
+}
 
-    expect(requests).toHaveLength(1);
-    expect(requests[0]?.url).toBe('https://anuma.sooya.icu/images/generations');
-    const body = JSON.parse(String(requests[0]?.body)) as Record<string, unknown>;
-    expect(body).toEqual({ model: 'sooya-image-v1', prompt: '生成一张简单的抽象色块测试图', n: 1 });
-    expect(body).not.toHaveProperty('size');
-    expect(result.mode).toBe('text-to-image');
-  });
-
-  it('selfie probe uploads exactly one selected reference and reuses the same pipeline', async () => {
+describe('native selfie probe', () => {
+  it('uploads exactly one selected reference and reuses the image pipeline', async () => {
     const { http, requests } = routingHttp('ok');
     const seenHints: string[] = [];
-    const referenceImages = async (hint?: string): Promise<NativeProbeReferenceImage[]> => {
+    const references = async (hint?: string): Promise<NativeProbeReferenceImage[]> => {
       seenHints.push(hint ?? '');
-      return [{ data: REFERENCE_PNG, mime: 'image/png', framing: 'front' }];
+      return await referenceImages();
     };
 
-    const result = await probeNativeModel(http, imageConfig(), 'image', { forceImage: true, selfie: true, referenceImages });
+    const result = await probeNativeSelfieImage(http, imageConfig(), { referenceImages: references });
 
     expect(seenHints).toHaveLength(1);
     expect(requests.map((request) => request.url)).toEqual([
@@ -78,9 +70,9 @@ describe('native image probe server parity', () => {
     expect(result.detail).toContain('自拍链路正常');
   });
 
-  it('surfaces the pipeline stage and HTTP status when generation fails', async () => {
+  it('surfaces the pipeline stage and HTTP status when selfie generation fails', async () => {
     const { http } = routingHttp('generation-error');
-    await expect(probeNativeModel(http, imageConfig(), 'image', { forceImage: true }))
-      .rejects.toThrow(/图片生成失败 · 阶段：图片生成 · HTTP 400/u);
+    await expect(probeNativeSelfieImage(http, imageConfig(), { referenceImages }))
+      .rejects.toThrow(/图片自拍链路失败 · 阶段：图片生成 · HTTP 400/u);
   });
 });
