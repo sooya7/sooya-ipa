@@ -103,6 +103,7 @@ export class BuiltinChatProvider extends BuiltinProvider implements ChatProvider
         messages: toOpenAiMessages(effective),
         ...(effective.maxTokens ? { max_tokens: effective.maxTokens } : {}),
         ...(effective.temperature !== undefined ? { temperature: effective.temperature } : {}),
+        ...openAiVendorBody(this.config),
         ...(nativeJson ? { response_format: { type: 'json_object' } } : {}),
         ...(effective.tools?.length ? { tools: effective.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })) } : {}),
         ...(effective.toolChoice ? { tool_choice: effective.toolChoice === 'none' ? 'none' : effective.toolChoice === 'auto' ? 'auto' : { type: 'function', function: { name: effective.toolChoice.name } } } : {})
@@ -161,6 +162,7 @@ export class BuiltinChatProvider extends BuiltinProvider implements ChatProvider
         stream: true,
         ...(request.maxTokens ? { max_tokens: request.maxTokens } : {}),
         ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+        ...openAiVendorBody(this.config),
         ...(request.jsonMode ? { response_format: { type: 'json_object' } } : {}),
         ...(request.tools?.length ? { tools: request.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })) } : {}),
         ...(request.toolChoice ? { tool_choice: request.toolChoice === 'none' ? 'none' : request.toolChoice === 'auto' ? 'auto' : { type: 'function', function: { name: request.toolChoice.name } } } : {})
@@ -261,6 +263,18 @@ export class BuiltinRerankProvider extends BuiltinProvider implements RerankProv
     return rows.flatMap((row) => isRecord(row) && typeof row.index === 'number' && Number.isInteger(row.index) && typeof row.relevance_score === 'number' ? [{ index: row.index, score: row.relevance_score }] : []);
   }
   async inspectHealth(): Promise<HealthStatus> { return this.health('rerank'); }
+}
+
+function openAiVendorBody(config: ProviderConfig): Record<string, unknown> {
+  const thinking = config.options.thinking;
+  if (isRecord(thinking) && (thinking.type === 'enabled' || thinking.type === 'disabled')) return { thinking };
+  const model = config.model.trim().toLowerCase();
+  // MiMo V2.5 thinking responses carry reasoning_content that must be round-tripped
+  // on later turns. SOOYA's canonical chat history intentionally stores one visible
+  // message stream, not a second hidden reasoning transcript, so disable MiMo thinking
+  // unless the operator explicitly opts into a future reasoning-aware protocol.
+  if (/^mimo[-_/.:]?v?2(?:\.5)?(?:[-_/.:]|$)/u.test(model)) return { thinking: { type: 'disabled' } };
+  return {};
 }
 
 function numberValue(value: unknown): number | undefined { return typeof value === 'number' ? value : undefined; }
