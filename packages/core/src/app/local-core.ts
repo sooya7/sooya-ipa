@@ -2117,10 +2117,10 @@ export class LocalCore implements LocalCoreApi {
         signal: controller.signal
       });
       const chars = [...result.text.trim()].length;
-      const emptyDetail = result.finishReason === 'length'
-        ? `接口通了，但 ${probeMaxTokens} token 的探针输出预算已耗尽，仍未返回可见文本`
-        : `接口通了，但没有返回可见文本${result.finishReason ? `（finish_reason: ${result.finishReason}）` : ''}`;
-      return { ok: true, slot: capability, provider: provider.name, model: result.model || configured.model, latencyMs: Date.now() - startedAt, detail: chars ? `模型回了 ${chars} 个字` : emptyDetail };
+const detail = chars
+  ? `模型回了 ${chars} 个字`
+  : `模型端到端请求成功${result.finishReason ? `（finish_reason: ${result.finishReason}）` : ''}`;
+return { ok: true, slot: capability, provider: provider.name, model: result.model || configured.model, latencyMs: Date.now() - startedAt, detail };
     } catch (error) {
       return { ok: false, slot: capability, provider: configured.provider, model: configured.model, latencyMs: Date.now() - startedAt, detail: error instanceof Error ? error.message : String(error) };
     } finally {
